@@ -2,7 +2,22 @@
 
 **Lia** é uma IA feita para rodar **localmente** em computadores pessoais: inferência, treinamento e memória na própria máquina, com postura **agêntica** completa — ela assume tarefas no PC, opera o sistema operacional e conversa com o hardware.
 
-> Status: **fase de planejamento.** Ainda não há código funcional. Veja o [PLANO.md](PLANO.md).
+> Status: **início da implementação.** Veja o [PLANO.md](PLANO.md).
+
+## Como usar hoje (Linux x86-64)
+
+```sh
+make            # compila build/lia e build/lia-cat (estáticos, sem libc)
+make teste      # testes reais nesta máquina
+
+build/lia tools discover        # inventário dos executáveis do sistema
+build/lia tools probe --safe    # testa os que têm probe seguro conhecido
+build/lia tools list --estado PROBE_SUCCESS
+build/lia shell                 # shell do usuário
+build/lia root --status         # root está disponível via sudo?
+build/lia root                  # shell de root via sudo (você autentica)
+build/lia root -- id -u         # um comando como root
+```
 
 ## Princípios
 
@@ -10,7 +25,7 @@
 2. **Performance acima de conveniência.** Núcleo em **Assembly**, suporte em **C**, sem dependências pesadas.
 3. **Ler e interpretar dados — de verdade.** Lia parte dos bytes, não do texto. Todo arquivo do sistema (PDF, imagem, binário ELF, áudio, planilha, banco de dados) é lido por um decodificador próprio, escrito para aquele formato.
 4. **A máquina é o contexto.** Lia prefere caminhos voltados ao sistema em que está instalada (syscalls, `/proc`, `/sys`, dispositivos) a interpretar texto puro.
-5. **Poder total, rastreável.** Acesso a root/sudo/Admin, entrada e saída (mouse, teclado, tela), configuração do SO e hardware — com cada ação registrada e auditável.
+5. **Poder total, rastreável.** Primeiro objetivo: shell, sudo e root o quanto antes (via `sudo` real, com a autenticação da pessoa). Acesso a root/sudo/Admin, entrada e saída (mouse, teclado, tela), configuração do SO e hardware — com cada ação registrada e auditável.
 6. **Aprende e compartilha.** Treinamento local (adaptadores) e troca de conhecimento entre instalações.
 
 ## Arquitetura (resumo)

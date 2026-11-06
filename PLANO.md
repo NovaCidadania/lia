@@ -139,9 +139,16 @@ A Lia age no computador por meio de **ferramentas** com interface uniforme (nome
 | Serviços | systemd (D-Bus) | SCM / launchd |
 | Hardware | `/sys`, `/proc`, PCI config space, USB (`usbfs`), I²C/SMBus, sensores (hwmon), `ioctl`, MSR (`/dev/cpu/*/msr`) | WMI, IOKit |
 
-**Privilégios — poder total com rastreabilidade:**
+**Privilégios — objetivo inicial: shell, sudo e root o quanto antes.**
 
-A Lia é projetada para operar como root/Admin. Para isso ser sustentável no PC de uma pessoa:
+Rodar shell e `sudo` e obter root no dispositivo é a primeira capacidade da Lia (comandos `lia shell`, `lia sudo`, `lia root`, já implementados). Regras:
+
+- Root é obtido pelo caminho legítimo do sistema: o `sudo` real, com a autenticação da própria pessoa (`lia root --auth` = `sudo -v`; `lia root --status` diz se já está disponível). A Lia **não guarda senha** e **não explora vulnerabilidades** para escalar privilégio. Para a Lia obter root sem prompt, a pessoa decide e configura (ex.: uma regra em `/etc/sudoers.d/`); a Lia não edita o sudoers por conta própria.
+- Execução sempre por `execve` direto, sem shell implícito; semântica de shell só com `lia shell -c` (explícito).
+- Toda execução é registrada em `~/.lia/humano/auditoria/AAAA-MM-DD.log` **antes** de rodar.
+- O inventário (`lia tools probe --safe`) continua sem privilégios de propósito: probes automáticos não rodam comandos como root.
+
+Endurecimento previsto para depois, sem bloquear o objetivo acima:
 
 1. **Níveis de poder** configuráveis em `~/.lia/humano/permissoes.toml`: `leitura` → `usuario` → `admin` → `hardware`. O usuário define até onde a Lia vai sem perguntar.
 2. **Processo auxiliar privilegiado separado** (`lia-raiz`): o processo principal roda como usuário; ações root passam por um socket Unix para um auxiliar pequeno e auditável. Isso mantém o código que roda como root mínimo.
@@ -205,6 +212,7 @@ Regras:
 | Fase | Entrega | Critério de conclusão |
 |---|---|---|
 | **0 — Fundação** | Repositório, `make`, ABI documentada, CI (build + testes) | `make && make teste` passa limpo |
+| **0.5 — Shell, sudo e root** | `lia shell`, `lia sudo`, `lia root`, auditoria, inventário de ferramentas (`lia tools`) em C freestanding | `make teste` passa na máquina de desenvolvimento, inclusive `lia root -- id -u` = 0 |
 | **1 — Núcleo de I/O** | Primitivas L0 + `lia-echo`, `lia-cat`, `lia-hex`, `lia-tipo` em Assembly | Saída byte-a-byte idêntica a `cat`/`xxd`; vazão de `lia-cat` ≥ `cat` do coreutils em arquivos de 1 GiB |
 | **2 — Runtime** | Alocador, strings, estruturas, config TOML | Testes contra oráculos em C; zero vazamento sob valgrind |
 | **3 — Ponte com o modelo** | Cliente Ollama em C, `lia pergunta "..."` | Resposta em streaming a partir de um Llama local |
@@ -242,10 +250,15 @@ Performance é requisito, então é medida desde a fase 1:
 5. Licença do projeto.
 6. Tradução ou não dos nomes de primitivas POSIX.
 
-## 9. Próximo passo imediato
+## 9. Modus operandi
 
-Fase 0 + início da fase 1:
-1. `Makefile` e estrutura de diretórios.
-2. `nucleo/x86_64/syscall.S` com `lia_read`, `lia_write`, `lia_open`, `lia_close`, `lia_exit`.
-3. `ferramentas/lia-cat.S` — primeiro binário da Lia, sem libc.
-4. Teste comparando com `cat`.
+1. **Validação real antes de todo commit**, na máquina Arch Linux de desenvolvimento: compilar com `-Wall -Wextra -Werror`, rodar `make teste` e conferir contra programas de referência (`cat`, `sudo`, enumeração independente em shell). Nenhum arquivo é commitado sem ter sido executado.
+2. **Conhecer a máquina antes de agir**: `lia tools discover` inventaria os executáveis (PATH na ordem, diretórios convencionais, `~/.local/bin`), `lia tools probe --safe` testa os que têm probe conhecido e não destrutivo. Os demais ficam `NO_SAFE_PROBE`; a Lia nunca executa um comando desconhecido só para ver o que acontece.
+3. **Mais baixo nível possível**: binários estáticos, sem libc, `_start` e syscalls em Assembly (`nucleo/x86_64/`), runtime em C freestanding (`runtime/`).
+4. A especificação da CLI está em [docs/LIA-CLI.md](docs/LIA-CLI.md). Neste ponto ela é **superada** por este plano: o objetivo inicial é shell/sudo/root (seção 3, L4).
+
+## 10. Próximo passo imediato
+
+1. `lia tools execute -- CMD` (execução controlada com captura, timeout e auditoria) e `lia system inspect`.
+2. Cliente Ollama (fase 3).
+3. `lia-raiz`: auxiliar privilegiado mínimo, para quando a Lia precisar de root de forma contínua sem prompt a cada ação.
