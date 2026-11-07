@@ -45,12 +45,31 @@ make gui-run       # compila e abre a janela
 make gui-smoke     # com display: confere ausência de sudo/pkexec/exec* e execução sem daemon
 ```
 
-Hoje não existe daemon (`~/.lia/maquina/estado/sessao.sock`), então o estado
-normal da GUI é **desconectada** — ela mostra isso claramente em vez de travar
-ou simular uma conexão. Nesta primeira etapa a GUI é somente leitura: o campo
-de entrada não envia nada ao daemon (só ecoa localmente como rascunho), e
-`gui/protocolo.c` recusa, antes de qualquer tentativa de envio, qualquer
-mensagem com efeito (`solicitar`/`aprovar`).
+Nesta primeira etapa a GUI é somente leitura: o campo de entrada não envia
+nada ao daemon (só ecoa localmente como rascunho), e `gui/protocolo.c` recusa,
+antes de qualquer tentativa de envio, qualquer mensagem com efeito
+(`solicitar`/`aprovar`) — só `cancelar`/`assinar` são permitidos.
+
+## Daemon de sessão (`lia-sessiond`, protocolo completo)
+
+`sessiond/` implementa o outro lado do protocolo: um servidor de socket Unix
+e máquina de estados, com um **executor simulado** (nenhuma ferramenta real
+é executada, nenhum privilégio é pedido — ver [docs/protocolo.md](docs/protocolo.md) §8).
+Mesma toolchain hospedada que a GUI (GLib/GIO/json-glib), fora de
+`make`/`make teste`/`make bench`.
+
+```sh
+make sessiond        # compila build/lia-sessiond
+make teste-sessiond   # inicia o daemon num $HOME temporário, testa o básico, encerra
+make integration       # suíte completa: plano/aprovação/cancelamento/erros/
+                       # múltiplos clientes/socket stale/GUI com e sem daemon
+```
+
+`lia-sessiond` escuta em `~/.lia/run/session.sock` (modo `0600`, diretório
+`0700`), nunca roda como root, termina de forma limpa com `SIGTERM`/`SIGINT`
+(remove o próprio socket ao sair), e só aceita conexões do mesmo uid
+(`SO_PEERCRED` — limitações documentadas em `docs/protocolo.md` §7).
+Encerrar: `kill <pid>` ou `Ctrl-C` em primeiro plano.
 
 A Lia nunca guarda senha, nunca altera `/etc/sudoers` por conta própria e nunca mantém root como estado permanente — toda elevação passa pelo `sudo` real do sistema, caso a caso. Veja a seção de privilégios do [PLANO.md](PLANO.md).
 

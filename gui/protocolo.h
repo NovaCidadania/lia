@@ -62,6 +62,31 @@ LiaMsgErro lia_msg_parsear(const char *linha, LiaMsg *out);
 void lia_msg_liberar(LiaMsg *m);
 
 /* ---------------------------------------------------------------------- */
+/* Construção de mensagens — usado tanto pela GUI (gui/lia-gui.c, envia
+ * 'solicitar'/'aprovar'/'cancelar'/'assinar') quanto pelo daemon
+ * (sessiond/sessiond.c, envia 'plano'/'progresso'/'saida'/'resultado'/
+ * 'auditoria'/'erro'). Mantém um único lugar que sabe montar o envelope do
+ * protocolo (docs/protocolo.md §2), para os dois lados nunca divergirem. */
+
+/* RFC 3339 UTC, com 'Z' (ex.: "2026-11-07T10:00:00Z"). Resultado alocado
+ * (g_free). */
+char *lia_ts_agora(void);
+
+/* Identificador único o bastante para esta sessão/processo (não é
+ * ULID/UUID formal, mas monotônico + contador — suficiente para o
+ * protocolo, que só exige unicidade dentro da sessão). Resultado alocado
+ * (g_free). */
+char *lia_novo_id(const char *prefixo);
+
+/* Monta uma linha NDJSON completa (envelope + "\n"), pronta para escrever
+ * no socket. 'dados', se não for NULL, deve já estar com
+ * json_builder_begin_object()/.../json_builder_end_object() chamados; esta
+ * função usa a raiz dele e NÃO libera 'dados' — quem chamou continua dono
+ * do JsonBuilder e deve g_object_unref nele depois. Resultado alocado
+ * (g_free). */
+char *lia_msg_montar(LiaMsgTipo tipo, const char *id, const char *em_resposta_a, JsonBuilder *dados);
+
+/* ---------------------------------------------------------------------- */
 /* Sessão: estado mínimo do lado do cliente para detectar mensagens fora
  * de ordem e para recusar, localmente, qualquer envio que a GUI não deva
  * fazer nesta etapa (modo_leitura). Ver docs/protocolo.md §3-4. */

@@ -2,6 +2,8 @@
 
 Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica um manifesto. O executor valida o manifesto e a política do usuário **independentemente do modelo**: o modelo escolhe a ferramenta e os parâmetros, mas não decide se ela é permitida.
 
+> **Nota:** `sessiond/manifesto_mock.c` (o daemon de sessão, `docs/protocolo.md` §8) define uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`) só para testar a máquina de estados do protocolo — não é este manifesto, não tem nenhum efeito real, e não deve ser confundida com as ferramentas reais descritas abaixo.
+
 ## 1. Campos obrigatórios
 
 | Campo | Tipo | Descrição |

@@ -145,4 +145,33 @@ gui-run: gui
 gui-smoke: gui
 	sh gui/teste_fumaca.sh
 
-.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke
+# ---------------------------------------------------------------------------
+# sessiond (sessiond/): daemon de sessão — servidor do protocolo NDJSON e
+# máquina de estados, com um executor simulado (sessiond/manifesto_mock.c).
+# Mesma toolchain hospedada que a GUI (GLib/GIO/json-glib); fora de
+# all/teste/bench pelo mesmo motivo.
+SESSIOND_PKGS   := gio-unix-2.0 json-glib-1.0
+SESSIOND_CFLAGS := -std=c17 -O2 -Wall -Wextra -Werror $(shell pkg-config --cflags $(SESSIOND_PKGS))
+SESSIOND_LIBS   := $(shell pkg-config --libs $(SESSIOND_PKGS))
+
+$(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-manifesto-mock.o: sessiond/manifesto_mock.c sessiond/manifesto_mock.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/manifesto_mock.h gui/protocolo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/lia-sessiond: $(B)/sessiond-sessiond.o $(B)/sessiond-manifesto-mock.o $(B)/sessiond-protocolo.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+sessiond: $(B)/lia-sessiond
+
+teste-sessiond: sessiond
+	sh testes/integration/teste_sessiond_basico.sh
+
+integration: sessiond gui
+	sh testes/integration/teste_integracao.sh
+
+.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration

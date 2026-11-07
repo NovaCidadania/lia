@@ -2,11 +2,19 @@
 
 Especificação do canal compartilhado entre a CLI, a GUI e o daemon de sessão da Lia (seção 4.1 do [PLANO.md](../PLANO.md)). A GUI é uma camada fina sobre este mesmo protocolo: nenhuma lógica de execução, autorização ou auditoria é duplicada nela.
 
-> Status: especificação para a fase **0.5**. Ainda não há daemon; a CLI hoje imprime o resultado final de cada comando (texto humano ou `--json`) sem streaming de eventos. Já existe uma primeira implementação de **cliente**: a GUI de prova de conceito (`gui/`, somente leitura — ver [GUI-POC.md](GUI-POC.md)), que interpreta este protocolo (`gui/protocolo.c`) e tenta se conectar ao socket da seção 1; sem daemon, ela fica em "modo sem servidor" (desconectada, de forma visível, nunca travada ou simulando dados). Este documento continua definindo o contrato completo para quando o daemon existir do outro lado.
+> Status: especificação para a fase **0.5**. Agora existem os dois lados:
+> `gui/protocolo.c` (cliente puro, usado pela GUI — ver [GUI-POC.md](GUI-POC.md))
+> e `sessiond/sessiond.c` (**lia-sessiond**, o daemon — servidor de protocolo
+> e máquina de estados). **O executor do daemon nesta etapa é inteiramente
+> simulado** (`sessiond/manifesto_mock.c`): nenhuma ferramenta real é
+> executada, nenhum privilégio é pedido — ver seção 8. A CLI (`lia tools`,
+> `lia shell`, `lia sudo`, `lia root`) continua funcionando como processos de
+> execução única, sem o socket (seção 6).
 
 ## 1. Transporte
 
-- Socket Unix local em `~/.lia/maquina/estado/sessao.sock`, modo `0600`, acessível apenas pelo usuário do sistema que é dono de `~/.lia`.
+- Socket Unix local em **`~/.lia/run/session.sock`** (caminho atualizado nesta etapa — uma versão anterior deste documento registrava `~/.lia/maquina/estado/sessao.sock`; `~/.lia/run/` é um diretório próprio para o runtime da sessão, não para estado persistente). `lia-sessiond` cria `~/.lia/run/` com modo `0700` e o arquivo de socket com `0600`.
+- `lia-sessiond` se recusa a iniciar como root (`docs/THREAT-MODEL.md` §6) e remove, na inicialização, um socket "stale" (arquivo de socket sem processo escutando) só depois de confirmar que ele pertence ao mesmo uid e é de fato um socket — nunca remove um arquivo desconhecido nem um socket onde outro daemon já está escutando de verdade.
 - Sem rede, sem TCP por padrão. Um transporte remoto (rede Lia, fase 10) é uma extensão explícita e separada deste protocolo, nunca o mesmo socket.
 - Autenticação do cliente por credencial de socket Unix (`SO_PEERCRED`): a GUI e a CLI só conversam com um daemon que roda com o mesmo uid, ou um uid explicitamente autorizado pela pessoa.
 - Enquadramento: uma mensagem JSON por linha (NDJSON), UTF-8, sem aninhamento de frames binários nesta versão.
@@ -85,8 +93,30 @@ Códigos estáveis, para a GUI e a CLI tratarem sem regex em mensagem humana:
 | `capacidade_negada` | A política do usuário não concede a capacidade exigida. |
 | `aprovacao_pendente` | Uma ação com efeito foi solicitada sem passar por `aprovar`. |
 | `cancelado` | Execução interrompida por `cancelar`. |
-| `limite_excedido` | Timeout, limite de saída ou de recursos do manifesto foi atingido. |
+| `limite_excedido` | Timeout, limite de saída ou de recursos do manifesto foi atingido, **ou** a linha NDJSON recebida passou do tamanho máximo (`lia-sessiond`: 65536 bytes) sem quebra de linha — a conexão é encerrada neste caso, o framing não é mais confiável. |
+| `mensagem_invalida` | JSON malformado ou envelope sem `protocolo`/`tipo`/`id`/`ts`, ou `tipo` fora da tabela da seção 3. A conexão é encerrada (ver nota abaixo). |
+| `id_duplicado` | `id` já usado antes na mesma conexão. Recuperável: a conexão continua, a mensagem é ignorada. |
+| `estado_invalido` | Mensagem válida, mas fora de ordem para o estado atual da conexão (ex.: `aprovar` sem `plano` pendente, `cancelar` sem nada em andamento, `solicitar` com outra solicitação já em andamento, ou um tipo que só o daemon deveria enviar chegando do cliente). Recuperável. |
+| `nao_autorizado` | `SO_PEERCRED` do cliente não corresponde ao uid do daemon (seção 7). A conexão é encerrada imediatamente, antes de processar qualquer mensagem. |
+
+**Erros que encerram a conexão** (`protocolo_incompativel`, `mensagem_invalida`, `limite_excedido` por linha longa, `nao_autorizado`): o framing ou a confiança no cliente já estão comprometidos, então `lia-sessiond` não tenta continuar servindo a mesma conexão. Os demais códigos são recuperáveis — a conexão continua e o cliente pode tentar de novo.
 
 ## 6. Relação com a CLI de hoje
 
 Os comandos já implementados (`lia tools discover`, `lia tools list [--json]`, `lia tools probe --safe`, `lia shell`, `lia sudo`, `lia root`) continuam funcionando como processos de execução única, sem o socket. Quando o daemon existir, a CLI passa a ser um cliente fino deste protocolo (como a GUI), mantendo os mesmos nomes de ferramenta do manifesto (seção [manifesto.md](manifesto.md)) e a mesma saída `--json` como payload de `resultado.dados`.
+
+## 7. Autenticação do cliente — o que `SO_PEERCRED` prova e o que não prova
+
+`lia-sessiond` usa `getsockopt(SO_PEERCRED)` em toda conexão aceita para ler o uid real do processo do outro lado do socket, e fecha a conexão (com `erro.codigo = "nao_autorizado"`, antes de processar qualquer mensagem) se esse uid não for exatamente o uid efetivo do próprio daemon. Isto é a única verificação de identidade que existe hoje.
+
+**O que isto prova:** que o processo do outro lado do socket roda com o mesmo uid do Linux que o daemon — útil para impedir que outro usuário do mesmo sistema (multiusuário) converse com a sessão.
+
+**O que isto NÃO prova, e nunca deve ser tratado como prova:**
+- Não autoriza nenhuma ferramenta nem capacidade — isso continua inteiramente a cargo do executor, contra o manifesto e a política (`docs/manifesto.md` §5), em cada `solicitar`/`aprovar`, sempre.
+- Não protege contra outro processo do **mesmo** uid (qualquer programa que a própria pessoa execute nesta sessão de usuário já tem o mesmo uid e passaria esta checagem) — a mitigação real contra isso é a permissão `0600` do arquivo de socket mais o próprio modelo de confiança do sistema operacional para processos do mesmo usuário; `SO_PEERCRED` é uma camada adicional, não a única.
+- Se `SO_PEERCRED` não estiver disponível no kernel/plataforma, `lia-sessiond` recusa a conexão por padrão (falha segura — nunca assume identidade sem conseguir verificar).
+- Esta checagem é específica de Linux (`SO_PEERCRED`); um port para outro sistema (BSD tem `LOCAL_PEERCRED`, por exemplo) precisa de uma implementação equivalente antes de valer a mesma garantia — não é portável por si só.
+
+## 8. O executor desta etapa é simulado — e isto é temporário por decisão
+
+`sessiond/manifesto_mock.c` define um conjunto fixo e fictício de "ferramentas" (`mock.leitura`, `mock.escrita`, `mock.admin`) só para exercitar a máquina de estados do protocolo inteira (plano → aprovação → progresso/saída → resultado → auditoria) sem nenhum efeito real em nenhum caso. Mesmo `mock.admin` (risco `admin`) nunca pede privilégio nem chama `sudo`/`pkexec` — é inteiramente fictício, para provar que o fluxo de aprovação funciona para ações de alto risco antes de existir qualquer executor real. Isto não é o manifesto real de ferramentas da Lia (`docs/manifesto.md`), e `modo: "executar"` em `solicitar` é tratado exatamente como `"simular"` nesta etapa — não há, hoje, nenhum caminho de código no daemon que produza um efeito fora dele mesmo. Ligar isto a ferramentas reais (`tools.discover`, `sistema.diagnosticar`, etc.) é um próximo passo isolado, com sua própria validação contra o manifesto de verdade.

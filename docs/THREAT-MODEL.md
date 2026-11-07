@@ -81,7 +81,7 @@ O **modelo de linguagem está do lado não confiado para fins de autorização**
 |---|---|
 | Dados saem da máquina sem a pessoa saber | "local por padrão" (PLANO.md §1.1): rede é opt-in e visível; hoje não há nenhuma chamada de rede implementada além do cliente Ollama planejado (`127.0.0.1`, fase 3) |
 | Um pacote da Rede Lia (fase 10) injeta um adaptador ou ferramenta maliciosa | pacotes compartilhados são assinados (Ed25519) e verificados antes de aplicar; nunca aplicados automaticamente |
-| O protocolo local (`docs/protocolo.md`) é acessado por outro processo/usuário | socket Unix em `~/.lia/maquina/estado/`, modo `0600`, autenticação por `SO_PEERCRED` restrita ao uid do dono (ou uid explicitamente autorizado) |
+| O protocolo local (`docs/protocolo.md`) é acessado por outro processo/usuário | socket Unix em `~/.lia/run/session.sock` (implementado em `sessiond/sessiond.c`, `lia-sessiond`), diretório `0700`, socket `0600`, autenticação por `SO_PEERCRED` restrita ao uid do próprio daemon — ver limitações explícitas em `docs/protocolo.md` §7 (não é uma barreira contra outro processo do mesmo uid, só contra outro usuário do sistema) |
 | Um backend de inferência remoto é usado sem a pessoa perceber | `lia_model_backend` declara explicitamente `localhost`/endereço; qualquer backend não local exige configuração explícita, nunca padrão |
 
 ## 4. Matriz de capacidades
@@ -115,6 +115,18 @@ Independente de política configurada, estas ações **sempre** passam por aprov
 7. Aplicar um pacote recebido de outra instalação (Rede Lia), mesmo assinado corretamente — a assinatura prova origem, não dá consentimento.
 
 "Política previamente configurada" (PLANO.md §1.1, item 3) pode automatizar a *resposta* a um `plano` repetido, mas a autorização usada fica registrada por extenso na auditoria — nunca aparece como "sem autorização".
+
+## 5.1 O daemon de sessão (`lia-sessiond`) nesta etapa
+
+`sessiond/sessiond.c` é um servidor de protocolo e máquina de estados — não um executor. Nesta etapa, ele:
+
+- nunca chama `system`, `popen`, `fork`, `execve`, `posix_spawn`, `sudo` ou `pkexec` (verificado em todo commit por `nm -u`/`strings` nos binários — ver `testes/integration/`);
+- nunca roda como root (recusa explicitamente no início de `main`, testado em `make teste-sessiond` quando `sudo -n` permite);
+- só "executa" ferramentas fictícias (`sessiond/manifesto_mock.c`, `docs/protocolo.md` §8) — nenhum efeito real existe no processo até um executor de verdade ser implementado;
+- aceita só conexões do próprio uid (`SO_PEERCRED`), com as limitações explícitas em `docs/protocolo.md` §7;
+- fecha a conexão (sem processar mais nada) diante de JSON malformado, tipo desconhecido, protocolo incompatível ou linha acima de 65536 bytes sem quebra — nunca tenta "adivinhar" o que um cliente malformado quis dizer.
+
+Quando um executor real for implementado (próximo passo natural depois desta etapa), ele herda todas as regras das seções 1-4 deste documento — nada aqui é relaxado por ser "só o daemon".
 
 ## 6. Credenciais — o que nunca é feito
 

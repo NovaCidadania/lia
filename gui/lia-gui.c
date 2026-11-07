@@ -16,7 +16,7 @@
 #include <gio/gunixsocketaddress.h>
 #include "protocolo.h"
 
-#define SOCKET_PROTOCOLO "/.lia/maquina/estado/sessao.sock"
+#define SOCKET_PROTOCOLO "/.lia/run/session.sock"
 
 typedef enum {
     ESTADO_DESCONECTADO,
@@ -202,6 +202,7 @@ static void tentar_conectar(LiaGui *g)
         g_snprintf(texto, sizeof(texto), "[local] sem daemon em %s (%s) — modo sem servidor",
                    caminho, erro ? erro->message : "?");
         ui_append_conversa(g, texto);
+        g_print("lia-gui: %s\n", texto);
         if (erro) g_error_free(erro);
         ui_marcar_estado(g, ESTADO_DESCONECTADO, "desconectado (sem servidor)");
         lia_sessao_desconectar(&g->sessao);
@@ -212,6 +213,7 @@ static void tentar_conectar(LiaGui *g)
     lia_sessao_conectar(&g->sessao);
     ui_marcar_estado(g, ESTADO_PLANEJANDO, "conectado");
     ui_append_conversa(g, "[local] conectado ao daemon");
+    g_print("lia-gui: conectado ao daemon em %s\n", caminho);
 
     GInputStream *fluxo_entrada = g_io_stream_get_input_stream(G_IO_STREAM(conexao));
     g->entrada_dados = g_data_input_stream_new(fluxo_entrada);

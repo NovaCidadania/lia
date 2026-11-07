@@ -137,6 +137,65 @@ void lia_msg_liberar(LiaMsg *m)
     memset(m, 0, sizeof(*m));
 }
 
+char *lia_ts_agora(void)
+{
+    GDateTime *agora = g_date_time_new_now_utc();
+    char *ts = g_date_time_format(agora, "%Y-%m-%dT%H:%M:%SZ");
+    g_date_time_unref(agora);
+    return ts;
+}
+
+char *lia_novo_id(const char *prefixo)
+{
+    static guint64 contador = 0;
+    return g_strdup_printf("%s-%" G_GINT64_FORMAT "-%" G_GUINT64_FORMAT,
+                            prefixo, g_get_monotonic_time(), ++contador);
+}
+
+char *lia_msg_montar(LiaMsgTipo tipo, const char *id, const char *em_resposta_a, JsonBuilder *dados)
+{
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "protocolo");
+    json_builder_add_string_value(b, LIA_PROTOCOLO_VERSAO);
+    json_builder_set_member_name(b, "tipo");
+    json_builder_add_string_value(b, lia_msg_tipo_para_string(tipo));
+    json_builder_set_member_name(b, "id");
+    json_builder_add_string_value(b, id);
+    json_builder_set_member_name(b, "em_resposta_a");
+    if (em_resposta_a)
+        json_builder_add_string_value(b, em_resposta_a);
+    else
+        json_builder_add_null_value(b);
+    char *ts = lia_ts_agora();
+    json_builder_set_member_name(b, "ts");
+    json_builder_add_string_value(b, ts);
+    g_free(ts);
+    json_builder_set_member_name(b, "dados");
+    if (dados) {
+        JsonNode *n_dados = json_builder_get_root(dados);
+        json_builder_add_value(b, n_dados);
+    } else {
+        json_builder_begin_object(b);
+        json_builder_end_object(b);
+    }
+    json_builder_end_object(b);
+
+    JsonNode *raiz = json_builder_get_root(b);
+    JsonGenerator *gen = json_generator_new();
+    json_generator_set_root(gen, raiz);
+    json_generator_set_pretty(gen, FALSE);
+    gsize tamanho = 0;
+    char *texto = json_generator_to_data(gen, &tamanho);
+    json_node_unref(raiz);
+    g_object_unref(gen);
+    g_object_unref(b);
+
+    char *linha = g_strdup_printf("%s\n", texto);
+    g_free(texto);
+    return linha;
+}
+
 /* ------------------------------- sessão -------------------------------- */
 
 void lia_sessao_iniciar(LiaSessao *s)
