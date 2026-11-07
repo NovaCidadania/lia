@@ -116,17 +116,21 @@ Independente de política configurada, estas ações **sempre** passam por aprov
 
 "Política previamente configurada" (PLANO.md §1.1, item 3) pode automatizar a *resposta* a um `plano` repetido, mas a autorização usada fica registrada por extenso na auditoria — nunca aparece como "sem autorização".
 
-## 5.1 O daemon de sessão (`lia-sessiond`) nesta etapa
+## 5.1 O daemon de sessão (`lia-sessiond`) e seu executor real
 
-`sessiond/sessiond.c` é um servidor de protocolo e máquina de estados — não um executor. Nesta etapa, ele:
+`sessiond/sessiond.c` é um servidor de protocolo e máquina de estados; a execução em si é isolada atrás de uma interface plugável (`sessiond/executor.h`). O backend padrão em produção, `sessiond/executor_real.c`, chama `cli/sistema.c`/`cli/ferramentas.c` de verdade, mas só para as seis ferramentas de leitura de `sessiond/manifesto_real.c` (`docs/manifesto.md` §3). Nesta etapa, o daemon (em qualquer backend):
 
-- nunca chama `system`, `popen`, `fork`, `execve`, `posix_spawn`, `sudo` ou `pkexec` (verificado em todo commit por `nm -u`/`strings` nos binários — ver `testes/integration/`);
+- nunca chama `system`, `popen`, `fork`, `execve`, `posix_spawn`, `sudo` ou `pkexec` diretamente — a única execução de processo em todo o daemon é a que `tools.probe --safe` já fazia na CLI (`lia_fork`/`lia_execve` em `cli/ferramentas.c`, catálogo fixo de probes seguros, sandboxed, com timeout, sem shell): uma exceção escopada e deliberada, não um caminho geral de execução (verificado em todo commit por `nm -u`/`strings` nos binários — ver `testes/integration/`);
 - nunca roda como root (recusa explicitamente no início de `main`, testado em `make teste-sessiond` quando `sudo -n` permite);
-- só "executa" ferramentas fictícias (`sessiond/manifesto_mock.c`, `docs/protocolo.md` §8) — nenhum efeito real existe no processo até um executor de verdade ser implementado;
+- só aceita capacidades de leitura no backend real (`leitura_arquivo`, `processo`) — rejeita `capacidade_negada` antes de validar qualquer parâmetro para qualquer outra (`Executor.restringe_a_leitura`, `sessiond/sessiond.c`); o backend mock (só via `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão) tem ferramentas fictícias de risco médio/admin exatamente para testar essa rejeição e o fluxo de aprovação, sem nenhum efeito real em nenhum caso, mesmo para `mock.admin`;
+- valida parâmetros contra o manifesto real (tipo, enum, chave desconhecida) antes de executar, nunca confiando só na validação da GUI (`manifesto_real_validar_parametros`);
+- aplica um limite de memória de todo o processo (`setrlimit(RLIMIT_AS)`, 512 MiB, defesa em profundidade — não é por chamada) e um timeout por execução (`timeout_padrao_ms` do manifesto, cooperativo: cancela e responde ao cliente, mas não força a interrupção imediata do trabalho em andamento);
+- serializa toda chamada ao executor real numa única thread dedicada (`sessiond/executor_real.c`), nunca duas ao mesmo tempo — `cli/sistema.c`/`cli/ferramentas.c` usam estado global (buffers estáticos) e não são seguras para chamadas concorrentes;
 - aceita só conexões do próprio uid (`SO_PEERCRED`), com as limitações explícitas em `docs/protocolo.md` §7;
-- fecha a conexão (sem processar mais nada) diante de JSON malformado, tipo desconhecido, protocolo incompatível ou linha acima de 65536 bytes sem quebra — nunca tenta "adivinhar" o que um cliente malformado quis dizer.
+- fecha a conexão (sem processar mais nada) diante de JSON malformado, tipo desconhecido, protocolo incompatível ou linha acima de 65536 bytes sem quebra — nunca tenta "adivinhar" o que um cliente malformado quis dizer;
+- rejeita replay de aprovação, aprovação de um plano diferente do apresentado, e cancelamento com `execucao_id` ausente ou que não corresponde à execução em andamento (`docs/manifesto.md` §5).
 
-Quando um executor real for implementado (próximo passo natural depois desta etapa), ele herda todas as regras das seções 1-4 deste documento — nada aqui é relaxado por ser "só o daemon".
+Ferramentas de alteração (escrita, risco `baixo` e acima) continuam fora do executor real — item 9 do `PLANO.md` §10 é especificamente sobre isso, com as mesmas simulação/confirmação/reversão desta seção.
 
 ## 6. Credenciais — o que nunca é feito
 

@@ -36,10 +36,11 @@ while [ ! -S "$SOCK" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
 grep -q "^lia-sessiond: escutando" "$HOME_T/sessiond.log" && ok "banner de inicialização no log" || ko "sem banner de inicialização"
 
 SAIDA=$(mktemp)
-printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"b1","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"mock.leitura","parametros":{}}}\n' \
-    | timeout 3 nc -U "$SOCK" > "$SAIDA"
-grep -q '"tipo":"plano"' "$SAIDA" && ok "roundtrip básico: plano recebido" || ko "sem plano"
-grep -q '"tipo":"resultado"' "$SAIDA" && ok "roundtrip básico: resultado recebido" || ko "sem resultado"
+printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"b1","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.diagnosticar","parametros":{}}}\n' \
+    | timeout 5 nc -U "$SOCK" > "$SAIDA"
+grep -q '"tipo":"plano"' "$SAIDA" && ok "roundtrip básico (executor real, sistema.diagnosticar): plano recebido" || ko "sem plano"
+grep -q '"estado":"sucesso"' "$SAIDA" && ok "roundtrip básico: resultado sucesso, dados reais da máquina" || ko "sem resultado de sucesso"
+grep -q '"distro"' "$SAIDA" && ok "resultado contém dados reais (distro) — não é mock" || ko "resultado não contém dados reais"
 rm -f "$SAIDA"
 
 kill -TERM "$PID" 2>/dev/null

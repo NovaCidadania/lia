@@ -18,6 +18,7 @@ typedef struct {
     const char *reversivel;      /* sim|nao_aplicavel|nao */
     const char *const *capacidades; /* terminada em NULL */
     const char *efeito_simulado;
+    int timeout_padrao_ms;
 } ManifestoMock;
 
 /* Procura pelo nome exato; NULL se não existir nesta tabela fictícia

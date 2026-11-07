@@ -13,6 +13,7 @@ static const ManifestoMock TABELA[] = {
         .reversivel = "nao_aplicavel",
         .capacidades = CAP_LEITURA,
         .efeito_simulado = "simulação: leria um arquivo (nenhum efeito real)",
+        .timeout_padrao_ms = 5000,
     },
     {
         .nome = "mock.escrita",
@@ -21,6 +22,7 @@ static const ManifestoMock TABELA[] = {
         .reversivel = "sim",
         .capacidades = CAP_ESCRITA,
         .efeito_simulado = "simulação: escreveria/alteraria um arquivo (nenhum efeito real)",
+        .timeout_padrao_ms = 5000,
     },
     {
         .nome = "mock.admin",
@@ -29,6 +31,7 @@ static const ManifestoMock TABELA[] = {
         .reversivel = "nao",
         .capacidades = CAP_ADMIN,
         .efeito_simulado = "simulação: pediria privilégio admin (nenhum efeito real, nenhum sudo/pkexec é chamado)",
+        .timeout_padrao_ms = 5000,
     },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))

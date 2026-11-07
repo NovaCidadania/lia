@@ -177,8 +177,8 @@ static void testar_capacidade_nao_autorizada(void)
     LiaSessao s;
     lia_sessao_iniciar(&s);
 
-    checar(lia_sessao_validar_envio(&s, LIA_MSG_SOLICITAR, NULL, 0) == LIA_ENVIO_RECUSADO_SOMENTE_LEITURA,
-           "capacidade não autorizada: 'solicitar' recusado localmente em modo_leitura");
+    checar(lia_sessao_validar_envio(&s, LIA_MSG_SOLICITAR, NULL, 0) == LIA_ENVIO_OK,
+           "'solicitar' é permitido localmente — o daemon continua sendo a autoridade (ferramenta_desconhecida/capacidade_negada)");
     checar(lia_sessao_validar_envio(&s, LIA_MSG_APROVAR, NULL, 0) == LIA_ENVIO_RECUSADO_SOMENTE_LEITURA,
            "capacidade não autorizada: 'aprovar' recusado localmente em modo_leitura");
 
@@ -201,7 +201,7 @@ static void testar_execucao_sem_servidor(void)
     LiaSessao s;
     lia_sessao_iniciar(&s);
     checar(!s.conectado, "modo sem servidor: sessão nova começa desconectada");
-    checar(lia_sessao_validar_envio(&s, LIA_MSG_SOLICITAR, NULL, 0) == LIA_ENVIO_RECUSADO_SOMENTE_LEITURA,
+    checar(lia_sessao_validar_envio(&s, LIA_MSG_APROVAR, NULL, 0) == LIA_ENVIO_RECUSADO_SOMENTE_LEITURA,
            "modo sem servidor: validação local funciona sem nenhuma conexão");
     checar(lia_sessao_validar_envio(&s, LIA_MSG_CANCELAR, NULL, 0) == LIA_ENVIO_RECUSADO_NADA_PARA_CANCELAR,
            "modo sem servidor: cancelar sem nada pendente é recusado, não travado");

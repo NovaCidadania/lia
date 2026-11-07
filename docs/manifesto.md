@@ -2,7 +2,7 @@
 
 Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica um manifesto. O executor valida o manifesto e a política do usuário **independentemente do modelo**: o modelo escolhe a ferramenta e os parâmetros, mas não decide se ela é permitida.
 
-> **Nota:** `sessiond/manifesto_mock.c` (o daemon de sessão, `docs/protocolo.md` §8) define uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`) só para testar a máquina de estados do protocolo — não é este manifesto, não tem nenhum efeito real, e não deve ser confundida com as ferramentas reais descritas abaixo.
+> **Nota:** o daemon de sessão (`docs/protocolo.md` §8) implementa exatamente estas seis ferramentas de leitura em `sessiond/manifesto_real.c` (o executor padrão). `sessiond/manifesto_mock.c` define, separadamente, uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`) só para testar a máquina de estados do protocolo — ativada apenas com `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão em produção; não deve ser confundida com as ferramentas reais.
 
 ## 1. Campos obrigatórios
 
@@ -89,6 +89,56 @@ Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica u
 }
 ```
 
+```json
+{
+  "nome": "sistema.diagnosticar",
+  "versao": "0.1.0",
+  "parametros": [],
+  "capacidades": ["leitura_arquivo"],
+  "risco": "nenhum",
+  "efeitos": ["lê /etc/os-release, /proc/cpuinfo, /proc/meminfo, uname; não escreve nada"],
+  "idempotente": true,
+  "timeout_padrao_ms": 5000,
+  "limites": {},
+  "reversivel": "nao_aplicavel",
+  "requer_aprovacao": false
+}
+```
+
+```json
+{
+  "nome": "sistema.recursos",
+  "versao": "0.1.0",
+  "parametros": [],
+  "capacidades": ["leitura_arquivo"],
+  "risco": "nenhum",
+  "efeitos": ["lê /proc/meminfo, /proc/cpuinfo, /proc/uptime; não escreve nada"],
+  "idempotente": true,
+  "timeout_padrao_ms": 5000,
+  "limites": {},
+  "reversivel": "nao_aplicavel",
+  "requer_aprovacao": false
+}
+```
+
+```json
+{
+  "nome": "sistema.dispositivos",
+  "versao": "0.1.0",
+  "parametros": [],
+  "capacidades": ["leitura_arquivo"],
+  "risco": "nenhum",
+  "efeitos": ["lê /sys/class/net, /sys/class/block, /sys/bus/pci/devices; não escreve nada"],
+  "idempotente": true,
+  "timeout_padrao_ms": 5000,
+  "limites": {},
+  "reversivel": "nao_aplicavel",
+  "requer_aprovacao": false
+}
+```
+
+Estes seis manifestos (`tools.discover`, `tools.probe`, `tools.list` acima, mais estes três `sistema.*`) são exatamente os implementados em `sessiond/manifesto_real.c` e expostos pelo executor real do daemon de sessão (`docs/protocolo.md` §8) — a mesma tabela, sem duplicação de lógica.
+
 ## 4. Ferramentas de nível `admin` (já implementadas, fora do escopo "somente leitura")
 
 `shell.abrir` (`lia shell`), `sudo.executar` (`lia sudo`) e `root.comando` (`lia root`) existem desde a fase anterior. Elas **não guardam senha nem alteram `/etc/sudoers`**: cada chamada usa o `sudo` real do sistema, pede autenticação quando o `sudo` pedir, e é registrada em `~/.lia/humano/auditoria/` antes de executar. No vocabulário desta seção:
@@ -105,6 +155,9 @@ Nenhuma ferramenta neste projeto tem `capacidades: ["admin"]` com `requer_aprova
 - Parâmetro fora do tipo/limite declarado → `parametro_invalido`.
 - `capacidades` pedidas além do nível liberado em `~/.lia/humano/permissoes.toml` → `capacidade_negada`.
 - `risco` acima de `nenhum` sem um evento `aprovar` correspondente → `aprovacao_pendente`.
-- Execução além de `timeout_padrao_ms` (ou do `timeout` pedido, se menor) → encerrada e reportada como `limite_excedido`.
+- Execução além de `timeout_padrao_ms` (ou do `timeout` pedido, se menor) → encerrada e reportada como `limite_excedido` (`sessiond/sessiond.c`, `ao_timeout_execucao` — cooperativo: o cliente recebe a resposta de imediato, o trabalho em si pode levar um instante extra para realmente parar).
+- `aprovar` repetido para um plano já decidido (replay) → `estado_invalido`: o estado da sessão já saiu de "aguardando aprovação" na primeira vez.
+- `aprovar` referenciando um `plano_id` diferente do plano efetivamente apresentado → `estado_invalido`.
+- `cancelar` sem `execucao_id`, ou com um que não corresponde à execução em andamento da própria conexão → `estado_invalido` (nunca cancela a execução errada por engano).
 
 Esta validação é do executor, não do modelo: um modelo comprometido ou um arquivo malicioso interpretado como instrução não pode se autorizar.

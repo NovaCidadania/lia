@@ -275,10 +275,15 @@ LiaEnvioErro lia_sessao_validar_envio(const LiaSessao *s, LiaMsgTipo tipo,
         return LIA_ENVIO_OK;
     }
 
-    /* 'solicitar' e 'aprovar' têm efeito (podem acionar execução real) —
-     * recusados localmente enquanto modo_leitura estiver ativo, nesta
-     * primeira etapa da GUI. */
-    if (s->modo_leitura && (tipo == LIA_MSG_SOLICITAR || tipo == LIA_MSG_APROVAR))
+    /* 'aprovar' é o único tipo que a GUI nunca envia nesta etapa: as seis
+     * ferramentas de leitura do executor real (docs/manifesto.md) têm
+     * risco=nenhum e requer_aprovacao=false — nenhuma delas jamais chega
+     * ao estado "aguardando aprovação", então a GUI não precisa (e não
+     * deve) aprovar nada sozinha. 'solicitar' É permitido: o daemon
+     * continua sendo a autoridade (rejeita ferramenta_desconhecida,
+     * capacidade_negada, parametro_invalido); a GUI só evita pedir o que
+     * sabe, de antemão, que teria efeito. */
+    if (s->modo_leitura && tipo == LIA_MSG_APROVAR)
         return LIA_ENVIO_RECUSADO_SOMENTE_LEITURA;
 
     return LIA_ENVIO_OK;

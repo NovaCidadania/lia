@@ -93,7 +93,7 @@ char *lia_msg_montar(LiaMsgTipo tipo, const char *id, const char *em_resposta_a,
 
 typedef struct {
     gboolean conectado;
-    gboolean modo_leitura;        /* true nesta etapa: nunca envia 'solicitar' */
+    gboolean modo_leitura;        /* true nesta etapa: nunca envia 'aprovar' (ver lia_sessao_validar_envio) */
     GHashTable *ids_vistos;       /* id (string) -> gboolean, para checar em_resposta_a */
     GHashTable *execucoes;        /* execucao_id (string) -> estado (LiaExecEstado*) */
 } LiaSessao;
@@ -122,7 +122,7 @@ LiaSessaoErro lia_sessao_receber(LiaSessao *s, const LiaMsg *m);
 
 typedef enum {
     LIA_ENVIO_OK = 0,
-    LIA_ENVIO_RECUSADO_SOMENTE_LEITURA,   /* tipo exige efeito; modo_leitura ativo */
+    LIA_ENVIO_RECUSADO_SOMENTE_LEITURA,   /* 'aprovar' com modo_leitura ativo */
     LIA_ENVIO_RECUSADO_CANAL_DESCONHECIDO, /* 'assinar' com canal fora de {"auditoria","execucao"} */
     LIA_ENVIO_RECUSADO_NADA_PARA_CANCELAR, /* 'cancelar' sem execução em andamento */
 } LiaEnvioErro;

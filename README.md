@@ -45,31 +45,45 @@ make gui-run       # compila e abre a janela
 make gui-smoke     # com display: confere ausência de sudo/pkexec/exec* e execução sem daemon
 ```
 
-Nesta primeira etapa a GUI é somente leitura: o campo de entrada não envia
-nada ao daemon (só ecoa localmente como rascunho), e `gui/protocolo.c` recusa,
-antes de qualquer tentativa de envio, qualquer mensagem com efeito
-(`solicitar`/`aprovar`) — só `cancelar`/`assinar` são permitidos.
+A GUI pode enviar `solicitar` para as seis ferramentas de leitura reais
+(seletor + botão "Solicitar" na janela) — todas `risco: nenhum`, sem efeito
+observável fora do processo. Nunca envia `aprovar`: nenhuma delas chega ao
+estado "aguardando aprovação" (`gui/protocolo.c` recusa `aprovar` localmente,
+mesmo que tentasse). O campo de texto livre continua inerte (rascunho local,
+nunca enviado) — ele não corresponde a nenhum pedido estruturado do manifesto.
 
 ## Daemon de sessão (`lia-sessiond`, protocolo completo)
 
 `sessiond/` implementa o outro lado do protocolo: um servidor de socket Unix
-e máquina de estados, com um **executor simulado** (nenhuma ferramenta real
-é executada, nenhum privilégio é pedido — ver [docs/protocolo.md](docs/protocolo.md) §8).
-Mesma toolchain hospedada que a GUI (GLib/GIO/json-glib), fora de
+e máquina de estados, com um executor plugável
+(`sessiond/executor.h`). **Padrão em produção: o executor real**
+(`sessiond/executor_real.c`/`sessiond/manifesto_real.c`), limitado às seis
+ferramentas de leitura já existentes na CLI (`tools.discover/list/probe`,
+`sistema.diagnosticar/recursos/dispositivos` — ver
+[docs/manifesto.md](docs/manifesto.md) §3) — nenhuma ferramenta de escrita ou
+privilégio é alcançável. `LIA_SESSIOND_EXECUTOR=mock` troca para um executor
+inteiramente simulado, só para os testes unitários do protocolo (aprovação,
+replay, cancelamento, risco admin) — nunca o padrão
+(ver [docs/protocolo.md](docs/protocolo.md) §8). Mesma toolchain hospedada que
+a GUI (GLib/GIO/json-glib) mais `cli/sistema.c`/`cli/ferramentas.c`
+recompilados em `-fPIC` para rodar dentro deste processo — fora de
 `make`/`make teste`/`make bench`.
 
 ```sh
-make sessiond        # compila build/lia-sessiond
+make sessiond        # compila build/lia-sessiond (executor real por padrão)
 make teste-sessiond   # inicia o daemon num $HOME temporário, testa o básico, encerra
-make integration       # suíte completa: plano/aprovação/cancelamento/erros/
-                       # múltiplos clientes/socket stale/GUI com e sem daemon
+make integration       # suíte completa: seis ferramentas reais, parâmetros
+                       # inválidos, aprovação/replay/cancelamento (mock),
+                       # erros de protocolo, múltiplos clientes, socket
+                       # stale, GUI com e sem daemon
 ```
 
 `lia-sessiond` escuta em `~/.lia/run/session.sock` (modo `0600`, diretório
-`0700`), nunca roda como root, termina de forma limpa com `SIGTERM`/`SIGINT`
-(remove o próprio socket ao sair), e só aceita conexões do mesmo uid
-(`SO_PEERCRED` — limitações documentadas em `docs/protocolo.md` §7).
-Encerrar: `kill <pid>` ou `Ctrl-C` em primeiro plano.
+`0700`), nunca roda como root, aplica um limite de memória de processo
+(`RLIMIT_AS`, 512 MiB) e um timeout cooperativo por execução, termina de
+forma limpa com `SIGTERM`/`SIGINT` (remove o próprio socket ao sair), e só
+aceita conexões do mesmo uid (`SO_PEERCRED` — limitações documentadas em
+`docs/protocolo.md` §7). Encerrar: `kill <pid>` ou `Ctrl-C` em primeiro plano.
 
 A Lia nunca guarda senha, nunca altera `/etc/sudoers` por conta própria e nunca mantém root como estado permanente — toda elevação passa pelo `sudo` real do sistema, caso a caso. Veja a seção de privilégios do [PLANO.md](PLANO.md).
 

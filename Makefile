@@ -147,23 +147,66 @@ gui-smoke: gui
 
 # ---------------------------------------------------------------------------
 # sessiond (sessiond/): daemon de sessão — servidor do protocolo NDJSON e
-# máquina de estados, com um executor simulado (sessiond/manifesto_mock.c).
-# Mesma toolchain hospedada que a GUI (GLib/GIO/json-glib); fora de
-# all/teste/bench pelo mesmo motivo.
+# máquina de estados. Executor plugável (sessiond/executor.h): real por
+# padrão (sessiond/executor_real.c, chama cli/sistema.c e cli/ferramentas.c
+# de verdade, limitado às seis ferramentas de leitura de
+# sessiond/manifesto_real.c — docs/manifesto.md); LIA_SESSIOND_EXECUTOR=mock
+# troca para o simulado (sessiond/executor_mock.c), só para testes unitários.
+#
+# cli/sistema.c e cli/ferramentas.c são código do núcleo sem libc — para
+# rodar dentro deste processo hospedado (GLib), são recompilados em -fPIC
+# (prefixo sessiond-pic-*, nunca reaproveita os .o não-PIC de build/ do
+# núcleo) e ligados com sessiond/lia_syscall_hospedado.c no lugar de
+# nucleo/x86_64/entrada.S (que define _start — colidiria com o do daemon).
 SESSIOND_PKGS   := gio-unix-2.0 json-glib-1.0
 SESSIOND_CFLAGS := -std=c17 -O2 -Wall -Wextra -Werror $(shell pkg-config --cflags $(SESSIOND_PKGS))
 SESSIOND_LIBS   := $(shell pkg-config --libs $(SESSIOND_PKGS))
+SESSIOND_PIC_CFLAGS := -std=c17 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fPIC
+
+SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
+                  $(B)/sessiond-executor-mock.o $(B)/sessiond-manifesto-mock.o \
+                  $(B)/sessiond-executor-real.o $(B)/sessiond-manifesto-real.o \
+                  $(B)/sessiond-protocolo.o $(B)/sessiond-syscall.o \
+                  $(B)/sessiond-pic-texto.o $(B)/sessiond-pic-sys.o \
+                  $(B)/sessiond-pic-sistema.o $(B)/sessiond-pic-ferramentas.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-syscall.o: sessiond/lia_syscall_hospedado.c runtime/lia.h cli/cli.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-manifesto-mock.o: sessiond/manifesto_mock.c sessiond/manifesto_mock.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/manifesto_mock.h gui/protocolo.h | $(B)
+$(B)/sessiond-executor-mock.o: sessiond/executor_mock.c sessiond/executor.h sessiond/manifesto_mock.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/lia-sessiond: $(B)/sessiond-sessiond.o $(B)/sessiond-manifesto-mock.o $(B)/sessiond-protocolo.o
+$(B)/sessiond-manifesto-real.o: sessiond/manifesto_real.c sessiond/manifesto_real.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-executor-real.o: sessiond/executor_real.c sessiond/executor.h sessiond/manifesto_real.h runtime/lia.h cli/cli.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-executor-comum.o: sessiond/executor_comum.c sessiond/executor.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/executor.h gui/protocolo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-pic-texto.o: runtime/texto.c runtime/lia.h | $(B)
+	$(CC) $(SESSIOND_PIC_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-pic-sys.o: runtime/sys.c runtime/lia.h | $(B)
+	$(CC) $(SESSIOND_PIC_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-pic-sistema.o: cli/sistema.c runtime/lia.h cli/cli.h | $(B)
+	$(CC) $(SESSIOND_PIC_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-pic-ferramentas.o: cli/ferramentas.c runtime/lia.h cli/cli.h | $(B)
+	$(CC) $(SESSIOND_PIC_CFLAGS) -c $< -o $@
+
+$(B)/lia-sessiond: $(SESSIOND_OBJS)
 	$(CC) $^ $(SESSIOND_LIBS) -o $@
 
 sessiond: $(B)/lia-sessiond
