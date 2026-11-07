@@ -81,7 +81,7 @@ long lia_uname(struct lia_utsname *u);
 long lia_getuid(void);
 long lia_geteuid(void);
 long lia_getgid(void);
-void lia_exit(int codigo);
+void lia_exit(int codigo) __attribute__((noreturn));
 
 /* runtime/texto.c */
 void *memcpy(void *dst, const void *src, size_t n);

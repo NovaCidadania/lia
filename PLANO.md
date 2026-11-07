@@ -312,9 +312,10 @@ Performance é requisito, então é medida desde a fase 1:
 
 ## 10. Próximo passo imediato
 
-1. Registrar threat model e matriz de capacidades.
-2. Definir o protocolo de eventos compartilhado por CLI e GUI.
-3. Implementar `lia tools` em modo somente leitura, com manifestos e auditoria.
-4. Implementar `lia-echo`, `lia-cat`, testes de ABI e benchmark reproduzível.
-5. Escolher toolkit GUI por uma prova de conceito que rode em Linux x86-64 e AArch64.
-6. Só depois habilitar ferramentas de alteração, cada uma com simulação, confirmação e reversão.
+1. ~~Registrar threat model e matriz de capacidades.~~ Feito: [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
+2. ~~Definir o protocolo de eventos compartilhado por CLI e GUI.~~ Feito: [docs/protocolo.md](docs/protocolo.md).
+3. ~~Implementar `lia tools` em modo somente leitura, com manifestos e auditoria.~~ Feito: `cli/ferramentas.c`, `cli/sistema.c`, [docs/manifesto.md](docs/manifesto.md).
+4. ~~Implementar `lia-echo`, `lia-cat`, testes de ABI e benchmark reproduzível.~~ Feito: `nucleo/x86_64/lia-echo.S`, `nucleo/x86_64/lia-cat.S`, implementações de referência em C (`nucleo/referencia/`), [docs/abi.md](docs/abi.md), `testes/bench/bench_cat.sh` (`make bench`).
+5. `lia-hex`, `lia-tipo` (restante da fase 1) e `lia_memcpy`/`lia_memset`/`lia_memcmp` com seleção de implementação por `cpuid` (SSE2 → AVX2 → AVX-512), cada um com benchmark antes/depois.
+6. Escolher toolkit GUI por uma prova de conceito que rode em Linux x86-64 e AArch64.
+7. Só depois habilitar ferramentas de alteração, cada uma com simulação, confirmação e reversão.

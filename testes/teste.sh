@@ -4,6 +4,9 @@
 set -u
 RAIZ=$(cd "$(dirname "$0")/.." && pwd)
 CAT="$RAIZ/build/lia-cat"
+ECHO="$RAIZ/build/lia-echo"
+CAT_REF="$RAIZ/build/lia-cat-ref"
+ECHO_REF="$RAIZ/build/lia-echo-ref"
 LIA="$RAIZ/build/lia"
 T=$(mktemp -d)
 trap 'chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"' EXIT
@@ -40,6 +43,48 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 chmod 600 "$T/vazio"
 "$CAT" "$T/grande" > /dev/full 2>/dev/null; [ $? -eq 1 ] && ok "lia-cat escrita falha (/dev/full): exit 1" || ko "lia-cat /dev/full"
+
+# ---------- lia-echo (ASM) e implementações de referência em C ----------
+: > "$T/vazio"
+head -c 300000 /dev/urandom > "$T/grande_echo"
+printf 'a\0b\377\n\0' > "$T/nul_echo"
+
+for prog in "$ECHO" "$ECHO_REF"; do
+    nome=$(basename "$prog")
+    "$prog" < "$T/vazio" | cmp -s - "$T/vazio" && ok "$nome: entrada vazia" || ko "$nome: entrada vazia"
+    "$prog" < "$T/nul_echo" | cmp -s - "$T/nul_echo" && ok "$nome: bytes NUL preservados" || ko "$nome: bytes NUL"
+    "$prog" < "$T/grande_echo" | cmp -s - "$T/grande_echo" && ok "$nome: arquivo maior que o buffer, byte a byte" || ko "$nome: arquivo grande"
+    saida_parcial=$(sh -c "(printf a; sleep 0.02; printf bc; sleep 0.02; printf d) | '$prog'")
+    [ "$saida_parcial" = "abcd" ] && ok "$nome: leitura parcial (pipe lento) preserva os bytes" || ko "$nome: leitura parcial ($saida_parcial)"
+done
+diff <("$ECHO" < "$T/grande_echo") <("$ECHO_REF" < "$T/grande_echo") >/dev/null \
+    && ok "lia-echo (ASM) == lia-echo-ref (C), mesma entrada" || ko "lia-echo ASM != C"
+
+"$CAT_REF" "$T/vazio" "$T/grande_echo" "$T/nul_echo" | cmp -s - <(cat "$T/vazio" "$T/grande_echo" "$T/nul_echo") \
+    && ok "lia-cat-ref (C): vários arquivos == cat" || ko "lia-cat-ref: vários arquivos"
+"$CAT_REF" /nao/existe "$T/nul_echo" > "$T/o" 2> "$T/e"; rc=$?
+[ $rc -eq 1 ] && cmp -s "$T/o" "$T/nul_echo" && grep -q '/nao/existe' "$T/e" \
+    && ok "lia-cat-ref: erro em um arquivo, continua, exit 1" || ko "lia-cat-ref: erro em um arquivo"
+diff <("$CAT" "$T/grande_echo") <("$CAT_REF" "$T/grande_echo") >/dev/null \
+    && ok "lia-cat (ASM) == lia-cat-ref (C), mesma entrada" || ko "lia-cat ASM != C"
+
+# nenhum dos quatro binários do núcleo referencia fopen/system/fork/execve/libc:
+# são estáticos, sem libc (-nostdlib), então nem poderiam resolver esses símbolos;
+# a verificação é sobre os .o antes do link, onde uma referência indevida apareceria
+# como símbolo indefinido (U).
+if command -v nm >/dev/null; then
+    for o in lia-cat.o lia-echo.o lia_cat_ref.o lia_echo_ref.o entrada.o sys.o texto.o; do
+        proibidos=$(nm -u "$RAIZ/build/$o" 2>/dev/null | grep -Ei '\b(fopen|fclose|fread|fwrite|system|popen|fork|execve|execvp|execv|malloc|printf)\b')
+        [ -z "$proibidos" ] && ok "$o: sem referência a fopen/system/fork/execve/malloc/printf" \
+            || ko "$o referencia símbolo proibido: $proibidos"
+    done
+fi
+for prog in "$CAT" "$ECHO" "$CAT_REF" "$ECHO_REF"; do
+    nome=$(basename "$prog")
+    strings -a "$prog" 2>/dev/null | grep -qiE '^(fopen|system|execve)$' \
+        && ko "$nome: string de símbolo proibido encontrada no binário" \
+        || ok "$nome: nenhuma string de fopen/system/execve no binário final"
+done
 
 # ---------- lia: CLI básica ----------
 [ "$("$LIA" --version)" = "lia 0.1.0 (x86_64-linux, sem libc)" ] && ok "lia --version" || ko "lia --version"
