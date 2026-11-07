@@ -2,7 +2,7 @@
 
 Especificação do canal compartilhado entre a CLI, a GUI e o daemon de sessão da Lia (seção 4.1 do [PLANO.md](../PLANO.md)). A GUI é uma camada fina sobre este mesmo protocolo: nenhuma lógica de execução, autorização ou auditoria é duplicada nela.
 
-> Status: especificação para a fase **0.5**. Ainda não há daemon nem GUI; a CLI hoje imprime o resultado final de cada comando (texto humano ou `--json`) sem streaming de eventos. Este documento define o contrato para quando o transporte existir.
+> Status: especificação para a fase **0.5**. Ainda não há daemon; a CLI hoje imprime o resultado final de cada comando (texto humano ou `--json`) sem streaming de eventos. Já existe uma primeira implementação de **cliente**: a GUI de prova de conceito (`gui/`, somente leitura — ver [GUI-POC.md](GUI-POC.md)), que interpreta este protocolo (`gui/protocolo.c`) e tenta se conectar ao socket da seção 1; sem daemon, ela fica em "modo sem servidor" (desconectada, de forma visível, nunca travada ou simulando dados). Este documento continua definindo o contrato completo para quando o daemon existir do outro lado.
 
 ## 1. Transporte
 

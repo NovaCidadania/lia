@@ -101,4 +101,48 @@ bench: all
 clean:
 	rm -rf $(B)
 
-.PHONY: all teste bench clean
+# ---------------------------------------------------------------------------
+# GUI (gui/): camada fina sobre docs/protocolo.md, fora do núcleo sem libc.
+# Toolchain própria (GTK4 + GLib + json-glib, via pkg-config) — não entra em
+# `all`/`teste`/`bench` de propósito: o build do núcleo (-ffreestanding
+# -nostdlib) nunca depende de bibliotecas dinâmicas do sistema, e a GUI é
+# opcional nesta etapa. Ver docs/GUI-POC.md.
+GUI_PKGS        := gtk4 gio-unix-2.0 json-glib-1.0
+GUI_CFLAGS      := -std=c17 -O2 -Wall -Wextra -Werror $(shell pkg-config --cflags $(GUI_PKGS))
+GUI_LIBS        := $(shell pkg-config --libs $(GUI_PKGS))
+TESTE_GUI_PKGS  := json-glib-1.0
+TESTE_GUI_CFLAGS := -std=c17 -O2 -Wall -Wextra -Werror $(shell pkg-config --cflags $(TESTE_GUI_PKGS))
+TESTE_GUI_LIBS  := $(shell pkg-config --libs $(TESTE_GUI_PKGS))
+
+$(B)/gui-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
+	$(CC) $(GUI_CFLAGS) -c $< -o $@
+
+# Compilação própria para make teste-gui: só GLib/json-glib (sem -I/-l de
+# GTK), provando que gui/protocolo.c é mesmo testável sem toolkit gráfico.
+$(B)/gui-protocolo-teste.o: gui/protocolo.c gui/protocolo.h | $(B)
+	$(CC) $(TESTE_GUI_CFLAGS) -c $< -o $@
+
+$(B)/gui-teste-protocolo.o: gui/teste_protocolo.c gui/protocolo.h | $(B)
+	$(CC) $(TESTE_GUI_CFLAGS) -c $< -o $@
+
+$(B)/gui-lia-gui.o: gui/lia-gui.c gui/protocolo.h | $(B)
+	$(CC) $(GUI_CFLAGS) -c $< -o $@
+
+$(B)/lia-gui: $(B)/gui-lia-gui.o $(B)/gui-protocolo.o
+	$(CC) $^ $(GUI_LIBS) -o $@
+
+$(B)/lia-gui-teste: $(B)/gui-teste-protocolo.o $(B)/gui-protocolo-teste.o
+	$(CC) $^ $(TESTE_GUI_LIBS) -o $@
+
+gui: $(B)/lia-gui
+
+teste-gui: $(B)/lia-gui-teste
+	$(B)/lia-gui-teste
+
+gui-run: gui
+	$(B)/lia-gui
+
+gui-smoke: gui
+	sh gui/teste_fumaca.sh
+
+.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke

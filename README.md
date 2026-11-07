@@ -29,6 +29,29 @@ build/lia-mem-teste              # lia_memcpy/memset/memcmp: escalar/SSE2/AVX2 v
 build/lia-mem-bench              # benchmark por backend e tamanho (ciclos/byte, MiB/s)
 ```
 
+## GUI (prova de conceito, somente leitura)
+
+A GUI (`gui/`) é uma camada fina sobre o protocolo NDJSON ([docs/protocolo.md](docs/protocolo.md)):
+não há núcleo nem lógica de execução aqui, só apresentação. Diferente do resto
+do repositório, usa libc e bibliotecas dinâmicas normais (GTK4/GLib/json-glib)
+e por isso **não** entra em `make`/`make teste`/`make bench` — é um build
+separado, opcional, que precisa de `pkg-config` + `gtk4` + `json-glib-1.0`
+instalados (ver [docs/GUI-POC.md](docs/GUI-POC.md) para a decisão de toolkit).
+
+```sh
+make gui          # compila build/lia-gui (requer GTK4/GLib/json-glib via pkg-config)
+make teste-gui     # testes de gui/protocolo.c — parsing/validação NDJSON, sem display (33 testes)
+make gui-run       # compila e abre a janela
+make gui-smoke     # com display: confere ausência de sudo/pkexec/exec* e execução sem daemon
+```
+
+Hoje não existe daemon (`~/.lia/maquina/estado/sessao.sock`), então o estado
+normal da GUI é **desconectada** — ela mostra isso claramente em vez de travar
+ou simular uma conexão. Nesta primeira etapa a GUI é somente leitura: o campo
+de entrada não envia nada ao daemon (só ecoa localmente como rascunho), e
+`gui/protocolo.c` recusa, antes de qualquer tentativa de envio, qualquer
+mensagem com efeito (`solicitar`/`aprovar`).
+
 A Lia nunca guarda senha, nunca altera `/etc/sudoers` por conta própria e nunca mantém root como estado permanente — toda elevação passa pelo `sudo` real do sistema, caso a caso. Veja a seção de privilégios do [PLANO.md](PLANO.md).
 
 ## Princípios
