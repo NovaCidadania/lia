@@ -27,6 +27,10 @@ static void ajuda(void)
         "                          consulta o inventário salvo\n"
         "  tools probe --safe      executa só testes conhecidos e não destrutivos\n"
         "\n"
+        "  system diagnosticar [--json]   distro, kernel, CPU e memória (somente leitura)\n"
+        "  system recursos [--json]       CPU, memória, swap e uptime (somente leitura)\n"
+        "  system dispositivos [--json]   dispositivos de rede, bloco e PCI (somente leitura)\n"
+        "\n"
         "  shell [-c CMD]          abre o shell do usuário (ou roda CMD com semântica de shell)\n"
         "  sudo ARGS...            executa o sudo do sistema com ARGS, sem shell no meio\n"
         "  root                    shell de root via sudo (a pessoa autentica; a Lia não guarda senha)\n"
@@ -60,6 +64,8 @@ int lia_main(long argc, char **argv, char **envp)
         rc = 0;
     } else if (!lia_strcmp(argv[1], "tools")) {
         rc = cmd_tools((int)argc - 2, argv + 2);
+    } else if (!lia_strcmp(argv[1], "system")) {
+        rc = cmd_system((int)argc - 2, argv + 2);
     } else if (!lia_strcmp(argv[1], "shell")) {
         rc = cmd_shell((int)argc - 2, argv + 2);
     } else if (!lia_strcmp(argv[1], "sudo")) {

@@ -30,6 +30,9 @@ void lia_executar(const char *caminho, const char *const *argv, const char *cons
 int cmd_shell(int argc, char **argv);
 int cmd_sudo(int argc, char **argv);
 int cmd_root(int argc, char **argv);
+
+/* sistema.c — somente leitura */
+int cmd_system(int argc, char **argv);
 int cmd_tools(int argc, char **argv);
 
 #endif

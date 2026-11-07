@@ -250,9 +250,13 @@ A GUI deve ser uma camada fina sobre o mesmo protocolo local da CLI, sem lógica
 
 O transporte inicial será um socket local autenticado, com mensagens versionadas. A GUI não receberá acesso privilegiado direto; somente o daemon de sessão poderá solicitar capacidades autorizadas.
 
+Especificação completa do protocolo: [docs/protocolo.md](docs/protocolo.md).
+
 ### API de ferramentas
 
 Cada ferramenta publica um manifesto com nome, versão, parâmetros tipados, capacidades requeridas, classificação de risco, efeitos, idempotência, timeout, limites e estratégia de reversão. O modelo escolhe ferramentas, mas o executor valida o manifesto e a política independentemente.
+
+Especificação completa do manifesto, com exemplos das ferramentas já implementadas: [docs/manifesto.md](docs/manifesto.md).
 
 ---
 

@@ -7,7 +7,7 @@ LDFLAGS := -nostdlib -static -no-pie
 B := build
 
 RUNTIME := $(B)/entrada.o $(B)/sys.o $(B)/texto.o
-CLI     := $(B)/main.o $(B)/ferramentas.o $(B)/privilegio.o
+CLI     := $(B)/main.o $(B)/ferramentas.o $(B)/privilegio.o $(B)/sistema.o
 
 all: $(B)/lia $(B)/lia-cat
 

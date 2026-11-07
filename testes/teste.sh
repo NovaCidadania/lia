@@ -128,6 +128,45 @@ cp "$T/inv.bak" "$HOME/.lia/maquina/inventario/ferramentas.lia"
 "$LIA" tools list >/dev/null 2>&1 && ok "inventário restaurado volta a ser lido" || ko "restauração"
 
 
+# ---------- lia system (somente leitura) ----------
+nproc_real=$(/usr/bin/nproc)
+[ "$("$LIA" system recursos | sed -n 's/^CPU:    \([0-9]*\).*/\1/p')" = "$nproc_real" ] && ok "system recursos: núcleos == nproc ($nproc_real)" || ko "system recursos: núcleos"
+[ "$("$LIA" system diagnosticar --json | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["cpu"]["nucleos"])')" = "$nproc_real" ] \
+    && ok "system diagnosticar --json: cpu.nucleos == nproc" || ko "system diagnosticar --json: nucleos"
+"$LIA" system diagnosticar --json | python3 -I -c 'import json,sys; d=json.load(sys.stdin); assert d["kernel"]["sysname"]=="Linux"' \
+    && ok "system diagnosticar --json: kernel.sysname == Linux" || ko "system diagnosticar --json: kernel"
+real_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+lia_total_kb=$("$LIA" system recursos --json | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["memoria_kb"]["total"])')
+[ "$real_total_kb" = "$lia_total_kb" ] && ok "system recursos --json: memoria_kb.total == /proc/meminfo" || ko "memoria_kb.total ($lia_total_kb != $real_total_kb)"
+
+n_net=$(ls /sys/class/net | /usr/bin/wc -l); n_blk=$(ls /sys/class/block | /usr/bin/wc -l); n_pci=$(ls /sys/bus/pci/devices | /usr/bin/wc -l)
+n_lia=$("$LIA" system dispositivos --json | python3 -I -c 'import json,sys;print(len(json.load(sys.stdin)))')
+[ "$n_lia" = "$((n_net + n_blk + n_pci))" ] && ok "system dispositivos --json: total == rede+bloco+pci do /sys ($n_lia)" || ko "contagem de dispositivos"
+"$LIA" system dispositivos --json | python3 -I -c 'import json,sys
+d=json.load(sys.stdin)
+nomes=set(x["nome"] for x in d if x["classe"]=="rede")
+assert nomes >= {"lo"}, nomes' && ok "system dispositivos: inclui a interface lo" || ko "dispositivos: lo ausente"
+"$LIA" system dispositivos | grep -q '^rede    lo' && ok "system dispositivos (texto): inclui lo" || ko "dispositivos texto: lo"
+pci0=$(ls /sys/bus/pci/devices | head -1)
+vendor_real=$(/usr/bin/cat "/sys/bus/pci/devices/$pci0/vendor")
+vendor_lia=$("$LIA" system dispositivos --json | python3 -I -c "import json,sys; d=json.load(sys.stdin); print(next(x['vendor'] for x in d if x['nome']=='$pci0'))")
+[ "$vendor_real" = "$vendor_lia" ] && ok "system dispositivos: vendor PCI == /sys/bus/pci/devices/.../vendor" || ko "vendor PCI ($vendor_lia != $vendor_real)"
+
+"$LIA" system >/dev/null 2>&1; [ $? -eq 2 ] && ok "system sem subcomando: exit 2" || ko "system sem subcomando"
+"$LIA" system bogus >/dev/null 2>&1; [ $? -eq 2 ] && ok "system subcomando desconhecido: exit 2" || ko "system subcomando desconhecido"
+"$LIA" system diagnosticar --bogus >/dev/null 2>&1; [ $? -eq 2 ] && ok "system opção desconhecida: exit 2" || ko "system opção desconhecida"
+
+# nenhum comando somente leitura chama fork/execve (sem shell, sem processo filho, sem privilégio)
+if command -v nm >/dev/null; then
+    nm -u "$RAIZ/build/sistema.o" 2>/dev/null | grep -qE 'lia_fork|lia_execve' \
+        && ko "cli/sistema.c referencia fork/execve (deveria ser só leitura)" \
+        || ok "cli/sistema.c não referencia fork/execve (confirmado no objeto compilado)"
+fi
+
+# roda sem qualquer variável de ambiente de privilégio e sem rede: tem que funcionar igual
+diff <(env -i HOME="$HOME" "$LIA" system diagnosticar) <("$LIA" system diagnosticar) >/dev/null \
+    && ok "system diagnosticar não depende do ambiente além de HOME" || ko "system diagnosticar depende do ambiente"
+
 # ---------- shell, sudo e root ----------
 [ "$("$LIA" shell -c 'echo oi')" = oi ] && ok "lia shell -c executa com semântica de shell" || ko "lia shell -c"
 saida=$(printf 'echo $((6*7))\nexit 7\n' | "$LIA" shell); rc=$?

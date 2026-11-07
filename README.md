@@ -10,23 +10,25 @@
 make            # compila build/lia e build/lia-cat (estáticos, sem libc)
 make teste      # testes reais nesta máquina
 
-build/lia tools discover        # inventário dos executáveis do sistema
-build/lia tools probe --safe    # testa os que têm probe seguro conhecido
+build/lia tools discover        # inventário dos executáveis do sistema (somente leitura)
+build/lia tools probe --safe    # testa os que têm probe seguro conhecido, sem privilégio
 build/lia tools list --estado PROBE_SUCCESS
-build/lia shell                 # shell do usuário
-build/lia root --status         # root está disponível via sudo?
-build/lia root                  # shell de root via sudo (você autentica)
-build/lia root -- id -u         # um comando como root
+build/lia shell                 # abre o shell do usuário, explicitamente solicitado
+build/lia root --status         # diz se o `sudo` do sistema concederia root agora, sem elevar nada
+build/lia root --auth           # pede ao `sudo` real para autenticar nesta sessão (a senha fica só com o sudo)
+build/lia root -- id -u         # executa um comando concreto como root, com auditoria e autenticação a cada vez
 ```
+
+A Lia nunca guarda senha, nunca altera `/etc/sudoers` por conta própria e nunca mantém root como estado permanente — toda elevação passa pelo `sudo` real do sistema, caso a caso. Veja a seção de privilégios do [PLANO.md](PLANO.md).
 
 ## Princípios
 
 1. **Local primeiro.** Nada sai da máquina sem decisão explícita do usuário.
-2. **Performance acima de conveniência.** Núcleo em **Assembly**, suporte em **C**, sem dependências pesadas.
+2. **Performance acima de conveniência.** Núcleo em **Assembly** (nos caminhos críticos medidos por benchmark), suporte em **C**, sem dependências pesadas.
 3. **Ler e interpretar dados — de verdade.** Lia parte dos bytes, não do texto. Todo arquivo do sistema (PDF, imagem, binário ELF, áudio, planilha, banco de dados) é lido por um decodificador próprio, escrito para aquele formato.
 4. **A máquina é o contexto.** Lia prefere caminhos voltados ao sistema em que está instalada (syscalls, `/proc`, `/sys`, dispositivos) a interpretar texto puro.
-5. **Poder total, rastreável.** Primeiro objetivo: shell, sudo e root o quanto antes (via `sudo` real, com a autenticação da pessoa). Acesso a root/sudo/Admin, entrada e saída (mouse, teclado, tela), configuração do SO e hardware — com cada ação registrada e auditável.
-6. **Aprende e compartilha.** Treinamento local (adaptadores) e troca de conhecimento entre instalações.
+5. **Capacidade, não acesso irrestrito, e privilégio mínimo e temporário.** Cada ferramenta declara o que precisa (arquivos, entrada/saída, rede, hardware, administração) e o risco da ação. Elevar a root/Admin usa sempre a API oficial do sistema (`sudo`, polkit, UAC), uma ação concreta por vez, com autenticação da pessoa a cada vez — nunca senha guardada, nunca alteração automática de `sudoers`, nunca bypass de autenticação. Toda ação com efeito é registrada antes e depois, de forma auditável e, quando possível, reversível.
+6. **Aprende e compartilha.** Treinamento local (adaptadores) e troca de conhecimento entre instalações, só após aprovação e com pacotes verificáveis.
 
 ## Arquitetura (resumo)
 
