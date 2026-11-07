@@ -27,6 +27,7 @@ static const ManifestoReal TABELA[] = {
     {
         .base = {
             .nome = "tools.discover", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "lê PATH e diretórios convencionais; grava ~/.lia/maquina/inventario/ferramentas.lia e ~/.lia/humano/diagnosticos/ferramentas.md",
             .timeout_padrao_ms = 15000,
@@ -36,6 +37,7 @@ static const ManifestoReal TABELA[] = {
     {
         .base = {
             .nome = "tools.list", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
             .efeitos = "lê ~/.lia/maquina/inventario/ferramentas.lia; não escreve nada",
             .timeout_padrao_ms = 5000,
@@ -45,6 +47,7 @@ static const ManifestoReal TABELA[] = {
     {
         .base = {
             .nome = "tools.probe", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "executa, por até poucos segundos cada, só ferramentas do catálogo de probes seguros, com argumento inofensivo e sem privilégio; atualiza o inventário",
             .timeout_padrao_ms = 45000,
@@ -54,6 +57,7 @@ static const ManifestoReal TABELA[] = {
     {
         .base = {
             .nome = "sistema.diagnosticar", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
             .efeitos = "lê /etc/os-release, /proc/cpuinfo, /proc/meminfo, uname; não escreve nada",
             .timeout_padrao_ms = 5000,
@@ -63,6 +67,7 @@ static const ManifestoReal TABELA[] = {
     {
         .base = {
             .nome = "sistema.recursos", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
             .efeitos = "lê /proc/meminfo, /proc/cpuinfo, /proc/uptime; não escreve nada",
             .timeout_padrao_ms = 5000,
@@ -72,6 +77,7 @@ static const ManifestoReal TABELA[] = {
     {
         .base = {
             .nome = "sistema.dispositivos", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
             .efeitos = "lê /sys/class/net, /sys/class/block, /sys/bus/pci/devices; não escreve nada",
             .timeout_padrao_ms = 5000,
@@ -80,6 +86,19 @@ static const ManifestoReal TABELA[] = {
     },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))
+
+const char * const *manifesto_real_listar_nomes(void)
+{
+    static const char *nomes[N_TABELA + 1];
+    static gboolean pronto = FALSE;
+    if (!pronto) {
+        for (size_t i = 0; i < N_TABELA; i++)
+            nomes[i] = TABELA[i].base.nome;
+        nomes[N_TABELA] = NULL;
+        pronto = TRUE;
+    }
+    return nomes;
+}
 
 const ManifestoReal *manifesto_real_buscar(const char *nome)
 {

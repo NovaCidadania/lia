@@ -25,8 +25,10 @@
 
 typedef struct {
     const char *nome;
+    const char *versao;           /* semver — docs/manifesto.md §1 "versao" */
     const char *risco;            /* nenhum|baixo|medio|alto|admin — docs/manifesto.md §1 */
     gboolean requer_aprovacao;
+    gboolean idempotente;         /* docs/manifesto.md §1 "idempotente" */
     const char *reversivel;       /* sim|nao_aplicavel|nao */
     const char * const *capacidades; /* terminada em NULL */
     const char *efeitos;          /* descrição legível, única (docs/manifesto.md exige "nunca vazio") */
@@ -60,6 +62,12 @@ struct Executor {
     gboolean restringe_a_leitura;
 
     const ExecutorManifesto *(*buscar_manifesto)(const char *ferramenta);
+
+    /* Lista (terminada em NULL, não possui) todos os nomes de ferramenta
+     * conhecidos por este backend — usada só para montar a seção
+     * "ferramentas disponíveis" do prompt do modelo (sessiond/prompt.h);
+     * nunca para decidir nada sobre execução/aprovação. */
+    const char * const *(*listar_nomes)(const Executor *self);
 
     /* NULL se os parâmetros são válidos contra o manifesto; senão uma
      * mensagem (alocada, g_free) explicando o que falhou. Nunca decide

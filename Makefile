@@ -168,7 +168,10 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-executor-real.o $(B)/sessiond-manifesto-real.o \
                   $(B)/sessiond-protocolo.o $(B)/sessiond-syscall.o \
                   $(B)/sessiond-pic-texto.o $(B)/sessiond-pic-sys.o \
-                  $(B)/sessiond-pic-sistema.o $(B)/sessiond-pic-ferramentas.o
+                  $(B)/sessiond-pic-sistema.o $(B)/sessiond-pic-ferramentas.o \
+                  $(B)/sessiond-modelo-comum.o $(B)/sessiond-modelo-mock.o \
+                  $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
+                  $(B)/sessiond-prompt.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -191,7 +194,22 @@ $(B)/sessiond-executor-real.o: sessiond/executor_real.c sessiond/executor.h sess
 $(B)/sessiond-executor-comum.o: sessiond/executor_comum.c sessiond/executor.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/executor.h gui/protocolo.h | $(B)
+$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/executor.h sessiond/modelo.h sessiond/prompt.h gui/protocolo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-modelo-comum.o: sessiond/modelo_comum.c sessiond/modelo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-modelo-mock.o: sessiond/modelo_mock.c sessiond/modelo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-modelo-ollama.o: sessiond/modelo_ollama.c sessiond/modelo.h ollama/cliente_ollama.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-cliente-ollama.o: ollama/cliente_ollama.c ollama/cliente_ollama.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-prompt.o: sessiond/prompt.c sessiond/prompt.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-pic-texto.o: runtime/texto.c runtime/lia.h | $(B)
@@ -217,4 +235,7 @@ teste-sessiond: sessiond
 integration: sessiond gui
 	sh testes/integration/teste_integracao.sh
 
-.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration
+teste-modelo: sessiond
+	sh testes/integration/teste_modelo.sh
+
+.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo

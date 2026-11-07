@@ -233,6 +233,12 @@ static const ExecutorManifesto *real_buscar_manifesto(const char *ferramenta)
     return m ? &m->base : NULL;
 }
 
+static const char * const *real_listar_nomes(const Executor *self)
+{
+    (void)self;
+    return manifesto_real_listar_nomes();
+}
+
 static char *real_validar_parametros(const ExecutorManifesto *m, JsonObject *parametros)
 {
     const ManifestoReal *mr = manifesto_real_buscar(m->nome);
@@ -287,6 +293,7 @@ static Executor EXECUTOR_REAL = {
     .nome_backend = "real",
     .restringe_a_leitura = TRUE,
     .buscar_manifesto = real_buscar_manifesto,
+    .listar_nomes = real_listar_nomes,
     .validar_parametros = real_validar_parametros,
     .iniciar = real_iniciar,
     .cancelar = real_cancelar,

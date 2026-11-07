@@ -2,14 +2,17 @@
 
 Especificação do canal compartilhado entre a CLI, a GUI e o daemon de sessão da Lia (seção 4.1 do [PLANO.md](../PLANO.md)). A GUI é uma camada fina sobre este mesmo protocolo: nenhuma lógica de execução, autorização ou auditoria é duplicada nela.
 
-> Status: especificação para a fase **0.5**. Agora existem os dois lados:
+> Status: especificação para a fase **0.6**. Agora existem os dois lados:
 > `gui/protocolo.c` (cliente puro, usado pela GUI — ver [GUI-POC.md](GUI-POC.md))
 > e `sessiond/sessiond.c` (**lia-sessiond**, o daemon — servidor de protocolo
-> e máquina de estados). **O executor do daemon nesta etapa é inteiramente
-> simulado** (`sessiond/manifesto_mock.c`): nenhuma ferramenta real é
-> executada, nenhum privilégio é pedido — ver seção 8. A CLI (`lia tools`,
-> `lia shell`, `lia sudo`, `lia root`) continua funcionando como processos de
-> execução única, sem o socket (seção 6).
+> e máquina de estados). **O executor real do daemon está em produção**
+> (`sessiond/executor_real.c`, seis ferramentas de leitura — ver seção 8);
+> o mock (`sessiond/manifesto_mock.c`) existe só para teste. Esta etapa
+> também adiciona a ponte com o modelo local (Ollama) para chat — seção 9
+> — mantendo o agente inteiramente somente leitura: o modelo nunca aprova
+> nem executa nada por si só. A CLI (`lia tools`, `lia shell`, `lia sudo`,
+> `lia root`) continua funcionando como processos de execução única, sem o
+> socket (seção 6).
 
 ## 1. Transporte
 
@@ -47,21 +50,24 @@ Uma versão incompatível do protocolo é rejeitada explicitamente (`erro` com `
 
 | `tipo` | `dados` | Efeito |
 |---|---|---|
-| `solicitar` | `{ "ferramenta": "tools.discover", "parametros": {...}, "modo": "simular" \| "executar" }` | Pede a execução (ou simulação) de uma ferramenta do manifesto. |
+| `solicitar` | `{ "ferramenta": "tools.discover", "parametros": {...}, "modo": "simular" \| "executar", "objetivo"?, "justificativa"?, "origem_modelo"?: bool, "pergunta_id"? }` | Pede a execução (ou simulação) de uma ferramenta do manifesto. Os quatro últimos campos são opcionais e só informativos — ver seção 9: uma pessoa pode copiá-los de uma `proposta` do modelo, mas a validação é idêntica com ou sem eles. |
 | `aprovar` | `{ "plano_id": "...", "decisao": "aprovar" \| "rejeitar", "escopo": "uma_vez" \| "sessao" }` | Resposta humana a um `plano` pendente. |
 | `cancelar` | `{ "execucao_id": "..." }` | Pede cancelamento cooperativo de uma execução em andamento. |
 | `assinar` | `{ "canais": ["auditoria", "execucao"] }` | Assina um fluxo de eventos (ex.: a GUI assina `auditoria` para mostrar o histórico ao vivo). |
+| `perguntar` | `{ "mensagem": "...", "arquivos"?: [{"caminho","conteudo"}] }` | Fala com o modelo (seção 9) — nunca aprova nem executa nada por si só. Sempre aceita, independente da máquina de estados de execução acima. |
 
 ### Daemon → cliente
 
 | `tipo` | `dados` | Significado |
 |---|---|---|
-| `plano` | `{ "plano_id", "ferramenta", "parametros_normalizados", "capacidades", "risco", "efeitos", "reversivel", "requer_aprovacao": bool }` | O executor valida o manifesto e descreve o que faria, **antes** de qualquer efeito. |
+| `plano` | `{ "plano_id", "versao_manifesto", "objetivo", "justificativa", "ferramenta", "parametros_normalizados", "passos": [{"ferramenta","parametros"}], "capacidades", "risco", "efeitos", "idempotente": bool, "timeout_padrao_ms", "reversivel", "requer_aprovacao": bool }` | O executor valida o manifesto e descreve o que faria, **antes** de qualquer efeito. `passos` é sempre um único elemento nesta etapa (ver seção 9.3) — existe para o formato já suportar múltiplos passos sem quebrar quem lê `ferramenta`/`parametros_normalizados` hoje. |
 | `progresso` | `{ "execucao_id", "fracao": 0.0–1.0, "mensagem": "..." }` | Atualização opcional durante uma execução longa. |
 | `saida` | `{ "execucao_id", "fluxo": "stdout" \| "stderr", "trecho": "..." }` | Saída incremental de uma ferramenta que produz texto. |
 | `resultado` | `{ "execucao_id", "estado": "sucesso" \| "falha" \| "cancelado", "codigo_saida": int, "dados": {...} }` | Resultado final, sempre emitido mesmo em erro ou cancelamento. |
 | `auditoria` | `{ "entrada_id", "ts", "identidade", "ferramenta", "parametros_normalizados", "capacidades", "resultado_resumo", "reversao_disponivel": bool }` | Eco do registro gravado em `~/.lia/humano/auditoria/`; é sempre gravado antes de ser emitido. |
 | `erro` | `{ "codigo", "mensagem", "detalhe" }` | Falha do protocolo ou do daemon (não confundir com `resultado.estado = "falha"`, que é falha da ferramenta). |
+| `proposta` | `{ "pergunta_id", "resposta_texto", "ferramenta_proposta": {"ferramenta","parametros","justificativa"} \| null }` | Resposta do modelo a `perguntar` (seção 9). Nunca é um plano — só texto e, no máximo, uma sugestão de ferramenta que a pessoa pode decidir encaminhar como `solicitar`. |
+| `resposta` | `{ "pergunta_id", "resposta_texto" }` | Resumo do modelo depois de um `resultado` de execução que se originou de uma `proposta` sua (`origem_modelo` em `solicitar`) — nunca propõe uma nova ferramenta. |
 
 ## 4. Ciclo de vida de uma ação com efeito
 
@@ -125,3 +131,34 @@ O executor é plugável (`sessiond/executor.h`) e dois backends existem:
 - **`mock`** (`sessiond/executor_mock.c`/`sessiond/manifesto_mock.c`, só via `LIA_SESSIOND_EXECUTOR=mock`) — tabela fixa e fictícia (`mock.leitura`, `mock.escrita` risco médio, `mock.admin` risco admin) só para testar a máquina de estados inteira (plano → aprovação → progresso/saída → resultado → auditoria, replay, cancelamento) sem nenhum efeito real em nenhum caso — nem `mock.admin` jamais chama `sudo`/`pkexec`. **Nunca é o executor padrão em produção** (`sessiond.c`, `escolher_executor`).
 
 Validação de parâmetros (`validar_parametros`) e a política "só capacidades de leitura" (`Executor.restringe_a_leitura`, verificada em `tratar_solicitar` antes de qualquer execução) são do daemon, nunca da GUI — a GUI só reflete o que o daemon decidiu.
+
+`sessiond/manifesto_mock.c` também tem duas ferramentas fictícias (nunca no backend `real`) usadas só para fechar lacunas de teste que o executor real não exercita de forma rápida e determinística: `mock.timeout` (nunca conclui por si só — só o watchdog de timeout de verdade do daemon resolve) e `mock.saida_grande` (reporta `limite_excedido` deterministicamente, sem gerar nenhum dado).
+
+## 9. Chat com o modelo local (Ollama) — sempre somente leitura
+
+Ver `sessiond/modelo.h`, `sessiond/prompt.h` e `docs/THREAT-MODEL.md` §5.2 para o desenho completo. Resumo do que este protocolo garante:
+
+- **O modelo nunca recebe o socket.** A camada de modelo (`ModeloBackend`) não importa nem tem acesso a nenhum símbolo de aprovação/execução — arquiteturalmente, não só por política.
+- **O modelo nunca aprova nem executa nada.** `perguntar` produz, no máximo, texto mais uma sugestão de ferramenta (`proposta`). Para essa sugestão ter efeito, uma pessoa precisa encaminhá-la como um `solicitar` normal — que passa pela mesma validação independente (manifesto, capacidades, parâmetros) que qualquer `solicitar` digitado à mão, mesmo marcado com `origem_modelo: true`. Uma ferramenta desconhecida ou proibida proposta pelo modelo é rejeitada exatamente como seria se um humano a tivesse digitado.
+- **O modelo nunca altera um plano depois de aprovado.** Ele não escreve em nenhum dos dois lados dessa transação — só a pessoa, via `solicitar`/`aprovar`.
+- **Conteúdo de arquivo é sempre dado, nunca instrução.** `perguntar.dados.arquivos[].conteudo` entra no prompt dentro de um bloco delimitado e explicitamente marcado como não confiável (`sessiond/prompt.c`); as instruções de sistema dizem ao modelo para nunca tratar esse conteúdo como comando, mesmo que pareça um.
+- **Backend real (Ollama) só fala com `127.0.0.1`/`localhost`.** Endpoint fora disso é rejeitado antes de qualquer E/S (`ollama/cliente_ollama.c`).
+
+Fluxo típico:
+
+```
+cliente                     daemon                      modelo
+   | perguntar             →  |                            |
+   |                          | monta prompt (prompt.c)  →  |
+   |                          |                    proposta  |
+   |  ←  proposta             |  ←                           |
+   | solicitar(origem_modelo) →  |                           |
+   |                       plano (validação igual à de sempre)|
+   |  ←  plano, aprovar, resultado — fluxo normal da seção 4  |
+   |                          | (se origem_modelo) monta novo
+   |                          | prompt com o resultado    →  |
+   |                          |                     resposta  |
+   |  ←  resposta             |  ←                           |
+```
+
+`escolher_modelo` (`sessiond.c`) seleciona o backend via `LIA_SESSIOND_MODELO`: **`mock` é o padrão** (determinístico, sem rede — ao contrário do executor, onde o padrão é o `real`, porque aqui `ollama` exige um servidor Ollama de verdade rodando em `127.0.0.1:11434` por padrão). `LIA_SESSIOND_MODELO=ollama` ativa o backend real; `LIA_OLLAMA_HOST`/`LIA_OLLAMA_PORTA`/`LIA_OLLAMA_MODELO`/`LIA_OLLAMA_TIMEOUT_MS` configuram a conexão.

@@ -87,6 +87,19 @@ aceita conexões do mesmo uid (`SO_PEERCRED` — limitações documentadas em
 
 A Lia nunca guarda senha, nunca altera `/etc/sudoers` por conta própria e nunca mantém root como estado permanente — toda elevação passa pelo `sudo` real do sistema, caso a caso. Veja a seção de privilégios do [PLANO.md](PLANO.md).
 
+## Chat com o modelo local (Ollama) — somente leitura
+
+`sessiond/modelo.h` acrescenta um backend de modelo plugável ao mesmo daemon, para a mensagem de protocolo `perguntar`/`proposta`/`resposta`
+(ver [docs/protocolo.md](docs/protocolo.md) §9 e [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) §5.2). O modelo **nunca** aprova, executa ou altera um plano por si só — ele só produz texto e, no máximo, uma sugestão de ferramenta, que uma pessoa precisa reenviar como `solicitar` normal, passando pela mesma validação independente de sempre. `LIA_SESSIOND_MODELO=mock` (padrão, determinístico, sem rede) ou `LIA_SESSIOND_MODELO=ollama` (real, só fala com `127.0.0.1`/`localhost`, nunca por padrão):
+
+```sh
+make teste-modelo    # chat (mock), watchdog de timeout/limite de saída do
+                      # daemon de verdade, e o cliente Ollama real contra um
+                      # servidor Ollama falso (testes/integration/ollama_fake.py)
+```
+
+Conteúdo de arquivo enviado em `perguntar.dados.arquivos` é sempre tratado como dado, nunca instrução — delimitado e marcado "não confiável" no prompt (`sessiond/prompt.c`), nunca interpolado nas instruções de sistema.
+
 ## Princípios
 
 1. **Local primeiro.** Nada sai da máquina sem decisão explícita do usuário.

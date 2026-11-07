@@ -2,7 +2,7 @@
 
 Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica um manifesto. O executor valida o manifesto e a política do usuário **independentemente do modelo**: o modelo escolhe a ferramenta e os parâmetros, mas não decide se ela é permitida.
 
-> **Nota:** o daemon de sessão (`docs/protocolo.md` §8) implementa exatamente estas seis ferramentas de leitura em `sessiond/manifesto_real.c` (o executor padrão). `sessiond/manifesto_mock.c` define, separadamente, uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`) só para testar a máquina de estados do protocolo — ativada apenas com `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão em produção; não deve ser confundida com as ferramentas reais.
+> **Nota:** o daemon de sessão (`docs/protocolo.md` §8) implementa exatamente estas seis ferramentas de leitura em `sessiond/manifesto_real.c` (o executor padrão). `sessiond/manifesto_mock.c` define, separadamente, uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`, mais `mock.timeout` e `mock.saida_grande`, fixtures só para exercitar o watchdog de timeout e o limite de saída do daemon de verdade) só para testar a máquina de estados do protocolo — ativada apenas com `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão em produção; não deve ser confundida com as ferramentas reais.
 
 ## 1. Campos obrigatórios
 
@@ -161,3 +161,9 @@ Nenhuma ferramenta neste projeto tem `capacidades: ["admin"]` com `requer_aprova
 - `cancelar` sem `execucao_id`, ou com um que não corresponde à execução em andamento da própria conexão → `estado_invalido` (nunca cancela a execução errada por engano).
 
 Esta validação é do executor, não do modelo: um modelo comprometido ou um arquivo malicioso interpretado como instrução não pode se autorizar.
+
+## 6. Manifesto (o que uma ferramenta declara) vs. plano (o que uma execução concreta propõe)
+
+Este documento descreve o **manifesto**: a declaração estática de uma ferramenta, carregada uma vez. Uma execução concreta gera, em cima dele, um **plano** (mensagem `plano` — `docs/protocolo.md` §3), com campos próprios dessa instância: `plano_id`, `versao_manifesto` (cópia do `versao` do manifesto no momento do plano, para detectar manifesto trocado entre o plano e a aprovação), `objetivo`/`justificativa` (opcionais, descrevem o "porquê" desta chamada específica), `passos` (lista — hoje sempre um único passo nesta etapa), e os campos do próprio manifesto (`capacidades`, `risco`, `efeitos`, `idempotente`, `timeout_padrao_ms`, `reversivel`, `requer_aprovacao`) ecoados para a pessoa decidir sem precisar confiar em memória.
+
+O modelo de linguagem (`docs/protocolo.md` §9, `docs/THREAT-MODEL.md` §5.2) pode sugerir um `objetivo`/`justificativa` e qual ferramenta/parâmetros usar — mas nunca gera um `plano` diretamente: a sugestão (`proposta`) só se torna um `plano` de verdade quando uma pessoa a reenvia como `solicitar`, passando pela mesma validação de manifesto/capacidade/parâmetro desta seção.

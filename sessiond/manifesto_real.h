@@ -33,6 +33,10 @@ typedef struct {
 
 const ManifestoReal *manifesto_real_buscar(const char *nome);
 
+/* Terminada em NULL, não possui — só os nomes, para o prompt do modelo
+ * (sessiond/prompt.h); nunca usada para decidir nada sobre execução. */
+const char * const *manifesto_real_listar_nomes(void);
+
 /* NULL se ok; senão mensagem alocada (g_free) explicando o problema. Só
  * checa forma dos parâmetros (tipo/enum/chave desconhecida) — nunca
  * decide capacidade ou aprovação. */

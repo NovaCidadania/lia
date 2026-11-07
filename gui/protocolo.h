@@ -25,6 +25,7 @@ typedef enum {
     LIA_MSG_APROVAR,
     LIA_MSG_CANCELAR,
     LIA_MSG_ASSINAR,
+    LIA_MSG_PERGUNTAR,    /* fala com o modelo — nunca aprova nem executa nada por si só */
     /* daemon -> cliente */
     LIA_MSG_PLANO,
     LIA_MSG_PROGRESSO,
@@ -32,6 +33,8 @@ typedef enum {
     LIA_MSG_RESULTADO,
     LIA_MSG_AUDITORIA,
     LIA_MSG_ERRO,
+    LIA_MSG_PROPOSTA,     /* resposta do modelo a 'perguntar' — texto + no máx. uma sugestão de ferramenta, nunca um plano */
+    LIA_MSG_RESPOSTA,     /* resumo do modelo após um resultado de execução que se originou de uma proposta sua */
 } LiaMsgTipo;
 
 typedef enum {
@@ -126,6 +129,11 @@ typedef enum {
     LIA_ENVIO_RECUSADO_CANAL_DESCONHECIDO, /* 'assinar' com canal fora de {"auditoria","execucao"} */
     LIA_ENVIO_RECUSADO_NADA_PARA_CANCELAR, /* 'cancelar' sem execução em andamento */
 } LiaEnvioErro;
+
+/* 'perguntar' é sempre permitido (não tem efeito — é conversa com o
+ * modelo); 'proposta'/'resposta' do daemon são sempre aceitas pelo
+ * cliente como qualquer outra mensagem informativa. Nenhuma trava extra
+ * de lia_sessao_validar_envio é necessária para esses dois tipos. */
 
 /* Valida localmente, ANTES de qualquer tentativa de escrever no socket, se
  * a GUI pode enviar esta mensagem. canais/n_canais só é usado para

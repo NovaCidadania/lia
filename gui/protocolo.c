@@ -7,12 +7,15 @@ static const struct { const char *nome; LiaMsgTipo tipo; } TABELA_TIPOS[] = {
     { "aprovar",   LIA_MSG_APROVAR },
     { "cancelar",  LIA_MSG_CANCELAR },
     { "assinar",   LIA_MSG_ASSINAR },
+    { "perguntar", LIA_MSG_PERGUNTAR },
     { "plano",     LIA_MSG_PLANO },
     { "progresso", LIA_MSG_PROGRESSO },
     { "saida",     LIA_MSG_SAIDA },
     { "resultado", LIA_MSG_RESULTADO },
     { "auditoria", LIA_MSG_AUDITORIA },
     { "erro",      LIA_MSG_ERRO },
+    { "proposta",  LIA_MSG_PROPOSTA },
+    { "resposta",  LIA_MSG_RESPOSTA },
 };
 #define N_TIPOS (sizeof(TABELA_TIPOS) / sizeof(TABELA_TIPOS[0]))
 

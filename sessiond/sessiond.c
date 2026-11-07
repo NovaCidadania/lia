@@ -41,6 +41,8 @@
 
 #include "../gui/protocolo.h"
 #include "executor.h"
+#include "modelo.h"
+#include "prompt.h"
 
 #define LIA_SESSIOND_LINHA_MAX 65536
 #define LIA_SESSIOND_CHUNK 4096
@@ -72,6 +74,15 @@ typedef struct {
     char *execucao_id_atual;
     JsonNode *parametros_pendentes;
     guint timeout_execucao_id;
+
+    /* ---- chat com o modelo (sessiond/modelo.h) — ver docs/protocolo.md
+     * §9. Independente da máquina de estados de execução acima: uma
+     * 'pergunta' nunca aprova nem executa nada por si só. */
+    char *objetivo_pendente;      /* de 'solicitar'.dados.objetivo, opcional */
+    char *justificativa_pendente; /* de 'solicitar'.dados.justificativa, opcional */
+    gboolean origem_modelo;       /* 'solicitar'.dados.origem_modelo — liga ao pergunta_id_origem */
+    char *pergunta_id_origem;     /* pergunta_id da 'proposta' que originou este solicitar, se houver */
+    char *pergunta_pendente_id;   /* pergunta_id de um 'perguntar' ainda sem 'proposta' de resposta */
 } Cliente;
 
 struct Daemon {
@@ -86,8 +97,11 @@ struct Daemon {
 
 static void desconectar_cliente(Cliente *c, const char *motivo);
 static void comecar_leitura(Cliente *c);
+static void disparar_resumo_modelo(Cliente *c, const char *ferramenta,
+                                    const char *pergunta_id_origem, const char *resultado_texto);
 static Daemon *g_daemon_para_auditoria; /* único daemon neste processo */
 static const Executor *g_executor;
+static const ModeloBackend *g_modelo;
 
 /* ---------------------------------------------------------------- utils */
 
@@ -138,6 +152,10 @@ static void cliente_unref(Cliente *c)
     g_free(c->execucao_id_atual);
     if (c->parametros_pendentes)
         json_node_unref(c->parametros_pendentes);
+    g_free(c->objetivo_pendente);
+    g_free(c->justificativa_pendente);
+    g_free(c->pergunta_id_origem);
+    g_free(c->pergunta_pendente_id);
     g_object_unref(c->conexao);
     g_free(c);
 }
@@ -199,10 +217,32 @@ static void enviar_plano(Cliente *c, const char *em_resposta_a, const ExecutorMa
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "plano_id");
     json_builder_add_string_value(b, c->plano_id_pendente);
+    json_builder_set_member_name(b, "versao_manifesto");
+    json_builder_add_string_value(b, mf->versao ? mf->versao : "0.0.0");
+    json_builder_set_member_name(b, "objetivo");
+    json_builder_add_string_value(b, c->objetivo_pendente ? c->objetivo_pendente : "");
+    json_builder_set_member_name(b, "justificativa");
+    if (c->justificativa_pendente)
+        json_builder_add_string_value(b, c->justificativa_pendente);
+    else
+        json_builder_add_null_value(b);
     json_builder_set_member_name(b, "ferramenta");
     json_builder_add_string_value(b, mf->nome);
     json_builder_set_member_name(b, "parametros_normalizados");
     json_builder_add_value(b, json_node_copy(c->parametros_pendentes));
+    /* "passos": nesta etapa, um plano sempre tem exatamente um passo — a
+     * mesma ferramenta/parâmetros acima. A lista existe para o formato já
+     * suportar múltiplos passos no futuro, sem quebrar clientes que leem
+     * isto agora (docs/manifesto.md, estrutura do plano). */
+    json_builder_set_member_name(b, "passos");
+    json_builder_begin_array(b);
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "ferramenta");
+    json_builder_add_string_value(b, mf->nome);
+    json_builder_set_member_name(b, "parametros");
+    json_builder_add_value(b, json_node_copy(c->parametros_pendentes));
+    json_builder_end_object(b);
+    json_builder_end_array(b);
     json_builder_set_member_name(b, "capacidades");
     json_builder_begin_array(b);
     for (int i = 0; mf->capacidades[i]; i++)
@@ -214,6 +254,10 @@ static void enviar_plano(Cliente *c, const char *em_resposta_a, const ExecutorMa
     json_builder_begin_array(b);
     json_builder_add_string_value(b, mf->efeitos);
     json_builder_end_array(b);
+    json_builder_set_member_name(b, "idempotente");
+    json_builder_add_boolean_value(b, mf->idempotente);
+    json_builder_set_member_name(b, "timeout_padrao_ms");
+    json_builder_add_int_value(b, mf->timeout_padrao_ms);
     json_builder_set_member_name(b, "reversivel");
     json_builder_add_string_value(b, mf->reversivel);
     json_builder_set_member_name(b, "requer_aprovacao");
@@ -370,6 +414,10 @@ static void resetar_para_conectado(Cliente *c)
     g_free(c->execucao_id_atual); c->execucao_id_atual = NULL;
     if (c->parametros_pendentes) { json_node_unref(c->parametros_pendentes); c->parametros_pendentes = NULL; }
     if (c->timeout_execucao_id) { g_source_remove(c->timeout_execucao_id); c->timeout_execucao_id = 0; }
+    g_free(c->objetivo_pendente); c->objetivo_pendente = NULL;
+    g_free(c->justificativa_pendente); c->justificativa_pendente = NULL;
+    g_free(c->pergunta_id_origem); c->pergunta_id_origem = NULL;
+    c->origem_modelo = FALSE;
 }
 
 /* Cancelamento de um PLANO (ainda não há execução — docs/protocolo.md: só
@@ -433,11 +481,19 @@ static void ao_concluido_executor(gpointer ctx, const ExecutorResultado *r)
 
     if (exec_ctx_ainda_valido(e)) {
         gboolean foi_cancelado = r->erro_codigo && strcmp(r->erro_codigo, "cancelado") == 0;
+        gboolean pedir_resumo = FALSE;
+        char *resumo_texto = NULL;
+
         if (r->sucesso) {
             const char *estado = r->codigo_saida == 0 ? "sucesso" : "falha";
             enviar_resultado(c, estado, r->codigo_saida, r->dados_json);
             if (!c->fechado) enviar_auditoria(c, estado);
             if (!c->fechado) registrar_auditoria_disco(g_daemon_para_auditoria, c, estado);
+            if (c->origem_modelo) {
+                pedir_resumo = TRUE;
+                resumo_texto = g_strdup_printf("estado=%s codigo_saida=%d dados=%s",
+                    estado, r->codigo_saida, r->dados_json ? r->dados_json : "{}");
+            }
         } else if (foi_cancelado) {
             enviar_resultado(c, "cancelado", r->codigo_saida, NULL);
             if (!c->fechado) enviar_auditoria(c, "cancelado");
@@ -447,8 +503,21 @@ static void ao_concluido_executor(gpointer ctx, const ExecutorResultado *r)
             if (!c->fechado) enviar_resultado(c, "falha", r->codigo_saida, NULL);
             if (!c->fechado) enviar_auditoria(c, "falha");
             if (!c->fechado) registrar_auditoria_disco(g_daemon_para_auditoria, c, "falha");
+            if (c->origem_modelo) {
+                pedir_resumo = TRUE;
+                resumo_texto = g_strdup_printf("falha: %s (%s)",
+                    r->erro_mensagem ? r->erro_mensagem : "?", r->erro_codigo ? r->erro_codigo : "?");
+            }
         }
+
+        char *ferramenta_para_resumo = pedir_resumo ? g_strdup(c->ferramenta_pendente) : NULL;
+        char *pergunta_id_para_resumo = pedir_resumo ? g_strdup(c->pergunta_id_origem) : NULL;
         resetar_para_conectado(c);
+        if (pedir_resumo && !c->fechado)
+            disparar_resumo_modelo(c, ferramenta_para_resumo, pergunta_id_para_resumo, resumo_texto);
+        g_free(ferramenta_para_resumo);
+        g_free(pergunta_id_para_resumo);
+        g_free(resumo_texto);
     }
     /* se não é mais válido (timeout já resolveu, ou cliente caiu e a
      * conexão já foi inteiramente limpa), só solta os recursos — sem
@@ -461,13 +530,25 @@ static gboolean ao_timeout_execucao(gpointer ctx)
     ExecCtx *e = ctx;
     Cliente *c = e->c;
     if (exec_ctx_ainda_valido(e)) {
-        g_executor->cancelar(g_executor, e->execucao_id);
+        /* O veredito do watchdog ("limite_excedido") é mandado e o estado
+         * é resetado ANTES de pedir o cancelamento ao backend, de
+         * propósito: g_executor->cancelar pode resolver de forma SÍNCRONA
+         * (o backend mock sempre resolve assim, chamando concluido_cb —
+         * ou seja, ao_concluido_executor — na hora). Se isso acontecesse
+         * primeiro, o cliente veria dois resultados finais contraditórios
+         * para a mesma execução ("cancelado" e depois "limite_excedido"),
+         * violando o contrato de concluido_cb ser "exactly once". Nesta
+         * ordem, quando ao_concluido_executor for chamado (síncrono ou
+         * não), exec_ctx_ainda_valido() já vê c->execucao_id_atual limpo
+         * e não manda nada — o veredito do watchdog já é definitivo. */
         enviar_erro(c, NULL, "limite_excedido", "tempo máximo de execução excedido");
         if (!c->fechado) enviar_resultado(c, "falha", 124, NULL);
         if (!c->fechado) enviar_auditoria(c, "limite_excedido");
         if (!c->fechado) registrar_auditoria_disco(g_daemon_para_auditoria, c, "limite_excedido");
         c->timeout_execucao_id = 0; /* este próprio timer: evita resetar_para_conectado removê-lo de novo */
         resetar_para_conectado(c);
+        if (!c->fechado)
+            g_executor->cancelar(g_executor, e->execucao_id);
     }
     return G_SOURCE_REMOVE;
 }
@@ -488,6 +569,205 @@ static void despachar_execucao(Cliente *c, const ExecutorManifesto *mf)
     c->timeout_execucao_id = g_timeout_add_full(G_PRIORITY_DEFAULT, (guint)timeout_ms,
                                                  ao_timeout_execucao, exec_ctx_novo(c, c->execucao_id_atual),
                                                  (GDestroyNotify)exec_ctx_liberar);
+}
+
+/* ----------------------------------------------------- chat com o modelo */
+/* Ver sessiond/modelo.h e docs/THREAT-MODEL.md §5.2: o modelo nunca recebe
+ * o socket, nunca aprova, nunca altera um plano — só propõe texto. Tudo
+ * que vira efeito de verdade passa, sem exceção, pelo mesmo
+ * tratar_solicitar/tratar_aprovar que qualquer 'solicitar' digitado por
+ * uma pessoa usa. */
+
+typedef struct {
+    Cliente *c;
+    char *pergunta_id;
+} PerguntaCtx;
+
+static PerguntaCtx *pergunta_ctx_novo(Cliente *c, const char *pergunta_id)
+{
+    PerguntaCtx *pc = g_new(PerguntaCtx, 1);
+    pc->c = cliente_ref(c);
+    pc->pergunta_id = g_strdup(pergunta_id);
+    return pc;
+}
+
+static void pergunta_ctx_liberar(PerguntaCtx *pc)
+{
+    cliente_unref(pc->c);
+    g_free(pc->pergunta_id);
+    g_free(pc);
+}
+
+/* Lista as ferramentas do backend ATIVO (real ou mock) para a seção
+ * "ferramentas disponíveis" do prompt — nunca hardcoded, para nunca
+ * divergir do manifesto que tratar_solicitar realmente valida contra. */
+static char *construir_manifesto_texto(void)
+{
+    GString *out = g_string_new(NULL);
+    const char * const *nomes = g_executor->listar_nomes(g_executor);
+    for (int i = 0; nomes[i]; i++) {
+        const ExecutorManifesto *mf = g_executor->buscar_manifesto(nomes[i]);
+        if (!mf) continue;
+        g_string_append_printf(out, "- %s (risco: %s): %s\n", mf->nome, mf->risco, mf->efeitos);
+    }
+    return g_string_free(out, FALSE);
+}
+
+static void enviar_proposta(Cliente *c, const char *em_resposta_a, const char *pergunta_id, const ModeloResposta *r)
+{
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "pergunta_id");
+    json_builder_add_string_value(b, pergunta_id);
+    json_builder_set_member_name(b, "resposta_texto");
+    json_builder_add_string_value(b, r->resposta_texto ? r->resposta_texto : "");
+    json_builder_set_member_name(b, "ferramenta_proposta");
+    if (r->ferramenta_proposta) {
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "ferramenta");
+        json_builder_add_string_value(b, r->ferramenta_proposta);
+        embutir_json_bruto(b, "parametros", r->parametros_json);
+        json_builder_set_member_name(b, "justificativa");
+        if (r->justificativa) json_builder_add_string_value(b, r->justificativa);
+        else json_builder_add_null_value(b);
+        json_builder_end_object(b);
+    } else {
+        json_builder_add_null_value(b);
+    }
+    json_builder_end_object(b);
+
+    char *id = lia_novo_id("msg");
+    char *linha = lia_msg_montar(LIA_MSG_PROPOSTA, id, em_resposta_a, b);
+    g_free(id);
+    g_object_unref(b);
+    escrever_linha(c, linha);
+}
+
+static void enviar_resposta_resumo(Cliente *c, const char *pergunta_id, const char *texto)
+{
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "pergunta_id");
+    json_builder_add_string_value(b, pergunta_id);
+    json_builder_set_member_name(b, "resposta_texto");
+    json_builder_add_string_value(b, texto ? texto : "");
+    json_builder_end_object(b);
+
+    char *id = lia_novo_id("msg");
+    char *linha = lia_msg_montar(LIA_MSG_RESPOSTA, id, NULL, b);
+    g_free(id);
+    g_object_unref(b);
+    escrever_linha(c, linha);
+}
+
+static void ao_concluido_pergunta(gpointer ctx, const ModeloResposta *r)
+{
+    PerguntaCtx *pc = ctx;
+    Cliente *c = pc->c;
+    gboolean ainda_valido = !c->fechado && c->pergunta_pendente_id &&
+                             strcmp(pc->pergunta_id, c->pergunta_pendente_id) == 0;
+    if (ainda_valido) {
+        if (r->sucesso)
+            enviar_proposta(c, NULL, pc->pergunta_id, r);
+        else
+            enviar_erro(c, NULL, r->erro_codigo ? r->erro_codigo : "modelo_resposta_invalida", r->erro_mensagem);
+        g_free(c->pergunta_pendente_id);
+        c->pergunta_pendente_id = NULL;
+    }
+    pergunta_ctx_liberar(pc);
+}
+
+static void ao_concluido_resumo(gpointer ctx, const ModeloResposta *r)
+{
+    PerguntaCtx *pc = ctx;
+    Cliente *c = pc->c;
+    if (!c->fechado) {
+        if (r->sucesso)
+            enviar_resposta_resumo(c, pc->pergunta_id, r->resposta_texto);
+        else
+            enviar_erro(c, NULL, r->erro_codigo ? r->erro_codigo : "modelo_resposta_invalida", r->erro_mensagem);
+    }
+    pergunta_ctx_liberar(pc);
+}
+
+/* Disparado depois que um 'resultado' de uma execução com origem_modelo
+ * chega — pede ao modelo um resumo em texto; NUNCA propõe/aprova/executa
+ * nada (mock_perguntar/ollama nem têm como: a função delas é só devolver
+ * texto). Falha de forma segura (sem resumo, sem quebrar o resto) se o
+ * modelo não estiver disponível ou o prompt não puder ser montado. */
+static void disparar_resumo_modelo(Cliente *c, const char *ferramenta,
+                                    const char *pergunta_id_origem, const char *resultado_texto)
+{
+    if (!g_modelo || !pergunta_id_origem)
+        return;
+    char *manifesto_texto = construir_manifesto_texto();
+    char *pedido = g_strdup_printf(
+        "A ferramenta '%s' que você sugeriu foi aprovada e executada. Resultado: %s\n"
+        "Resuma isso em poucas frases para a pessoa; não sugira outra ferramenta agora.",
+        ferramenta ? ferramenta : "?", resultado_texto ? resultado_texto : "(sem detalhes)");
+    char *prompt_final = NULL;
+    PromptErro pe = prompt_montar(manifesto_texto, pedido, NULL, &prompt_final);
+    g_free(manifesto_texto);
+    g_free(pedido);
+    if (pe != PROMPT_OK) {
+        g_free(prompt_final);
+        return;
+    }
+
+    char *pergunta_id_nova = lia_novo_id("perg");
+    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id_origem); /* referencia a pergunta ORIGINAL, para o cliente correlacionar */
+    g_modelo->perguntar(g_modelo, pergunta_id_nova, prompt_final, ao_concluido_resumo, pc);
+    g_free(pergunta_id_nova);
+    g_free(prompt_final);
+}
+
+static void tratar_perguntar(Cliente *c, const LiaMsg *m)
+{
+    if (c->pergunta_pendente_id) {
+        enviar_erro(c, m->id, "estado_invalido", "já existe uma pergunta em andamento nesta conexão");
+        return;
+    }
+    const char *mensagem = campo_string(m->dados, "mensagem");
+    if (!mensagem || !*mensagem) {
+        enviar_erro(c, m->id, "parametro_invalido", "'mensagem' ausente ou vazia");
+        return;
+    }
+
+    GList *arquivos = NULL;
+    if (m->dados && json_object_has_member(m->dados, "arquivos")) {
+        JsonNode *n = json_object_get_member(m->dados, "arquivos");
+        if (JSON_NODE_TYPE(n) != JSON_NODE_ARRAY) {
+            enviar_erro(c, m->id, "parametro_invalido", "'arquivos' deve ser uma lista");
+            return;
+        }
+        JsonArray *arr = json_node_get_array(n);
+        for (guint i = 0; i < json_array_get_length(arr); i++) {
+            JsonNode *item = json_array_get_element(arr, i);
+            if (JSON_NODE_TYPE(item) != JSON_NODE_OBJECT) continue;
+            JsonObject *obj = json_node_get_object(item);
+            arquivos = g_list_append(arquivos,
+                prompt_arquivo_novo(campo_string(obj, "caminho"), campo_string(obj, "conteudo")));
+        }
+    }
+
+    char *manifesto_texto = construir_manifesto_texto();
+    char *prompt_final = NULL;
+    PromptErro pe = prompt_montar(manifesto_texto, mensagem, arquivos, &prompt_final);
+    g_free(manifesto_texto);
+    g_list_free_full(arquivos, (GDestroyNotify)prompt_arquivo_liberar);
+
+    if (pe != PROMPT_OK) {
+        enviar_erro(c, m->id, "parametro_invalido", prompt_erro_texto(pe));
+        g_free(prompt_final);
+        return;
+    }
+
+    char *pergunta_id = lia_novo_id("perg");
+    c->pergunta_pendente_id = g_strdup(pergunta_id);
+    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id);
+    g_modelo->perguntar(g_modelo, pergunta_id, prompt_final, ao_concluido_pergunta, pc);
+    g_free(pergunta_id);
+    g_free(prompt_final);
 }
 
 static void tratar_solicitar(Cliente *c, const LiaMsg *m)
@@ -538,6 +818,27 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
         g_free(erro_param);
         return;
     }
+
+    /* 'objetivo'/'justificativa'/'origem_modelo'/'pergunta_id' são opcionais
+     * e só informativos — nunca mudam validação/capacidade/aprovação. Uma
+     * pessoa pode preenchê-los copiando o que uma 'proposta' do modelo
+     * sugeriu, ou deixá-los de lado e montar o 'solicitar' do zero; o
+     * caminho de validação é idêntico nos dois casos (docs/THREAT-MODEL.md
+     * §5.2 — "o modelo não pode alterar o plano depois da aprovação": ele
+     * nem chega a ESCREVER aqui, só a pessoa, via esta mesma mensagem). */
+    g_free(c->objetivo_pendente);
+    const char *objetivo = campo_string(m->dados, "objetivo");
+    c->objetivo_pendente = objetivo ? g_strdup(objetivo) : NULL;
+    g_free(c->justificativa_pendente);
+    const char *justificativa = campo_string(m->dados, "justificativa");
+    c->justificativa_pendente = justificativa ? g_strdup(justificativa) : NULL;
+    gboolean pedido_origem_modelo = m->dados && json_object_has_member(m->dados, "origem_modelo") &&
+        JSON_NODE_TYPE(json_object_get_member(m->dados, "origem_modelo")) == JSON_NODE_VALUE &&
+        json_object_get_boolean_member(m->dados, "origem_modelo");
+    g_free(c->pergunta_id_origem);
+    const char *pergunta_id = campo_string(m->dados, "pergunta_id");
+    c->origem_modelo = pedido_origem_modelo && pergunta_id != NULL;
+    c->pergunta_id_origem = c->origem_modelo ? g_strdup(pergunta_id) : NULL;
 
     g_free(c->plano_id_pendente);
     c->plano_id_pendente = lia_novo_id("plano");
@@ -663,6 +964,7 @@ static void processar_linha(Cliente *c, const char *linha)
     case LIA_MSG_APROVAR:   tratar_aprovar(c, &m); break;
     case LIA_MSG_CANCELAR:  tratar_cancelar(c, &m); break;
     case LIA_MSG_ASSINAR:   tratar_assinar(c, &m); break;
+    case LIA_MSG_PERGUNTAR: tratar_perguntar(c, &m); break;
     default:
         enviar_erro(c, m.id, "estado_invalido", "tipo de mensagem não é permitido vindo do cliente");
         break;
@@ -877,6 +1179,23 @@ static void escolher_executor(void)
     }
 }
 
+/* Diferente do executor: "ollama" exige um servidor Ollama de verdade
+ * rodando; "mock" não exige nada. Por isso, ao contrário do executor
+ * (onde o padrão é "real", sem dependência extra), o padrão aqui é
+ * "mock" — o modelo real é opt-in explícito (LIA_SESSIOND_MODELO=ollama),
+ * nunca uma dependência silenciosa de produção. */
+static void escolher_modelo(void)
+{
+    const char *modo = g_getenv("LIA_SESSIOND_MODELO");
+    if (modo && strcmp(modo, "ollama") == 0) {
+        g_modelo = modelo_ollama_obter();
+        g_print("lia-sessiond: modelo = ollama (LIA_SESSIOND_MODELO=ollama)\n");
+    } else {
+        g_modelo = modelo_mock_obter();
+        g_print("lia-sessiond: modelo = mock (padrão — defina LIA_SESSIOND_MODELO=ollama para o modelo real)\n");
+    }
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -922,6 +1241,7 @@ int main(int argc, char **argv)
     }
 
     escolher_executor();
+    escolher_modelo();
 
     Daemon d = { 0 };
     const char *home = g_get_home_dir();
