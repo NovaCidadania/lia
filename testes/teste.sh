@@ -152,20 +152,46 @@ for prog in "$TIPO" "$TIPO_REF"; do
 done
 diff <("$TIPO" "$T/tipo_elf") <("$TIPO_REF" "$T/tipo_elf") >/dev/null && ok "lia-tipo (ASM) == lia-tipo-ref (C)" || ko "lia-tipo ASM != C"
 
-# nenhum dos oito binários do núcleo referencia fopen/system/fork/execve/libc:
+# ---------- lia-mem (lia_memcpy/lia_memset/lia_memcmp: escalar/SSE2/AVX2) ----------
+# build/lia-mem-teste é um binário próprio (sem libc) que já faz a
+# comparação Assembly vs referência em C, alinhamentos, padrões, tamanhos
+# e múltiplos processos internamente (testes/mem/teste_mem.c); aqui só
+# repassamos as linhas "ok "/"FALHA " dele para o contador agregado deste
+# script, em vez de reimplementar a mesma verificação em shell.
+MEM_TESTE="$RAIZ/build/lia-mem-teste"
+if [ -x "$MEM_TESTE" ]; then
+    saida_mem=$("$MEM_TESTE" 2>&1)
+    printf '%s\n' "$saida_mem"
+    linhas_mem=0
+    while IFS= read -r linha; do
+        case $linha in
+            "ok   "*)    total=$((total+1)); linhas_mem=$((linhas_mem+1));;
+            "FALHA "*)   total=$((total+1)); falhas=$((falhas+1)); linhas_mem=$((linhas_mem+1));;
+        esac
+    done <<EOF_MEM
+$saida_mem
+EOF_MEM
+    [ "$linhas_mem" -gt 0 ] || ko "lia-mem-teste: nenhuma linha ok/FALHA na saída"
+else
+    ko "lia-mem-teste: binário não encontrado em $MEM_TESTE"
+fi
+
+# nenhum dos binários do núcleo referencia fopen/system/fork/execve/libc:
 # são estáticos, sem libc (-nostdlib), então nem poderiam resolver esses símbolos;
 # a verificação é sobre os .o antes do link, onde uma referência indevida apareceria
 # como símbolo indefinido (U).
 if command -v nm >/dev/null; then
     for o in lia-cat.o lia-echo.o lia-hex.o lia-tipo.o \
              lia_cat_ref.o lia_echo_ref.o lia_hex_ref.o lia_tipo_ref.o \
+             lia-cpuid.o lia-mem.o lia_mem.o lia_mem_ref.o teste_mem.o bench_mem.o \
              entrada.o sys.o texto.o; do
         proibidos=$(nm -u "$RAIZ/build/$o" 2>/dev/null | grep -Ei '\b(fopen|fclose|fread|fwrite|system|popen|fork|execve|execvp|execv|malloc|printf)\b')
         [ -z "$proibidos" ] && ok "$o: sem referência a fopen/system/fork/execve/malloc/printf" \
             || ko "$o referencia símbolo proibido: $proibidos"
     done
 fi
-for prog in "$CAT" "$ECHO" "$HEX" "$TIPO" "$CAT_REF" "$ECHO_REF" "$HEX_REF" "$TIPO_REF"; do
+for prog in "$CAT" "$ECHO" "$HEX" "$TIPO" "$CAT_REF" "$ECHO_REF" "$HEX_REF" "$TIPO_REF" \
+            "$RAIZ/build/lia-mem-teste" "$RAIZ/build/lia-mem-bench"; do
     nome=$(basename "$prog")
     strings -a "$prog" 2>/dev/null | grep -qiE '^(fopen|system|execve)$' \
         && ko "$nome: string de símbolo proibido encontrada no binário" \

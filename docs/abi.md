@@ -79,7 +79,92 @@ Diferente de uma chamada de função C, uma `syscall` no Linux x86-64 usa sua pr
 - **Programas 100% Assembly** (`lia-cat.S`, `lia-echo.S`): também definem seu próprio `_start` e fazem `syscall` diretamente, sem passar por `lia_syscall`/C. Isso é deliberado — são a prova de que o núcleo funciona sem *nenhuma* dependência de C, e servem de comparação de desempenho/tamanho contra a implementação de referência em C (`nucleo/referencia/`, que usa `entrada.S` + `runtime/sys.c` do jeito normal). Ver PLANO.md §2.1, regra 1.
 - **Nenhuma variável global mutável compartilhada** entre Assembly e C além dos buffers estáticos já declarados em `.bss`/`.data` com nome próprio (ex.: `buf` em `lia-cat.S`, com `.align 64`); todo estado de uma execução passa por argumento/retorno.
 
-## 6. Plano futuro para AArch64
+## 6. Primitivas de memória: `lia_memcpy`/`lia_memset`/`lia_memcmp`
+
+Implementadas em `nucleo/x86_64/lia-mem.S` (três backends) e `nucleo/x86_64/lia-cpuid.S`
+(detecção de capacidade), despachadas por `runtime/lia_mem.c`. Oráculo escalar em C
+para testes: `nucleo/referencia/lia_mem_ref.c`.
+
+### Contrato (igual nos três backends e no despacho)
+
+- `lia_memcpy(dst, src, n)` → retorna `dst`. **Não aceita regiões sobrepostas** —
+  comportamento indefinido se `dst`/`src` se sobrepuserem (como o `memcpy` padrão).
+  Para sobreposição, usa-se `memmove` de `runtime/texto.c` (implementação em C,
+  fora do escopo desta etapa — ver "Decisão: sem `memmove` SIMD" abaixo).
+- `lia_memset(dst, c, n)` → retorna `dst`; `c` é truncado para `unsigned char`.
+- `lia_memcmp(a, b, n)` → retorna `0` se os `n` bytes forem iguais; senão, a
+  diferença (com sinal) entre os primeiros bytes que diferem — só o **sinal** é
+  garantido (igual ao `memcmp` de `runtime/texto.c`), não o valor exato.
+- **`n == 0` nunca lê nem escreve memória**, para qualquer valor de `dst`/`src`/`a`/`b`
+  (inclusive um ponteiro nulo ou inválido) — testado explicitamente em
+  `testes/mem/teste_mem.c`.
+- **Sem exigência de alinhamento**: todo acesso é via `mov`/`movdqu`/`vmovdqu`
+  (carga/armazenamento não alinhado). Alinhar `dst`/`src` pode melhorar desempenho
+  em outras implementações, mas não é exigido pela Lia.
+- **Retorno/registradores**: seguem a ABI padrão da seção 1 — `rax` como retorno,
+  `rbx`/`rbp`/`r12`-`r15` nunca tocados por nenhuma das rotinas (não precisam de
+  `push`/`pop`). As variantes AVX2 executam `vzeroupper` antes de retornar (evita
+  penalidade de transição SSE/AVX em quem chamar depois usando SSE legado — boa
+  prática de performance, não é exigência da ABI).
+- **Limites**: nenhuma rotina lê ou escreve um byte além do intervalo `[ptr, ptr+n)`
+  pedido — os backends vetoriais processam em blocos (16 bytes SSE2, 32 bytes AVX2)
+  e tratam o resto com um laço de bytes, nunca "arredondando para cima" sobre o
+  buffer. Ponteiros inválidos (fora de memória mapeada) não são validados pela
+  rotina — como em qualquer `memcpy`/`memset`/`memcmp` de baixo nível, é
+  responsabilidade de quem chama garantir que o intervalo é válido quando `n > 0`.
+
+### Detecção de CPU (`lia-cpuid.S`) — nunca assume suporte
+
+- `lia_cpuid_sse2()`: checa `CPUID.1:EDX[26]`. SSE2 é parte obrigatória da
+  arquitetura x86-64 (todo processador capaz de rodar este binário já o suporta),
+  mas o bit é checado de qualquer forma, por auditabilidade.
+- `lia_cpuid_avx2()`: só retorna 1 se **todas** as condições a seguir forem
+  verdadeiras, na ordem: `CPUID.1:ECX.OSXSAVE[27]` (o SO salva/restaura estado
+  estendido) **e** `CPUID.1:ECX.AVX[28]`; em seguida `XGETBV` com `XCR0` bits 1
+  (SSE) e 2 (AVX) ligados (confirma que o SO de fato habilitou o estado, não só
+  que o anuncia); por fim `CPUID.7.0:EBX.AVX2[5]`. A instrução `XGETBV` só é
+  executada depois de confirmado `OSXSAVE` — executá-la sem isso pode gerar
+  `#UD` (instrução ilegal) em alguns sistemas.
+- Nenhuma rotina AVX2/SSE2 é executada sem essa verificação prévia — nem mesmo
+  para medir desempenho "só para ver". A seleção manual de backend
+  (`lia_mem_selecionar`, abaixo) reforça isso: forçar um backend que a CPU não
+  suporta é rejeitado (retorno `-1`), nunca executado.
+
+### Despacho (`runtime/lia_mem.c`)
+
+- Automático por padrão: `AVX2 > SSE2 > escalar`, conforme `lia_mem_capacidade()`
+  (bitmask: bit0 = SSE2, bit1 = AVX2) detectada uma vez por processo.
+- `lia_mem_selecionar(modo)` permite forçar um backend (`LIA_MEM_AUTO`,
+  `LIA_MEM_ESCALAR`, `LIA_MEM_SSE2`, `LIA_MEM_AVX2`) — pensado para testes e
+  benchmark, não para uso normal. Um `modo` fora desse conjunto, ou um backend
+  vetorial que a CPU não suporta, é **rejeitado** (retorna `-1`, nada é alterado);
+  nunca chega a executar uma instrução que o processador não entende.
+- `lia_mem_backend_ativo()` resolve `LIA_MEM_AUTO` para o backend concreto em uso
+  (para relatório em testes/benchmark).
+
+### Decisão: sem `memmove` SIMD nesta etapa
+
+`lia_memcpy` (e seus backends) assume explicitamente que `dst`/`src` não se
+sobrepõem — é a mesma semântica do `memcpy` de `runtime/texto.c` e do `memcpy`
+padrão. Implementar um `lia_memmove` vetorizado corretamente exigiria detectar a
+direção da sobreposição e inverter o sentido da cópia por bloco (como já faz o
+`memmove` escalar em `runtime/texto.c`), o que muda a lógica de laço dos três
+backends. Decisão explícita: **não fazer isso nesta etapa** — `memmove` continua
+disponível, sem SIMD, em `runtime/texto.c`, para os casos (raros, no código atual)
+que precisam de sobreposição. Se/quando `lia_memmove` vetorizado for necessário,
+é um próximo passo isolado, com seu próprio benchmark.
+
+### Build
+
+O caminho comum (`make`, `make teste`) não depende de `-mavx2`/`-msse2`: os
+backends são Assembly manual (mnemônicos `vmovdqu`/`vpcmpeqb`/etc. direto no
+`.S`), então o binário resultante roda em qualquer CPU x86-64 — a seleção de
+qual backend *executar* é feita em runtime por `lia_mem_selecionar`/CPUID, nunca
+pelo compilador. `build/lia-mem-teste` e `build/lia-mem-bench` chamam os três
+backends diretamente, então também servem de prova de que o escalar funciona
+mesmo quando SSE2/AVX2 estão disponíveis mas desligados via seleção manual.
+
+## 8. Plano futuro para AArch64
 
 Ainda não implementado (fase 11 do PLANO.md). Decisões já tomadas para quando chegar a vez:
 

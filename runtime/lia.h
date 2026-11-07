@@ -94,6 +94,44 @@ int lia_strncmp(const char *a, const char *b, size_t n);
 
 int lia_escrever_tudo(int fd, const void *p, size_t n);
 
+/* nucleo/x86_64/lia-cpuid.S — nunca assume suporte; checa CPUID (e XGETBV
+ * para AVX2) antes de qualquer uso de SSE2/AVX2. Ver docs/abi.md §6. */
+int lia_cpuid_sse2(void);
+int lia_cpuid_avx2(void);
+
+/* nucleo/x86_64/lia-mem.S — backends de memcpy/memset/memcmp. Contrato
+ * completo em docs/abi.md §6: memcpy não aceita sobreposição; n == 0 nunca
+ * toca memória; sem exigência de alinhamento. */
+void *lia_memcpy_escalar(void *dst, const void *src, size_t n);
+void *lia_memcpy_sse2(void *dst, const void *src, size_t n);
+void *lia_memcpy_avx2(void *dst, const void *src, size_t n);
+void *lia_memset_escalar(void *dst, int c, size_t n);
+void *lia_memset_sse2(void *dst, int c, size_t n);
+void *lia_memset_avx2(void *dst, int c, size_t n);
+int lia_memcmp_escalar(const void *a, const void *b, size_t n);
+int lia_memcmp_sse2(const void *a, const void *b, size_t n);
+int lia_memcmp_avx2(const void *a, const void *b, size_t n);
+
+/* runtime/lia_mem.c — despacho automático (AVX2 > SSE2 > escalar) com
+ * seleção manual só para testes/benchmark. */
+#define LIA_MEM_AUTO    (-1)
+#define LIA_MEM_ESCALAR 0
+#define LIA_MEM_SSE2    1
+#define LIA_MEM_AVX2    2
+
+int lia_mem_capacidade(void);           /* bit0 = SSE2, bit1 = AVX2 */
+int lia_mem_selecionar(int modo);       /* 0 = ok; -1 = backend indisponível/inválido, nada é alterado */
+int lia_mem_backend_ativo(void);        /* resolve LIA_MEM_AUTO para o backend concreto em uso */
+const char *lia_mem_backend_nome(int backend);
+void *lia_memcpy(void *dst, const void *src, size_t n);
+void *lia_memset(void *dst, int c, size_t n);
+int lia_memcmp(const void *a, const void *b, size_t n);
+
+/* nucleo/referencia/lia_mem_ref.c — oráculo escalar em C, só para testes. */
+void *lia_memcpy_ref(void *dst, const void *src, size_t n);
+void *lia_memset_ref(void *dst, int c, size_t n);
+int lia_memcmp_ref(const void *a, const void *b, size_t n);
+
 /* Buffer de saída: fd >= 0 descarrega ao encher; fd < 0 acumula em memória. */
 typedef struct {
     char *p;

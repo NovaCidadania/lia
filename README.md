@@ -9,8 +9,9 @@
 ```sh
 make            # compila build/lia, build/lia-cat, build/lia-echo e as
                  # implementações de referência em C (estáticos, sem libc)
-make teste      # testes reais nesta máquina (200 testes)
-make bench      # benchmark reproduzível: lia-cat (ASM) vs C vs cat (coreutils)
+make teste      # testes reais nesta máquina (214 testes)
+make bench      # benchmarks reproduzíveis: lia-cat (ASM) vs C vs cat (coreutils);
+                 # lia_memcpy/memset/memcmp por backend (escalar/SSE2/AVX2)
 
 build/lia-echo                   # stdin -> stdout, sem libc (prova mínima do núcleo)
 build/lia-cat arquivo1 arquivo2  # como cat, em Assembly puro
@@ -24,6 +25,8 @@ build/lia shell                 # abre o shell do usuário, explicitamente solic
 build/lia root --status         # diz se o `sudo` do sistema concederia root agora, sem elevar nada
 build/lia root --auth           # pede ao `sudo` real para autenticar nesta sessão (a senha fica só com o sudo)
 build/lia root -- id -u         # executa um comando concreto como root, com auditoria e autenticação a cada vez
+build/lia-mem-teste              # lia_memcpy/memset/memcmp: escalar/SSE2/AVX2 vs referência em C
+build/lia-mem-bench              # benchmark por backend e tamanho (ciclos/byte, MiB/s)
 ```
 
 A Lia nunca guarda senha, nunca altera `/etc/sudoers` por conta própria e nunca mantém root como estado permanente — toda elevação passa pelo `sudo` real do sistema, caso a caso. Veja a seção de privilégios do [PLANO.md](PLANO.md).
