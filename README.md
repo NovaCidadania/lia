@@ -9,11 +9,13 @@
 ```sh
 make            # compila build/lia, build/lia-cat, build/lia-echo e as
                  # implementações de referência em C (estáticos, sem libc)
-make teste      # testes reais nesta máquina (105 testes)
+make teste      # testes reais nesta máquina (200 testes)
 make bench      # benchmark reproduzível: lia-cat (ASM) vs C vs cat (coreutils)
 
 build/lia-echo                   # stdin -> stdout, sem libc (prova mínima do núcleo)
 build/lia-cat arquivo1 arquivo2  # como cat, em Assembly puro
+build/lia-hex arquivo            # despejo hexadecimal + ASCII, idêntico ao xxd
+build/lia-tipo arquivo           # tipo pelos bytes mágicos (ELF/PDF/PNG/JPEG/ZIP/gzip/WAV/texto), nunca pela extensão
 build/lia system diagnosticar    # distro, kernel, CPU, memória (somente leitura)
 build/lia tools discover        # inventário dos executáveis do sistema (somente leitura)
 build/lia tools probe --safe    # testa os que têm probe seguro conhecido, sem privilégio

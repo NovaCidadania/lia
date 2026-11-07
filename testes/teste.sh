@@ -5,8 +5,12 @@ set -u
 RAIZ=$(cd "$(dirname "$0")/.." && pwd)
 CAT="$RAIZ/build/lia-cat"
 ECHO="$RAIZ/build/lia-echo"
+HEX="$RAIZ/build/lia-hex"
+TIPO="$RAIZ/build/lia-tipo"
 CAT_REF="$RAIZ/build/lia-cat-ref"
 ECHO_REF="$RAIZ/build/lia-echo-ref"
+HEX_REF="$RAIZ/build/lia-hex-ref"
+TIPO_REF="$RAIZ/build/lia-tipo-ref"
 LIA="$RAIZ/build/lia"
 T=$(mktemp -d)
 trap 'chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"' EXIT
@@ -68,18 +72,100 @@ diff <("$ECHO" < "$T/grande_echo") <("$ECHO_REF" < "$T/grande_echo") >/dev/null 
 diff <("$CAT" "$T/grande_echo") <("$CAT_REF" "$T/grande_echo") >/dev/null \
     && ok "lia-cat (ASM) == lia-cat-ref (C), mesma entrada" || ko "lia-cat ASM != C"
 
-# nenhum dos quatro binários do núcleo referencia fopen/system/fork/execve/libc:
+# ---------- lia-hex (ASM e referência em C) vs xxd ----------
+if command -v xxd >/dev/null; then
+    head -c 300000 /dev/urandom > "$T/grande_hex"
+    : > "$T/vazio_hex"
+    printf 'a\0b\377\n\0' > "$T/nul_hex"
+    printf 'sem newline, 13 bytes' > "$T/sem_newline_hex"
+    python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)))" > "$T/todos_bytes_hex" 2>/dev/null \
+        || printf '' > "$T/todos_bytes_hex"
+    for n in 1 7 15 16 17 31 32 33 63 64 65 4095 4096 4097; do
+        head -c "$n" /dev/urandom > "$T/hex_$n"
+    done
+    for prog in "$HEX" "$HEX_REF"; do
+        nome=$(basename "$prog")
+        for f in vazio_hex nul_hex sem_newline_hex todos_bytes_hex grande_hex; do
+            diff <("$prog" "$T/$f") <(xxd "$T/$f") >/dev/null \
+                && ok "$nome $f == xxd" || ko "$nome $f != xxd"
+        done
+        for n in 1 7 15 16 17 31 32 33 63 64 65 4095 4096 4097; do
+            diff <("$prog" "$T/hex_$n") <(xxd "$T/hex_$n") >/dev/null \
+                && ok "$nome: $n bytes == xxd" || ko "$nome: $n bytes != xxd"
+        done
+        diff <("$prog" < "$T/todos_bytes_hex") <(xxd < "$T/todos_bytes_hex") >/dev/null \
+            && ok "$nome: stdin == xxd" || ko "$nome: stdin != xxd"
+        diff <("$prog" - < "$T/nul_hex") <(xxd - < "$T/nul_hex") >/dev/null \
+            && ok "$nome: '-' explícito == xxd" || ko "$nome: '-' != xxd"
+        "$prog" /nao/existe > "$T/o" 2> "$T/e"; rc=$?
+        [ $rc -eq 1 ] && [ ! -s "$T/o" ] && grep -q '/nao/existe' "$T/e" \
+            && ok "$nome: arquivo inexistente, exit 1, nada em stdout" || ko "$nome: arquivo inexistente"
+        "$prog" a b >/dev/null 2>&1; [ $? -eq 2 ] && ok "$nome: dois argumentos, exit 2" || ko "$nome: dois argumentos"
+    done
+    diff <("$HEX" "$T/todos_bytes_hex") <("$HEX_REF" "$T/todos_bytes_hex") >/dev/null \
+        && ok "lia-hex (ASM) == lia-hex-ref (C)" || ko "lia-hex ASM != C"
+else
+    ok "xxd ausente: testes de lia-hex pulados explicitamente (não é falha silenciosa)"
+fi
+
+# ---------- lia-tipo (ASM e referência em C) ----------
+printf 'PK\x03\x04resto' > "$T/tipo_zip"
+printf 'PK\x05\x06' > "$T/tipo_zip_vazio"
+printf '\x1f\x8b\x08\x00resto' > "$T/tipo_gzip"
+printf 'RIFF\x24\x00\x00\x00WAVEfmt ' > "$T/tipo_wav"
+printf '%%PDF-1.4\n%%EOF\n' > "$T/tipo_pdf"
+printf '\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR' > "$T/tipo_png"
+printf '\xff\xd8\xff\xe0\x00\x10JFIF' > "$T/tipo_jpeg"
+head -c 64 /usr/bin/ls > "$T/tipo_elf"
+printf 'texto comum em ASCII, com acentuacao removida\n' > "$T/tipo_texto"
+: > "$T/tipo_vazio"
+printf '\x01\x02\x03\x04\x05\x06\x07\x08' > "$T/tipo_desconhecido"
+printf 'RIFF' > "$T/tipo_riff_truncado"          # só o início: nunca pode virar WAV
+printf '\x7fEL' > "$T/tipo_elf_truncado"        # só 3 dos 4 bytes do magic ELF
+cp "$T/tipo_png" "$T/enganoso.pdf"               # extensão mentindo sobre o conteúdo
+
+for prog in "$TIPO" "$TIPO_REF"; do
+    nome=$(basename "$prog")
+    [ "$("$prog" "$T/tipo_zip")" = ZIP ]           && ok "$nome: ZIP" || ko "$nome: ZIP"
+    [ "$("$prog" "$T/tipo_zip_vazio")" = ZIP ]     && ok "$nome: ZIP (assinatura de arquivo vazio)" || ko "$nome: ZIP vazio"
+    [ "$("$prog" "$T/tipo_gzip")" = GZIP ]         && ok "$nome: GZIP" || ko "$nome: GZIP"
+    [ "$("$prog" "$T/tipo_wav")" = WAV ]           && ok "$nome: WAV" || ko "$nome: WAV"
+    [ "$("$prog" "$T/tipo_pdf")" = PDF ]           && ok "$nome: PDF" || ko "$nome: PDF"
+    [ "$("$prog" "$T/tipo_png")" = PNG ]           && ok "$nome: PNG" || ko "$nome: PNG"
+    [ "$("$prog" "$T/tipo_jpeg")" = JPEG ]         && ok "$nome: JPEG" || ko "$nome: JPEG"
+    [ "$("$prog" "$T/tipo_elf")" = ELF ]           && ok "$nome: ELF" || ko "$nome: ELF"
+    [ "$("$prog" "$T/tipo_texto")" = TEXTO ]       && ok "$nome: TEXTO" || ko "$nome: TEXTO"
+    [ "$("$prog" "$T/tipo_vazio")" = VAZIO ]       && ok "$nome: VAZIO" || ko "$nome: VAZIO"
+    [ "$("$prog" "$T/tipo_desconhecido")" = DESCONHECIDO ] && ok "$nome: DESCONHECIDO" || ko "$nome: DESCONHECIDO"
+    [ "$("$prog" "$T/tipo_riff_truncado")" != WAV ] && ok "$nome: RIFF truncado não é confundido com WAV (falha segura)" \
+        || ko "$nome: RIFF truncado foi lido como WAV"
+    [ "$("$prog" "$T/tipo_elf_truncado")" != ELF ] && ok "$nome: ELF truncado não é confundido com ELF (falha segura)" \
+        || ko "$nome: ELF truncado foi lido como ELF"
+    [ "$("$prog" "$T/enganoso.pdf")" = PNG ] && ok "$nome: extensão .pdf enganosa não confunde a detecção (é PNG)" \
+        || ko "$nome: extensão enganosa confundiu a detecção"
+    [ "$("$prog" --json "$T/tipo_elf")" = '{"tipo":"ELF"}' ] && ok "$nome --json" || ko "$nome --json"
+    [ "$("$prog" < "$T/tipo_texto")" = TEXTO ] && ok "$nome: stdin (sem argumento)" || ko "$nome: stdin"
+    [ "$("$prog" - < "$T/tipo_elf")" = ELF ] && ok "$nome: '-' explícito" || ko "$nome: '-' explícito"
+    "$prog" /nao/existe >/dev/null 2>"$T/e"; [ $? -eq 1 ] && grep -q '/nao/existe' "$T/e" \
+        && ok "$nome: arquivo inexistente, exit 1" || ko "$nome: arquivo inexistente"
+    "$prog" a b >/dev/null 2>&1; [ $? -eq 2 ] && ok "$nome: dois nomes de arquivo, exit 2" || ko "$nome: dois nomes"
+done
+diff <("$TIPO" "$T/tipo_elf") <("$TIPO_REF" "$T/tipo_elf") >/dev/null && ok "lia-tipo (ASM) == lia-tipo-ref (C)" || ko "lia-tipo ASM != C"
+
+# nenhum dos oito binários do núcleo referencia fopen/system/fork/execve/libc:
 # são estáticos, sem libc (-nostdlib), então nem poderiam resolver esses símbolos;
 # a verificação é sobre os .o antes do link, onde uma referência indevida apareceria
 # como símbolo indefinido (U).
 if command -v nm >/dev/null; then
-    for o in lia-cat.o lia-echo.o lia_cat_ref.o lia_echo_ref.o entrada.o sys.o texto.o; do
+    for o in lia-cat.o lia-echo.o lia-hex.o lia-tipo.o \
+             lia_cat_ref.o lia_echo_ref.o lia_hex_ref.o lia_tipo_ref.o \
+             entrada.o sys.o texto.o; do
         proibidos=$(nm -u "$RAIZ/build/$o" 2>/dev/null | grep -Ei '\b(fopen|fclose|fread|fwrite|system|popen|fork|execve|execvp|execv|malloc|printf)\b')
         [ -z "$proibidos" ] && ok "$o: sem referência a fopen/system/fork/execve/malloc/printf" \
             || ko "$o referencia símbolo proibido: $proibidos"
     done
 fi
-for prog in "$CAT" "$ECHO" "$CAT_REF" "$ECHO_REF"; do
+for prog in "$CAT" "$ECHO" "$HEX" "$TIPO" "$CAT_REF" "$ECHO_REF" "$HEX_REF" "$TIPO_REF"; do
     nome=$(basename "$prog")
     strings -a "$prog" 2>/dev/null | grep -qiE '^(fopen|system|execve)$' \
         && ko "$nome: string de símbolo proibido encontrada no binário" \
@@ -139,11 +225,29 @@ acessiveis=$("$LIA" tools list | grep -vc '^PERMISSION_DENIED')
     || ko "contagem: shell=$n_shell lia=$acessiveis"
 
 # probes
+#
+# A asserção de tempo é sobre o mecanismo de timeout em si (dur_ms registrado
+# para o item que trava, "sleep"), não sobre o tempo total da chamada. O total
+# soma o fork+exec+wait de ~80 ferramentas do catálogo além do item que trava
+# de propósito; esse overhead cresce com a carga do sistema e não é limitado
+# por PROBE_LIMITE_MS, então um teto agregado (ex.: "<=6s") é inerentemente
+# instável sob carga (reproduzido nesta investigação: falha isolada após
+# make bench, que gera carga pesada de CPU/IO) mesmo quando o timeout de cada
+# ferramenta individual funcionou corretamente. Medir o item específico é
+# equivalente e independente do tamanho do catálogo e da velocidade da máquina.
 inicio=$(date +%s)
 "$LIA" tools probe --safe > "$T/probe" 2>&1; rc=$?
 fim=$(date +%s)
 [ $rc -eq 0 ] && ok "probe --safe: exit 0" || ko "probe --safe: exit $rc"
-[ $((fim - inicio)) -le 6 ] && ok "probe respeitou o timeout (levou $((fim - inicio))s)" || ko "probe demorou $((fim - inicio))s"
+[ $((fim - inicio)) -le 60 ] && ok "probe termina em tempo finito, sem travar (levou $((fim - inicio))s)" || ko "probe não terminou (levou $((fim - inicio))s)"
+if command -v python3 >/dev/null; then
+    ms_sleep=$("$LIA" tools list --json --estado NEEDS_INPUT | python3 -I -c 'import json,sys
+d=json.load(sys.stdin)
+print(next(x["ms"] for x in d if x["nome"]=="sleep"))')
+    [ "$ms_sleep" -ge 2900 ] && [ "$ms_sleep" -le 5000 ] \
+        && ok "timeout do probe (PROBE_LIMITE_MS=3000) respeitado: sleep levou ${ms_sleep}ms" \
+        || ko "timeout do probe fora da faixa esperada: sleep levou ${ms_sleep}ms"
+fi
 "$LIA" tools list --estado NEEDS_INPUT | grep -q ' sleep ' && ok "ferramenta que trava -> NEEDS_INPUT (processo morto)" || ko "NEEDS_INPUT"
 pgrep -f "$T/bin/sleep" >/dev/null && ko "processo travado ficou vivo" || ok "nenhum processo órfão"
 "$LIA" tools list --estado PROBE_FAILED | grep -q ' cat ' && ok "execve falho (interpretador ausente) -> PROBE_FAILED" || ko "PROBE_FAILED por execve"

@@ -11,7 +11,8 @@ CLI     := $(B)/main.o $(B)/ferramentas.o $(B)/privilegio.o $(B)/sistema.o
 
 REF := $(B)/entrada.o $(B)/sys.o $(B)/texto.o
 
-all: $(B)/lia $(B)/lia-cat $(B)/lia-echo $(B)/lia-cat-ref $(B)/lia-echo-ref
+all: $(B)/lia $(B)/lia-cat $(B)/lia-echo $(B)/lia-hex $(B)/lia-tipo \
+     $(B)/lia-cat-ref $(B)/lia-echo-ref $(B)/lia-hex-ref $(B)/lia-tipo-ref
 
 $(B):
 	mkdir -p $(B)
@@ -23,6 +24,12 @@ $(B)/lia-cat.o: nucleo/x86_64/lia-cat.S | $(B)
 	$(CC) -c $< -o $@
 
 $(B)/lia-echo.o: nucleo/x86_64/lia-echo.S | $(B)
+	$(CC) -c $< -o $@
+
+$(B)/lia-hex.o: nucleo/x86_64/lia-hex.S | $(B)
+	$(CC) -c $< -o $@
+
+$(B)/lia-tipo.o: nucleo/x86_64/lia-tipo.S | $(B)
 	$(CC) -c $< -o $@
 
 $(B)/%.o: runtime/%.c runtime/lia.h | $(B)
@@ -43,10 +50,22 @@ $(B)/lia-cat: $(B)/lia-cat.o
 $(B)/lia-echo: $(B)/lia-echo.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
+$(B)/lia-hex: $(B)/lia-hex.o
+	$(CC) $(LDFLAGS) $^ -o $@
+
+$(B)/lia-tipo: $(B)/lia-tipo.o
+	$(CC) $(LDFLAGS) $^ -o $@
+
 $(B)/lia-cat-ref: $(REF) $(B)/lia_cat_ref.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
 $(B)/lia-echo-ref: $(REF) $(B)/lia_echo_ref.o
+	$(CC) $(LDFLAGS) $^ -o $@
+
+$(B)/lia-hex-ref: $(REF) $(B)/lia_hex_ref.o
+	$(CC) $(LDFLAGS) $^ -o $@
+
+$(B)/lia-tipo-ref: $(REF) $(B)/lia_tipo_ref.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
 teste: all

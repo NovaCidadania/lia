@@ -266,7 +266,7 @@ Especificação completa do manifesto, com exemplos das ferramentas já implemen
 |---|---|---|
 | **0 — Fundação** | Repositório, `make`, ABI documentada, CI (build + testes) | `make && make teste` passa limpo |
 | **0.5 — Contratos e CLI** | CLI, JSON de eventos, manifestos de ferramentas, simulação, confirmação e auditoria | comandos documentados, testes de contrato e nenhuma ação externa sem autorização |
-| **1 — Núcleo de I/O** | Primitivas L0 + `lia-echo`, `lia-cat`, `lia-hex`, `lia-tipo` em Assembly | Saída byte-a-byte idêntica a `cat`/`xxd`; vazão medida contra coreutils |
+| **1 — Núcleo de I/O** | Primitivas L0 + `lia-echo`, `lia-cat`, `lia-hex`, `lia-tipo` em Assembly | ✅ Saída byte-a-byte idêntica a `cat`/`xxd`; vazão medida contra coreutils |
 | **2 — Runtime** | Alocador, strings, estruturas, config TOML | Testes contra oráculos em C; zero vazamento sob valgrind |
 | **3 — Ponte com o modelo** | Cliente Ollama em C, `lia pergunta "..."` | Resposta em streaming a partir de um Llama local |
 | **4 — Formatos I** | Texto, ELF, DEFLATE, ZIP, **PDF** | Extração de PDFs de teste (texto, tabelas, multi-coluna) melhor que `pdftotext` no corpus de avaliação |
@@ -316,6 +316,7 @@ Performance é requisito, então é medida desde a fase 1:
 2. ~~Definir o protocolo de eventos compartilhado por CLI e GUI.~~ Feito: [docs/protocolo.md](docs/protocolo.md).
 3. ~~Implementar `lia tools` em modo somente leitura, com manifestos e auditoria.~~ Feito: `cli/ferramentas.c`, `cli/sistema.c`, [docs/manifesto.md](docs/manifesto.md).
 4. ~~Implementar `lia-echo`, `lia-cat`, testes de ABI e benchmark reproduzível.~~ Feito: `nucleo/x86_64/lia-echo.S`, `nucleo/x86_64/lia-cat.S`, implementações de referência em C (`nucleo/referencia/`), [docs/abi.md](docs/abi.md), `testes/bench/bench_cat.sh` (`make bench`).
-5. `lia-hex`, `lia-tipo` (restante da fase 1) e `lia_memcpy`/`lia_memset`/`lia_memcmp` com seleção de implementação por `cpuid` (SSE2 → AVX2 → AVX-512), cada um com benchmark antes/depois.
-6. Escolher toolkit GUI por uma prova de conceito que rode em Linux x86-64 e AArch64.
-7. Só depois habilitar ferramentas de alteração, cada uma com simulação, confirmação e reversão.
+5. ~~`lia-hex`, `lia-tipo` (restante da fase 1)~~ Feito: `nucleo/x86_64/lia-hex.S` (idêntico a `xxd` sem opções, conferido byte a byte) e `nucleo/x86_64/lia-tipo.S` (ELF/PNG/JPEG/ZIP/gzip/PDF/WAV/texto/vazio/desconhecido, por bytes mágicos, com `--json`), cada um com referência em C e 200 testes no total (`make teste`). **Fase 1 completa.**
+6. `lia_memcpy`/`lia_memset`/`lia_memcmp` com seleção de implementação por `cpuid` (escalar → SSE2 → AVX2 → AVX-512), cada um com benchmark antes/depois e fallback escalar sempre correto — etapa separada, só depois da fase 1 estabilizada (decisão desta etapa: não misturar SIMD com a estabilização de `lia-hex`/`lia-tipo`).
+7. Escolher toolkit GUI por uma prova de conceito que rode em Linux x86-64 e AArch64.
+8. Só depois habilitar ferramentas de alteração, cada uma com simulação, confirmação e reversão.
