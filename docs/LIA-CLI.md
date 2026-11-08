@@ -1,8 +1,18 @@
 # Lia CLI — proposta de arquitetura
 
-**Status:** proposta para discussão  
+**Status:** proposta para discussão (a maior parte ainda não implementada)
 **Alvo inicial:** Arch Linux, x86-64  
 **Objetivo:** uma interface nativa, rápida e independente do shell, que sirva de entrada para o runtime e para o agente da Lia.
+
+> **Nota:** `lia chat` (seção 2, Etapa D) já tem uma implementação real
+> hoje — `lia-chat` (`chat/lia-chat.c`), um binário hospedado separado
+> (GLib/GIO, como `lia-sessiond`/`lia-gui`), não o `lia` estático sem
+> libc desta proposta. É o primeiro cliente de chat interativo de
+> terminal do protocolo (`docs/protocolo.md` §9) — conecta ao
+> `lia-sessiond` já em execução, nunca duplica a lógica do daemon. Ver
+> `make chat`/`make chat-run`/`make teste-chat` e a seção 7 abaixo. A
+> fusão disto num futuro `lia chat` unificado (estático, sem libc) é
+> trabalho futuro, não desta etapa.
 
 ## 1. Decisão central
 
@@ -291,11 +301,85 @@ Não começar com a árvore inteira de comandos. A primeira versão deve provar 
 
 ### Etapa D — modelo local
 
-1. interface abstrata de backend;
-2. conexão somente com o serviço local configurado;
-3. streaming de resposta;
-4. contexto montado pela Lia;
-5. nenhuma execução automática de ferramenta até existir validação de chamada e política de permissões.
+1. ~~interface abstrata de backend~~ Feito: `sessiond/modelo.h` (`sessiond/modelo_mock.c`/`modelo_ollama.c`).
+2. ~~conexão somente com o serviço local configurado~~ Feito: `ollama/cliente_ollama.c` só aceita `127.0.0.1`/`localhost` (com resolução real de `localhost` confirmando loopback — `docs/THREAT-MODEL.md` §5.2).
+3. ~~streaming de resposta~~ Feito: NDJSON/chunked em `ollama/cliente_ollama.c`.
+4. contexto montado pela Lia — parcial: `sessiond/prompt.c` monta o prompt com o manifesto e o pedido da pessoa; ainda não há memória persistente (`~/.lia/humano/memoria`) incluída no contexto.
+5. ~~nenhuma execução automática de ferramenta até existir validação de chamada e política de permissões~~ Feito e é garantia permanente, não só desta etapa: o modelo só propõe (`docs/THREAT-MODEL.md` §5.2); toda execução passa pela validação independente de sempre.
+
+### `lia-chat` — cliente de chat interativo de terminal (implementado)
+
+Primeiro cliente de chat de verdade do protocolo (`docs/protocolo.md` §9),
+hoje um binário hospedado separado (`chat/lia-chat.c`, GLib/GIO — como
+`lia-sessiond`/`lia-gui`, não o `lia` estático sem libc). Conecta a um
+`lia-sessiond` já em execução; nunca inicia o daemon, nunca duplica a
+máquina de estados do protocolo (reaproveita `gui/protocolo.c`).
+
+```sh
+make chat          # compila build/lia-chat
+make chat-run       # compila e abre build/lia-chat (usa ~/.lia/run/session.sock)
+make teste-chat     # suíte de integração (make teste-chat), 53 testes
+```
+
+### Uso
+
+```sh
+lia-chat [--socket CAMINHO] [--backend mock|ollama] [--modelo NOME] [--json] [--help]
+```
+
+- `--socket CAMINHO`: caminho do socket do daemon (padrão `~/.lia/run/session.sock`).
+- `--backend mock|ollama`: só a suposição LOCAL usada por `/status`/`/modelo`
+  (que backend sondar) — **nunca troca o backend do daemon**, que decide o
+  seu próprio no início via `LIA_SESSIOND_MODELO` (`docs/protocolo.md` §9).
+- `--modelo NOME`: nome do modelo usado nessa sonda local (define `LIA_OLLAMA_MODELO`
+  no próprio processo de `lia-chat`, não no daemon).
+- `--json`: modo NDJSON cru — lê linhas de protocolo prontas de stdin, escreve
+  as respostas do daemon cruas em stdout (scriptável; ver `testes/integration/teste_chat.sh`, PARTE E).
+
+Comandos dentro da sessão (`/help` para a lista completa): `/status`,
+`/modelo`, `/backend mock|ollama`, `/arquivos listar`, `/arquivo adicionar
+CAMINHO`, `/arquivo remover ÍNDICE`, `/plano`, `/simular`, `/aprovar`,
+`/rejeitar`, `/cancelar`, `/limpar`, `/sair`. Qualquer outra linha é
+enviada ao modelo como pergunta — exceto quando um plano está pendente,
+caso em que a linha é lida como `[s/N]` (padrão: **rejeitar**).
+
+### Testar com o backend mock (padrão, sem Ollama)
+
+```sh
+make sessiond && build/lia-sessiond &     # LIA_SESSIOND_MODELO não definido -> mock
+make chat && build/lia-chat
+lia> MOCK_PROPOR:sistema.diagnosticar
+lia> /plano
+```
+
+### Testar com Ollama (quando instalado)
+
+```sh
+ollama serve &                                        # ou já em execução
+LIA_SESSIOND_MODELO=ollama build/lia-sessiond &       # ativa o backend real
+build/lia-chat --backend ollama
+lia> /modelo                                          # confirma disponibilidade antes de perguntar
+lia> como você pode me ajudar aqui?
+```
+
+### Códigos de saída
+
+| Código | Significado |
+|---|---|
+| `0` | saída normal (`/sair` ou fim de entrada — EOF) |
+| `1` | não foi possível conectar ao daemon, socket inválido, ou o daemon desconectou |
+| `2` | uso inválido (argumento de linha de comando) |
+| `3` | erro fatal de protocolo (ex.: `protocolo_incompativel`) |
+| `130` | interrompido (Ctrl-C duas vezes em menos de 2s) |
+
+### O que `lia-chat` nunca faz
+
+Nunca chama `system`/`popen`/`fork`/`execve`/`posix_spawn`/`sudo`/`pkexec`
+(verificado em `make teste-chat`, G1); nunca interpreta a entrada da
+pessoa como shell; nunca aprova um plano por conta própria (padrão é
+sempre rejeitar); nunca altera um plano recebido — reenvia exatamente o
+`plano_id` que o daemon mandou; nunca segue link simbólico ao anexar
+arquivo; nunca lê arquivo além do caminho explicitamente informado.
 
 ## 10. Validação obrigatória por arquivo
 

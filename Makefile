@@ -247,4 +247,28 @@ $(B)/teste-cliente-ollama: $(B)/teste-cliente-ollama.o $(B)/sessiond-cliente-oll
 teste-ollama: $(B)/teste-cliente-ollama
 	sh testes/integration/teste_cliente_ollama.sh
 
-.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama
+# ---------------------------------------------------------------------------
+# lia-chat (chat/): primeiro cliente de chat interativo de terminal para o
+# protocolo (docs/protocolo.md §9). Camada fina sobre gui/protocolo.c — não
+# duplica a máquina de estados do protocolo nem a lógica do daemon; reaproveita
+# diretamente os objetos de sessiond/modelo_*.c e ollama/cliente_ollama.c já
+# compilados para "make sessiond" (mesmo probe de disponibilidade que o
+# daemon usaria, nunca a aprovação/execução em si). PODE enviar 'aprovar'
+# (desliga modo_leitura explicitamente) — é o próprio ponto desta CLI,
+# diferente de lia-gui.
+$(B)/chat-lia-chat.o: chat/lia-chat.c gui/protocolo.h sessiond/modelo.h sessiond/prompt.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/lia-chat: $(B)/chat-lia-chat.o $(B)/sessiond-protocolo.o $(B)/sessiond-modelo-mock.o \
+               $(B)/sessiond-modelo-ollama.o $(B)/sessiond-modelo-comum.o $(B)/sessiond-cliente-ollama.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+chat: $(B)/lia-chat
+
+teste-chat: chat sessiond
+	sh testes/integration/teste_chat.sh
+
+chat-run: chat
+	$(B)/lia-chat
+
+.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama chat teste-chat chat-run

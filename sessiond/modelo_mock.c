@@ -9,15 +9,16 @@
  * validação independente decide"). Fora disso, reage a algumas
  * palavras-chave simples do pedido da pessoa.
  *
- * Importante: todo esse reconhecimento só olha a parte CONFIÁVEL do
- * prompt (tudo antes do primeiro "### CONTEÚDO DE ARQUIVO" — ver
- * sessiond/prompt.c), nunca o conteúdo de arquivo em si. Isto é
- * deliberado: representa, de forma determinística e testável, a mesma
- * fronteira de confiança que as instruções de sistema pedem a um modelo
- * de verdade para respeitar (dado, nunca instrução) — um mock que
- * reagisse a qualquer coisa em qualquer lugar do prompt não testaria essa
- * fronteira, só a desmentiria.
- */
+ * Importante: todo esse reconhecimento só olha a seção "### PEDIDO DA
+ * PESSOA USUÁRIA" do prompt (sessiond/prompt.c) — nunca as instruções de
+ * sistema, o manifesto ou conteúdo de arquivo. Isto é deliberado e, na
+ * prática, obrigatório: as próprias instruções de sistema hardcoded
+ * contêm a palavra "sistema" ("instruções do sistema"), então procurar
+ * "sistema"/"diagnost" no prompt inteiro faria QUALQUER pergunta,
+ * inclusive uma sem relação nenhuma, disparar a sugestão de
+ * sistema.diagnosticar — não é só por fidelidade à fronteira de
+ * confiança, é a diferença entre o mock responder de propósito ou por
+ * acidente. */
 #include "modelo.h"
 #include <string.h>
 
@@ -38,11 +39,17 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
     ModeloResposta r = { 0 };
     r.sucesso = TRUE;
 
-    const char *limite_arquivos = strstr(prompt_montado_completo, "### CONTEÚDO DE ARQUIVO");
-    char *copia_confiavel = limite_arquivos
-        ? g_strndup(prompt_montado_completo, (gsize)(limite_arquivos - prompt_montado_completo))
-        : NULL;
-    const char *prompt_montado = copia_confiavel ? copia_confiavel : prompt_montado_completo;
+    const char *inicio_pedido = strstr(prompt_montado_completo, "### PEDIDO DA PESSOA USUÁRIA");
+    if (inicio_pedido) {
+        const char *quebra = strchr(inicio_pedido, '\n');
+        inicio_pedido = quebra ? quebra + 1 : inicio_pedido;
+    } else {
+        inicio_pedido = prompt_montado_completo; /* falha segura: nunca trava, só perde a fronteira extra */
+    }
+    const char *fim_pedido = strstr(inicio_pedido, "### CONTEÚDO DE ARQUIVO");
+    gsize tam_pedido = fim_pedido ? (gsize)(fim_pedido - inicio_pedido) : strlen(inicio_pedido);
+    char *pedido_isolado = g_strndup(inicio_pedido, tam_pedido);
+    const char *prompt_montado = pedido_isolado;
 
     const char *marcador = strstr(prompt_montado, "MOCK_PROPOR:");
     if (marcador) {
@@ -72,7 +79,7 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
         r.resposta_texto = g_strdup("(mock) não tenho uma ferramenta específica para sugerir aqui.");
     }
 
-    g_free(copia_confiavel);
+    g_free(pedido_isolado);
     concluido_cb(ctx, &r);
     modelo_resposta_liberar(&r);
 }

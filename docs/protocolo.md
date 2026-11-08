@@ -162,3 +162,5 @@ cliente                     daemon                      modelo
 ```
 
 `escolher_modelo` (`sessiond.c`) seleciona o backend via `LIA_SESSIOND_MODELO`: **`mock` é o padrão** (determinístico, sem rede — ao contrário do executor, onde o padrão é o `real`, porque aqui `ollama` exige um servidor Ollama de verdade rodando em `127.0.0.1:11434` por padrão). `LIA_SESSIOND_MODELO=ollama` ativa o backend real; `LIA_OLLAMA_HOST`/`LIA_OLLAMA_PORTA`/`LIA_OLLAMA_MODELO`/`LIA_OLLAMA_TIMEOUT_MS` configuram a conexão.
+
+Cliente de referência: `lia-chat` (`chat/lia-chat.c`, `make chat`) — primeiro cliente de chat de terminal deste fluxo, documentado em `docs/LIA-CLI.md` §"`lia-chat`". Implementa exatamente o fluxo acima (`perguntar`→`proposta`→`solicitar`→`plano`→`aprovar`→`resultado`→`resposta`), com aprovação explícita (padrão: rejeitar) e anexação de arquivo (`/arquivo adicionar`, sempre marcado não confiável).

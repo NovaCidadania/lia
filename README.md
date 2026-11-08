@@ -103,6 +103,34 @@ make teste-modelo    # chat (mock), watchdog de timeout/limite de saída do
 
 Conteúdo de arquivo enviado em `perguntar.dados.arquivos` é sempre tratado como dado, nunca instrução — delimitado e marcado "não confiável" no prompt (`sessiond/prompt.c`), nunca interpolado nas instruções de sistema.
 
+### `lia-chat` — cliente de chat interativo de terminal
+
+Primeiro cliente de verdade do fluxo acima: um REPL de terminal
+(`chat/lia-chat.c`, binário hospedado separado — como `lia-sessiond`/
+`lia-gui`, não o `lia` estático). Conecta a um `lia-sessiond` já em
+execução; nunca precisa de Ollama instalado (backend mock é o padrão).
+
+```sh
+make chat          # compila build/lia-chat
+make chat-run       # compila e abre (usa ~/.lia/run/session.sock)
+make teste-chat     # 53 testes de integração
+```
+
+```sh
+build/lia-sessiond &        # backend mock por padrão, sem Ollama
+build/lia-chat
+lia> MOCK_PROPOR:sistema.diagnosticar
+lia> /plano
+```
+
+Pode enviar `aprovar` (é o próprio ponto desta CLI, diferente da GUI) —
+mas o padrão para qualquer plano pendente é sempre **rejeitar**: só uma
+resposta afirmativa explícita (`s`/`sim`/`/aprovar`) aprova. Nunca
+interpreta a entrada como shell, nunca segue link simbólico ao anexar
+arquivo, nunca altera o `plano_id` recebido. Ver
+[docs/LIA-CLI.md](docs/LIA-CLI.md) para comandos, `--json`, código de
+saída e como testar com Ollama de verdade quando instalado.
+
 ## Princípios
 
 1. **Local primeiro.** Nada sai da máquina sem decisão explícita do usuário.
