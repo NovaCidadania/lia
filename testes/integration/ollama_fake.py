@@ -3,12 +3,15 @@
 sessiond/modelo_ollama.c e ollama/cliente_ollama.c — NUNCA usado em
 produção. Modos controlados por variável de ambiente OLLAMA_FAKE_MODO:
 
-  normal        -- streaming NDJSON normal, chunked, termina com done:true
-  truncado      -- fecha a conexão no meio do streaming, sem 'done:true'
-  json_quebrado -- envia uma linha que não é JSON válido
-  http_erro     -- responde 500
-  lento         -- atrasa cada linha (para testar timeout de inatividade)
-  ferramenta    -- resposta final inclui um bloco JSON sugerindo uma ferramenta
+  normal           -- streaming NDJSON normal, chunked, termina com done:true
+  truncado         -- fecha a conexão no meio do streaming, sem 'done:true'
+  json_quebrado    -- envia uma linha que não é JSON válido
+  http_erro        -- responde 500
+  lento            -- atrasa cada linha (para testar timeout de inatividade)
+  ferramenta       -- resposta final inclui um bloco JSON sugerindo uma ferramenta
+  chunk_sem_crlf   -- chunk sem o CRLF correto depois dos dados (framing quebrado)
+  chunk_extensao   -- tamanho do chunk com uma extensão (";ext=1") não suportada
+  cabecalho_gigante -- cabeçalho único acima do limite de 8 KiB do cliente
 
 Uso: OLLAMA_FAKE_MODO=normal python3 ollama_fake.py <porta>
 """
@@ -34,9 +37,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if MODO == "cabecalho_gigante":
+            self.send_response(200)
+            # um único cabeçalho acima do limite de 8 KiB do cliente —
+            # nunca deveria ser esperado indefinidamente nem aceito.
+            self.send_header("X-Gigante", "x" * 9000)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self._chunk(b'{"response":"ok","done":true}\n')
+            self._chunk_fim()
+            return
+
         self.send_response(200)
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+
+        if MODO == "chunk_sem_crlf":
+            dados = b'{"response":"ola","done":false}\n'
+            self.wfile.write(("%x\r\n" % len(dados)).encode() + dados + b"XX")  # nunca \r\n de verdade
+            return
+
+        if MODO == "chunk_extensao":
+            dados = b'{"response":"ola","done":false}\n'
+            # extensão de chunk (RFC 7230 §4.1.1) — o cliente não suporta
+            # nenhuma e deve rejeitar, não ignorar silenciosamente.
+            self.wfile.write(("%x;ext=1\r\n" % len(dados)).encode() + dados + b"\r\n")
+            self._chunk_fim()
+            return
 
         linhas = []
         if MODO == "ferramenta":

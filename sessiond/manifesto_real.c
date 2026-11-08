@@ -26,7 +26,34 @@ static const ParametroManifesto PARAM_VAZIO[] = {
 static const ManifestoReal TABELA[] = {
     {
         .base = {
+            /* Discovery de verdade somente leitura: cli/ferramentas.c
+             * discover() é chamada com --sem-salvar (ver executor_real.c)
+             * — nunca grava nada em disco. Antes desta correção (auditoria
+             * pós-commit e366f2b), esta ferramenta gravava
+             * ~/.lia/maquina/inventario/ferramentas.lia e
+             * ~/.lia/humano/diagnosticos/ferramentas.md mesmo classificada
+             * como risco=nenhum — uma inconsistência real entre o
+             * manifesto e o efeito de verdade. A gravação agora é uma
+             * ação separada e explícita: tools.discover.persistir, risco
+             * "baixo", sempre com aprovação. */
             .nome = "tools.discover", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.2.0", .idempotente = TRUE,
+            .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
+            .efeitos = "lê PATH e diretórios convencionais do sistema; não grava nada (ver tools.discover.persistir para persistir o resultado)",
+            .timeout_padrao_ms = 15000,
+        },
+        .parametros = PARAM_VAZIO,
+    },
+    {
+        .base = {
+            /* Persistência explícita do resultado da varredura mais
+             * recente — refaz a varredura (cli/ferramentas.c não carrega
+             * estado entre chamadas de processo separadas) e grava os
+             * dois arquivos. Risco "baixo" (escreve fora do processo,
+             * mas só no espaço de trabalho da própria Lia — inventário e
+             * diagnóstico derivados, nunca conteúdo do usuário) com
+             * aprovação explícita sempre exigida. */
+            .nome = "tools.discover.persistir", .risco = "baixo", .requer_aprovacao = TRUE,
             .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "lê PATH e diretórios convencionais; grava ~/.lia/maquina/inventario/ferramentas.lia e ~/.lia/humano/diagnosticos/ferramentas.md",
@@ -46,10 +73,23 @@ static const ManifestoReal TABELA[] = {
     },
     {
         .base = {
+            /* Mesma correção de tools.discover: probe() com --sem-salvar
+             * nunca grava nada — só executa o catálogo de probes seguros
+             * e reporta o resultado. */
             .nome = "tools.probe", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.2.0", .idempotente = TRUE,
+            .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
+            .efeitos = "executa, por até poucos segundos cada, só ferramentas do catálogo de probes seguros, com argumento inofensivo e sem privilégio; não grava nada (ver tools.probe.persistir)",
+            .timeout_padrao_ms = 45000,
+        },
+        .parametros = PARAM_PROBE,
+    },
+    {
+        .base = {
+            .nome = "tools.probe.persistir", .risco = "baixo", .requer_aprovacao = TRUE,
             .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
-            .efeitos = "executa, por até poucos segundos cada, só ferramentas do catálogo de probes seguros, com argumento inofensivo e sem privilégio; atualiza o inventário",
+            .efeitos = "repete o probe seguro e grava ~/.lia/maquina/inventario/ferramentas.lia e ~/.lia/humano/diagnosticos/ferramentas.md",
             .timeout_padrao_ms = 45000,
         },
         .parametros = PARAM_PROBE,

@@ -59,9 +59,12 @@ e máquina de estados, com um executor plugável
 (`sessiond/executor.h`). **Padrão em produção: o executor real**
 (`sessiond/executor_real.c`/`sessiond/manifesto_real.c`), limitado às seis
 ferramentas de leitura já existentes na CLI (`tools.discover/list/probe`,
-`sistema.diagnosticar/recursos/dispositivos` — ver
-[docs/manifesto.md](docs/manifesto.md) §3) — nenhuma ferramenta de escrita ou
-privilégio é alcançável. `LIA_SESSIOND_EXECUTOR=mock` troca para um executor
+`sistema.diagnosticar/recursos/dispositivos`, nenhuma delas grava nada — ver
+[docs/manifesto.md](docs/manifesto.md) §3) mais duas ações explícitas de
+persistência (`tools.discover.persistir`/`tools.probe.persistir`, `risco:
+baixo`, sempre com aprovação — §6.1) — nenhuma ferramenta de escrita fora do
+espaço de trabalho da própria Lia, nem privilégio, é alcançável.
+`LIA_SESSIOND_EXECUTOR=mock` troca para um executor
 inteiramente simulado, só para os testes unitários do protocolo (aprovação,
 replay, cancelamento, risco admin) — nunca o padrão
 (ver [docs/protocolo.md](docs/protocolo.md) §8). Mesma toolchain hospedada que

@@ -166,6 +166,15 @@ static gboolean ollama_checar_disponivel(const ModeloBackend *self, char **detal
 {
     (void)self;
     OllamaConfig *cfg = obter_config();
+    char *erro_cfg = ollama_config_validar(cfg);
+    if (erro_cfg) {
+        /* configuração inválida (host não-loopback, porta/timeout fora da
+         * faixa, modelo malformado) — nunca chega a abrir socket nenhum,
+         * nem para o diagnóstico de status (docs/THREAT-MODEL.md §5.2). */
+        if (detalhe_alocado) *detalhe_alocado = g_strdup_printf("configuração inválida: %s", erro_cfg);
+        g_free(erro_cfg);
+        return FALSE;
+    }
     GSocketClient *cliente = g_socket_client_new();
     g_socket_client_set_timeout(cliente, 2);
     GError *erro = NULL;

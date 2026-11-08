@@ -802,7 +802,14 @@ static int salvar_tudo(void)
     return 0;
 }
 
-static int discover(void)
+/* sem_salvar: quando verdadeiro, faz a varredura e imprime o resumo como
+ * sempre, mas NUNCA grava ~/.lia/maquina/inventario/ferramentas.lia nem
+ * ~/.lia/humano/diagnosticos/ferramentas.md — "discover" de verdade
+ * somente leitura, sem efeito observável fora do processo. A persistência
+ * em disco é uma ação separada e explícita (ver "lia tools discover
+ * --salvar"/manifesto tools.discover.persistir), nunca implícita num
+ * passo que o manifesto classifica como risco nenhum. */
+static int discover(int sem_salvar)
 {
     struct lia_timespec ts;
     lia_clock(0, &ts);
@@ -815,15 +822,21 @@ static int discover(void)
     b_s(&lia_out, ", sem bit de execução (ignorados): "), b_u(&lia_out, nao_exec), b_c(&lia_out, '\n');
     if (truncado)
         b_s(&lia_err, "aviso: limite de capacidade atingido; inventário parcial\n");
+    if (sem_salvar) {
+        b_s(&lia_out, "(--sem-salvar: nada foi gravado em disco)\n");
+        return 0;
+    }
     return salvar_tudo();
 }
 
 static int probe(int argc, char **argv)
 {
-    int seguro = 0;
+    int seguro = 0, sem_salvar = 0;
     for (int i = 0; i < argc; i++) {
         if (!lia_strcmp(argv[i], "--safe")) {
             seguro = 1;
+        } else if (!lia_strcmp(argv[i], "--sem-salvar")) {
+            sem_salvar = 1;
         } else {
             b_s(&lia_err, "lia tools probe: opção desconhecida: "), b_s(&lia_err, argv[i]), b_c(&lia_err, '\n');
             return 2;
@@ -865,6 +878,10 @@ static int probe(int argc, char **argv)
     resumo();
     if (truncado)
         b_s(&lia_err, "aviso: memória de texto esgotada; versões podem estar vazias\n");
+    if (sem_salvar) {
+        b_s(&lia_out, "(--sem-salvar: nada foi gravado em disco)\n");
+        return 0;
+    }
     return salvar_tudo();
 }
 
@@ -939,11 +956,16 @@ int cmd_tools(int argc, char **argv)
     if (lia_preparar() < 0)
         return 1;
     if (!lia_strcmp(sub, "discover")) {
-        if (argc > 1) {
-            b_s(&lia_err, "lia tools discover: não aceita argumentos\n");
-            return 2;
+        int sem_salvar = 0;
+        for (int i = 1; i < argc; i++) {
+            if (!lia_strcmp(argv[i], "--sem-salvar")) {
+                sem_salvar = 1;
+            } else {
+                b_s(&lia_err, "lia tools discover: opção desconhecida: "), b_s(&lia_err, argv[i]), b_c(&lia_err, '\n');
+                return 2;
+            }
         }
-        return discover();
+        return discover(sem_salvar);
     }
     if (!lia_strcmp(sub, "list"))
         return listar(argc - 1, argv + 1);

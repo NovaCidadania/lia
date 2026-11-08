@@ -238,4 +238,13 @@ integration: sessiond gui
 teste-modelo: sessiond
 	sh testes/integration/teste_modelo.sh
 
-.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo
+$(B)/teste-cliente-ollama.o: testes/integration/teste_cliente_ollama.c sessiond/modelo.h ollama/cliente_ollama.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-cliente-ollama: $(B)/teste-cliente-ollama.o $(B)/sessiond-cliente-ollama.o $(B)/sessiond-modelo-ollama.o $(B)/sessiond-modelo-comum.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+teste-ollama: $(B)/teste-cliente-ollama
+	sh testes/integration/teste_cliente_ollama.sh
+
+.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama

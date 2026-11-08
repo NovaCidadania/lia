@@ -1175,7 +1175,7 @@ static void escolher_executor(void)
         g_print("lia-sessiond: executor = mock (LIA_SESSIOND_EXECUTOR=mock) — NUNCA o padrão em produção\n");
     } else {
         g_executor = executor_real_obter();
-        g_print("lia-sessiond: executor = real (seis ferramentas de leitura, docs/manifesto.md)\n");
+        g_print("lia-sessiond: executor = real (seis ferramentas de leitura + duas de persistência explícita, docs/manifesto.md)\n");
     }
 }
 

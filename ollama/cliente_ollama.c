@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 #define OLLAMA_CHUNK_LEITURA 4096
+#define OLLAMA_LIMITE_CABECALHOS_BYTES (8 * 1024)
 
 typedef enum {
     FASE_CONECTANDO,
@@ -81,9 +82,66 @@ void ollama_config_liberar(OllamaConfig *cfg)
     g_free(cfg);
 }
 
-static gboolean host_e_loopback(const char *host)
+gboolean ollama_host_e_loopback(const char *host)
 {
     return host && (strcmp(host, "127.0.0.1") == 0 || strcmp(host, "localhost") == 0);
+}
+
+/* "127.0.0.1" já é um literal loopback, sem precisar resolver nada.
+ * "localhost" depende de NSS/`/etc/hosts` — resolve de verdade e confirma
+ * que TODO endereço retornado é loopback (IPv4 127.0.0.0/8 ou IPv6 ::1)
+ * antes de aceitar, porque a resolução desse nome pode, em tese, ter sido
+ * alterada no sistema (docs/THREAT-MODEL.md §5.2). Nunca conecta nada —
+ * só resolve o nome. */
+static gboolean resolve_e_confirma_loopback(const char *host, char **erro_saida)
+{
+    if (strcmp(host, "127.0.0.1") == 0)
+        return TRUE;
+
+    GResolver *resolver = g_resolver_get_default();
+    GError *erro = NULL;
+    GList *enderecos = g_resolver_lookup_by_name(resolver, host, NULL, &erro);
+    g_object_unref(resolver);
+    if (!enderecos) {
+        if (erro_saida)
+            *erro_saida = g_strdup_printf("não foi possível resolver '%s': %s",
+                                           host, erro ? erro->message : "erro desconhecido");
+        if (erro) g_error_free(erro);
+        return FALSE;
+    }
+    gboolean todos_loopback = TRUE;
+    for (GList *it = enderecos; it; it = it->next) {
+        if (!g_inet_address_get_is_loopback(G_INET_ADDRESS(it->data))) {
+            todos_loopback = FALSE;
+            break;
+        }
+    }
+    g_resolver_free_addresses(enderecos);
+    if (!todos_loopback && erro_saida)
+        *erro_saida = g_strdup_printf("'%s' resolve para um endereço que não é loopback — recusado", host);
+    return todos_loopback;
+}
+
+char *ollama_config_validar(const OllamaConfig *cfg)
+{
+    if (!cfg)
+        return g_strdup("configuração ausente");
+    if (!ollama_host_e_loopback(cfg->host))
+        return g_strdup_printf("host inválido: '%s' (só 127.0.0.1/localhost é aceito)", cfg->host);
+    char *erro_resolucao = NULL;
+    if (!resolve_e_confirma_loopback(cfg->host, &erro_resolucao))
+        return erro_resolucao ? erro_resolucao : g_strdup("host não confirmado como loopback");
+    g_free(erro_resolucao); /* NULL em sucesso; g_free(NULL) é inofensivo */
+    if (cfg->porta < OLLAMA_PORTA_MIN || cfg->porta > OLLAMA_PORTA_MAX)
+        return g_strdup_printf("porta inválida: %d (esperado %d..%d)", cfg->porta, OLLAMA_PORTA_MIN, OLLAMA_PORTA_MAX);
+    if (cfg->timeout_ms < OLLAMA_TIMEOUT_MS_MIN || cfg->timeout_ms > OLLAMA_TIMEOUT_MS_MAX)
+        return g_strdup_printf("timeout_ms inválido: %d (esperado %d..%d)",
+                                cfg->timeout_ms, OLLAMA_TIMEOUT_MS_MIN, OLLAMA_TIMEOUT_MS_MAX);
+    if (!cfg->modelo || !*cfg->modelo)
+        return g_strdup("nome do modelo vazio");
+    if (strlen(cfg->modelo) > OLLAMA_MODELO_TAM_MAX)
+        return g_strdup_printf("nome do modelo acima do limite (%d bytes)", OLLAMA_MODELO_TAM_MAX);
+    return NULL;
 }
 
 static void requisicao_liberar_recursos(OllamaRequisicao *req)
@@ -179,11 +237,18 @@ static gboolean decodificar_corpo_disponivel(OllamaRequisicao *req)
     gsize disponivel = req->bruto->len - req->pos_cabecalho_fim;
 
     if (!req->usa_chunked) {
-        /* Content-Length conhecido ou desconhecido: tudo que chegou após
-         * os cabeçalhos é corpo direto. */
-        if (req->pos_consumida < disponivel) {
-            g_string_append_len(req->corpo_decodificado, base + req->pos_consumida, disponivel - req->pos_consumida);
-            req->pos_consumida = disponivel;
+        /* Content-Length conhecido: nunca consome além dele — bytes
+         * excedentes (lixo após o corpo declarado) ficam de fora, nunca
+         * entram no fluxo NDJSON. Desconhecido (-1): comportamento
+         * anterior, consome tudo que chegou (o fim real é o EOF). */
+        gsize alvo = disponivel;
+        if (req->content_length >= 0) {
+            gsize limite_corpo = (gsize)req->content_length;
+            alvo = limite_corpo < disponivel ? limite_corpo : disponivel;
+        }
+        if (req->pos_consumida < alvo) {
+            g_string_append_len(req->corpo_decodificado, base + req->pos_consumida, alvo - req->pos_consumida);
+            req->pos_consumida = alvo;
         }
         return processar_linhas_ndjson(req);
     }
@@ -209,10 +274,35 @@ static gboolean decodificar_corpo_disponivel(OllamaRequisicao *req)
             finalizar(req, OLLAMA_ERRO_RESPOSTA_INVALIDA);
             return FALSE;
         }
+        /* nada suportado depois dos dígitos hex: nenhuma extensão de
+         * chunk ("<hex>;nome=valor") é reconhecida — melhor rejeitar
+         * explicitamente do que ignorar silenciosamente algo que não
+         * entendemos (RFC 7230 §4.1.1 permite extensões, mas o Ollama
+         * nunca as envia; aceitar mais do que o necessário é só
+         * superfície de ataque extra). */
+        if (*fim_parse != '\0') {
+            finalizar(req, OLLAMA_ERRO_RESPOSTA_INVALIDA);
+            return FALSE;
+        }
+        /* um único chunk maior que o limite inteiro de resposta nunca
+         * pode ser válido — falha já, em vez de esperar indefinidamente
+         * por bytes que (se chegarem) só seriam descartados depois. */
+        if ((guint64)tam_chunk > (guint64)req->cfg->limite_resposta_bytes) {
+            finalizar(req, OLLAMA_ERRO_LIMITE_EXCEDIDO);
+            return FALSE;
+        }
 
         gsize offset_dados = tam_linha_tam + 1; /* depois do '\n' do tamanho */
         if (tam_restante < offset_dados + (gsize)tam_chunk + 2)
             return TRUE; /* chunk ainda não chegou inteiro (dados + \r\n final) */
+
+        /* confere rigorosamente o CRLF depois dos dados do chunk — nunca
+         * avança por cima de dois bytes não verificados. */
+        if (restante[offset_dados + (gsize)tam_chunk] != '\r' ||
+            restante[offset_dados + (gsize)tam_chunk + 1] != '\n') {
+            finalizar(req, OLLAMA_ERRO_RESPOSTA_INVALIDA);
+            return FALSE;
+        }
 
         if (tam_chunk == 0) {
             /* chunk terminador: fim do corpo */
@@ -233,10 +323,22 @@ static gboolean decodificar_corpo_disponivel(OllamaRequisicao *req)
 static gboolean tentar_parsear_cabecalhos(OllamaRequisicao *req)
 {
     const char *fim = g_strstr_len(req->bruto->str, (gssize)req->bruto->len, "\r\n\r\n");
-    if (!fim)
+    if (!fim) {
+        /* nunca espera indefinidamente por um terminador de cabeçalhos
+         * que pode nunca chegar — limite fixo, independente do limite
+         * geral de resposta (que só é checado depois de decodificado). */
+        if (req->bruto->len > OLLAMA_LIMITE_CABECALHOS_BYTES) {
+            finalizar(req, OLLAMA_ERRO_RESPOSTA_INVALIDA);
+            return FALSE;
+        }
         return TRUE; /* ainda não chegaram todos os cabeçalhos */
+    }
 
     gsize tam_cabecalhos = (gsize)(fim - req->bruto->str);
+    if (tam_cabecalhos > OLLAMA_LIMITE_CABECALHOS_BYTES) {
+        finalizar(req, OLLAMA_ERRO_RESPOSTA_INVALIDA);
+        return FALSE;
+    }
     char *cabecalhos = g_strndup(req->bruto->str, tam_cabecalhos);
 
     /* status: "HTTP/1.1 200 OK\r\n..." */
@@ -248,12 +350,31 @@ static gboolean tentar_parsear_cabecalhos(OllamaRequisicao *req)
     }
     req->status_http = status;
 
-    req->usa_chunked = (g_strstr_len(cabecalhos, -1, "Transfer-Encoding: chunked") != NULL) ||
-                        (g_strstr_len(cabecalhos, -1, "transfer-encoding: chunked") != NULL);
+    /* nomes de cabeçalho HTTP são case-insensitive (RFC 7230 §3.2) —
+     * nunca checar só uma ou duas variações de maiúsculas/minúsculas.
+     * Percorre linha a linha (pula a linha de status, índice 0) e compara
+     * o nome de cada cabeçalho com g_ascii_strcasecmp. */
+    req->usa_chunked = FALSE;
     req->content_length = -1;
-    const char *cl = g_strstr_len(cabecalhos, -1, "Content-Length:");
-    if (!cl) cl = g_strstr_len(cabecalhos, -1, "content-length:");
-    if (cl) req->content_length = strtol(cl + strlen("Content-Length:"), NULL, 10);
+    char **linhas = g_strsplit(cabecalhos, "\r\n", 0);
+    for (int i = 1; linhas[i] != NULL; i++) {
+        if (!*linhas[i]) continue;
+        char *dois_pontos = strchr(linhas[i], ':');
+        if (!dois_pontos) continue;
+        *dois_pontos = '\0';
+        const char *nome = linhas[i];
+        const char *valor = dois_pontos + 1;
+        while (*valor == ' ') valor++;
+        if (g_ascii_strcasecmp(nome, "Transfer-Encoding") == 0) {
+            char *valor_min = g_ascii_strdown(valor, -1);
+            if (strstr(valor_min, "chunked")) req->usa_chunked = TRUE;
+            g_free(valor_min);
+        } else if (g_ascii_strcasecmp(nome, "Content-Length") == 0) {
+            long cl = strtol(valor, NULL, 10);
+            req->content_length = cl >= 0 ? cl : -1; /* negativo malformado: trata como "desconhecido" */
+        }
+    }
+    g_strfreev(linhas);
 
     g_free(cabecalhos);
     req->pos_cabecalho_fim = tam_cabecalhos + 4;
@@ -405,7 +526,9 @@ OllamaRequisicao *ollama_gerar(OllamaConfig *cfg, const char *prompt,
     req->texto_completo = g_string_new(NULL);
     req->content_length = -1;
 
-    if (!host_e_loopback(cfg->host)) {
+    char *erro_cfg = ollama_config_validar(cfg);
+    if (erro_cfg) {
+        g_free(erro_cfg);
         g_idle_add(ao_idle_endpoint_invalido, req);
         return NULL;
     }

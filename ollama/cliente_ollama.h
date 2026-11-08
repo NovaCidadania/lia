@@ -22,6 +22,16 @@ typedef struct {
     gsize limite_resposta_bytes; /* aborta com OLLAMA_ERRO_LIMITE_EXCEDIDO se exceder */
 } OllamaConfig;
 
+/* Limites de configuração — nunca "sem limite": um valor fora destas
+ * faixas é rejeitado por ollama_config_validar(), nunca truncado ou
+ * usado como veio (ex.: timeout 0/negativo nunca chega a
+ * g_timeout_add/g_socket_client_set_timeout). */
+#define OLLAMA_PORTA_MIN        1
+#define OLLAMA_PORTA_MAX        65535
+#define OLLAMA_TIMEOUT_MS_MIN   1
+#define OLLAMA_TIMEOUT_MS_MAX   (600 * 1000) /* 10 minutos — generoso, mas sempre finito */
+#define OLLAMA_MODELO_TAM_MAX   256
+
 typedef enum {
     OLLAMA_OK = 0,
     OLLAMA_ERRO_ENDPOINT_INVALIDO,  /* host != 127.0.0.1/localhost, ou URL malformada */
@@ -34,6 +44,20 @@ typedef enum {
 } OllamaErro;
 
 const char *ollama_erro_texto(OllamaErro e);
+
+/* Checagem textual simples: host é exatamente "127.0.0.1" ou "localhost".
+ * Não resolve nada — use ollama_config_validar() para a checagem completa
+ * (inclui resolução de "localhost" e confirmação de que TODO endereço
+ * resolvido é mesmo loopback, já que a resolução de nome depende de
+ * NSS/`/etc/hosts` e, em tese, pode ter sido alterada no sistema). */
+gboolean ollama_host_e_loopback(const char *host);
+
+/* Validação centralizada de host, porta, timeout e nome do modelo — a
+ * ÚNICA função que qualquer chamador (gerar uma resposta, checar
+ * disponibilidade/status) deve consultar antes de qualquer E/S de rede.
+ * NULL se 'cfg' é válido; senão mensagem alocada (g_free) explicando o
+ * problema. Nunca conecta a lugar nenhum por si só. */
+char *ollama_config_validar(const OllamaConfig *cfg);
 
 /* host_ou_null: NULL/"" usa "127.0.0.1". Qualquer outro valor que não seja
  * exatamente "127.0.0.1" ou "localhost" é aceito aqui (o config é só

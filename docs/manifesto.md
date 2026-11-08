@@ -2,7 +2,7 @@
 
 Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica um manifesto. O executor valida o manifesto e a política do usuário **independentemente do modelo**: o modelo escolhe a ferramenta e os parâmetros, mas não decide se ela é permitida.
 
-> **Nota:** o daemon de sessão (`docs/protocolo.md` §8) implementa exatamente estas seis ferramentas de leitura em `sessiond/manifesto_real.c` (o executor padrão). `sessiond/manifesto_mock.c` define, separadamente, uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`, mais `mock.timeout` e `mock.saida_grande`, fixtures só para exercitar o watchdog de timeout e o limite de saída do daemon de verdade) só para testar a máquina de estados do protocolo — ativada apenas com `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão em produção; não deve ser confundida com as ferramentas reais.
+> **Nota:** o daemon de sessão (`docs/protocolo.md` §8) implementa estas seis ferramentas de leitura em `sessiond/manifesto_real.c` (o executor padrão), mais duas ações explícitas de persistência (`tools.discover.persistir`, `tools.probe.persistir` — §6.1). `sessiond/manifesto_mock.c` define, separadamente, uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`, mais `mock.timeout` e `mock.saida_grande`, fixtures só para exercitar o watchdog de timeout e o limite de saída do daemon de verdade) só para testar a máquina de estados do protocolo — ativada apenas com `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão em produção; não deve ser confundida com as ferramentas reais.
 
 ## 1. Campos obrigatórios
 
@@ -34,14 +34,13 @@ Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica u
 ```json
 {
   "nome": "tools.discover",
-  "versao": "0.1.0",
+  "versao": "0.2.0",
   "parametros": [],
   "capacidades": ["leitura_arquivo", "processo"],
   "risco": "nenhum",
   "efeitos": [
     "lê PATH e diretórios convencionais do sistema",
-    "grava ~/.lia/maquina/inventario/ferramentas.lia",
-    "grava ~/.lia/humano/diagnosticos/ferramentas.md"
+    "não grava nada (ver tools.discover.persistir, §6.1)"
   ],
   "idempotente": true,
   "timeout_padrao_ms": 30000,
@@ -54,13 +53,13 @@ Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica u
 ```json
 {
   "nome": "tools.probe",
-  "versao": "0.1.0",
+  "versao": "0.2.0",
   "parametros": [{ "nome": "safe", "tipo": "booleano", "obrigatorio": true, "padrao": true }],
   "capacidades": ["leitura_arquivo", "processo"],
   "risco": "nenhum",
   "efeitos": [
     "executa, por até 3 s cada, apenas ferramentas do catálogo de probes seguros, com argumento inofensivo e sem privilégio",
-    "atualiza ~/.lia/maquina/inventario/ferramentas.lia e o relatório legível"
+    "não grava nada (ver tools.probe.persistir, §6.1)"
   ],
   "idempotente": true,
   "timeout_padrao_ms": 3000,
@@ -167,3 +166,14 @@ Esta validação é do executor, não do modelo: um modelo comprometido ou um ar
 Este documento descreve o **manifesto**: a declaração estática de uma ferramenta, carregada uma vez. Uma execução concreta gera, em cima dele, um **plano** (mensagem `plano` — `docs/protocolo.md` §3), com campos próprios dessa instância: `plano_id`, `versao_manifesto` (cópia do `versao` do manifesto no momento do plano, para detectar manifesto trocado entre o plano e a aprovação), `objetivo`/`justificativa` (opcionais, descrevem o "porquê" desta chamada específica), `passos` (lista — hoje sempre um único passo nesta etapa), e os campos do próprio manifesto (`capacidades`, `risco`, `efeitos`, `idempotente`, `timeout_padrao_ms`, `reversivel`, `requer_aprovacao`) ecoados para a pessoa decidir sem precisar confiar em memória.
 
 O modelo de linguagem (`docs/protocolo.md` §9, `docs/THREAT-MODEL.md` §5.2) pode sugerir um `objetivo`/`justificativa` e qual ferramenta/parâmetros usar — mas nunca gera um `plano` diretamente: a sugestão (`proposta`) só se torna um `plano` de verdade quando uma pessoa a reenvia como `solicitar`, passando pela mesma validação de manifesto/capacidade/parâmetro desta seção.
+
+## 6.1 Descoberta vs. persistência: `tools.discover`/`tools.probe` nunca gravam por si só
+
+Auditoria pós-commit `e366f2b` (ponte com o modelo) encontrou uma inconsistência real: `tools.discover` e `tools.probe` estavam classificados `risco: nenhum`/`requer_aprovacao: false` ("sem efeito observável fora do processo" — §1), mas `cli/ferramentas.c` gravava, em toda chamada, `~/.lia/maquina/inventario/ferramentas.lia` e `~/.lia/humano/diagnosticos/ferramentas.md` — um efeito bem observável fora do processo.
+
+A correção separa descoberta de persistência, em vez de passar as duas ferramentas a exigir aprovação (o que quebraria a GUI hoje: `gui/protocolo.c` nunca envia `aprovar`, por desenho, enquanto `modo_leitura` estiver ativo — ver `docs/THREAT-MODEL.md` §5.1):
+
+- `tools.discover`/`tools.probe` (inalteradas para quem já as chama, GUI incluída): `cli/ferramentas.c` roda com a nova flag `--sem-salvar` — fazem a varredura/probe e reportam o resultado, mas **nunca gravam nada em disco**. Continuam `risco: nenhum`, `requer_aprovacao: false`, honestamente agora.
+- `tools.discover.persistir`/`tools.probe.persistir` (novas): repetem a mesma operação, mas SEM `--sem-salvar` — gravam os dois arquivos de verdade. `risco: baixo` (escreve fora do processo, mas só no espaço de trabalho da própria Lia — inventário e diagnóstico derivados, nunca conteúdo do usuário), `requer_aprovacao: true` sempre.
+
+Quem precisa que `tools.list` funcione (ela só lê o inventário já persistido) precisa primeiro rodar `tools.discover.persistir` — uma decisão explícita e aprovada, nunca um efeito colateral escondido de uma ferramenta "somente leitura".

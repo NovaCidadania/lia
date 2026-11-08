@@ -4,9 +4,11 @@
 # NUNCA toca ~/.lia da pessoa. Uso: make integration
 #
 # PARTE A (executor real, padrão): as seis ferramentas de leitura de
-# sessiond/manifesto_real.c, contra o sistema de verdade (mas sempre
-# dentro do $HOME temporário — tools.discover/probe nunca leem ~/.lia
-# real, só o que está no PATH do sistema, que é dado público do host).
+# sessiond/manifesto_real.c, mais tools.discover.persistir/tools.probe.
+# persistir (as únicas duas que gravam algo — sempre com aprovação, nunca
+# por padrão, ver docs/manifesto.md §6.1), contra o sistema de verdade (mas
+# sempre dentro do $HOME temporário — tools.discover/probe nunca leem
+# ~/.lia real, só o que está no PATH do sistema, que é dado público do host).
 #
 # PARTE B (executor mock, LIA_SESSIOND_EXECUTOR=mock): máquina de estados
 # do protocolo em si — aprovação, replay, cancelamento em cada ponto do
@@ -134,14 +136,29 @@ iniciar_daemon
 [ "$(stat -c %U "$SOCK" 2>/dev/null)" = "$(id -un)" ] && ok "socket pertence ao usuário atual" || ko "dono do socket"
 grep -q "executor = real" "$HOME_T/sessiond.log" && ok "executor padrão é o real (não o mock)" || ko "executor padrão não é o real"
 
-echo "== A2. fluxo real por ferramenta: tools.discover =="
+echo "== A2. fluxo real por ferramenta: tools.discover (somente leitura, não grava nada) =="
 abrir_conexao a
 enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"rd1","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"tools.discover","parametros":{}}}'
 aguardar "$HOME_T/a.out" '"estado":"sucesso"' && ok "tools.discover: resultado sucesso" || ko "tools.discover falhou"
 aguardar "$HOME_T/a.out" '"tipo":"auditoria"' && ok "tools.discover: auditoria emitida" || ko "tools.discover sem auditoria"
-[ -f "$HOME_T/.lia/maquina/inventario/ferramentas.lia" ] && ok "tools.discover grava o inventário dentro do HOME temporário" \
-    || ko "inventário não foi gravado"
+aguardar "$HOME_T/a.out" '"requer_aprovacao":false' && ok "tools.discover: risco nenhum, sem aprovação (não grava nada)" \
+    || ko "tools.discover deveria continuar sem aprovação"
 fechar_a
+[ ! -f "$HOME_T/.lia/maquina/inventario/ferramentas.lia" ] && ok "tools.discover (sem --persistir) não grava o inventário" \
+    || ko "tools.discover gravou o inventário mesmo sem persistir explicitamente (correção da auditoria revertida)"
+
+echo "== A2b. tools.discover.persistir: ação separada, sempre com aprovação, grava de verdade =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"rd2","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"tools.discover.persistir","parametros":{}}}'
+aguardar "$HOME_T/a.out" '"tipo":"plano"' && ok "tools.discover.persistir: plano emitido" || ko "sem plano"
+aguardar "$HOME_T/a.out" '"requer_aprovacao":true' && ok "tools.discover.persistir: requer aprovação" \
+    || ko "tools.discover.persistir deveria exigir aprovação"
+PID_DISCOVER=$(extrair_plano_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rd2b","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_DISCOVER")"
+aguardar "$HOME_T/a.out" '"estado":"sucesso"' && ok "tools.discover.persistir: resultado sucesso" || ko "tools.discover.persistir falhou"
+fechar_a
+[ -f "$HOME_T/.lia/maquina/inventario/ferramentas.lia" ] && ok "tools.discover.persistir grava o inventário dentro do HOME temporário" \
+    || ko "inventário não foi gravado"
 
 echo "== A3. fluxo real por ferramenta: tools.list (depende do discover acima) =="
 abrir_conexao a
@@ -149,7 +166,7 @@ enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"rl1","em_resposta_a":nu
 aguardar "$HOME_T/a.out" '"estado":"sucesso"' && ok "tools.list --estado ACCESSIBLE: sucesso" || ko "tools.list falhou"
 fechar_a
 
-echo "== A4. fluxo real por ferramenta: tools.probe --safe (depende do discover) =="
+echo "== A4. fluxo real por ferramenta: tools.probe --safe, somente leitura (depende do discover.persistir) =="
 # O executor real captura a saída da ferramenta inteira e a devolve dentro
 # de 'resultado.dados' (synchronous, sem streaming) — diferente do mock,
 # que emite 'saida'/'progresso' incrementais só para exercitar esses tipos
@@ -157,8 +174,20 @@ echo "== A4. fluxo real por ferramenta: tools.probe --safe (depende do discover)
 abrir_conexao a
 enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"rp1","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"tools.probe","parametros":{}}}'
 aguardar "$HOME_T/a.out" '"estado":"sucesso"' "100" && ok "tools.probe --safe: sucesso" || ko "tools.probe falhou"
+aguardar "$HOME_T/a.out" '"requer_aprovacao":false' && ok "tools.probe: risco nenhum, sem aprovação (não grava nada)" \
+    || ko "tools.probe deveria continuar sem aprovação"
 grep -qE '"codigo_saida":[0-9]+.*PROBE_SUCCESS|PROBE_SUCCESS' "$HOME_T/a.out" && ok "tools.probe: saída contém resultado de probe real" \
     || ko "tools.probe sem conteúdo esperado"
+fechar_a
+
+echo "== A4b. tools.probe.persistir: ação separada, sempre com aprovação, grava de verdade =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"rp2","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"tools.probe.persistir","parametros":{}}}'
+aguardar "$HOME_T/a.out" '"requer_aprovacao":true' && ok "tools.probe.persistir: requer aprovação" \
+    || ko "tools.probe.persistir deveria exigir aprovação"
+PID_PROBE=$(extrair_plano_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rp2b","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_PROBE")"
+aguardar "$HOME_T/a.out" '"estado":"sucesso"' "100" && ok "tools.probe.persistir: resultado sucesso" || ko "tools.probe.persistir falhou"
 fechar_a
 
 echo "== A5. fluxo real por ferramenta: sistema.diagnosticar/recursos/dispositivos =="

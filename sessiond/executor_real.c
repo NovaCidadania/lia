@@ -80,6 +80,13 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
 
     int rc;
     if (strcmp(m->base.nome, "tools.discover") == 0) {
+        /* --sem-salvar: ferramenta somente leitura, nunca grava nada em
+         * disco (ver docs/manifesto.md, correção pós-auditoria do
+         * commit e366f2b) — a persistência é tools.discover.persistir,
+         * uma ação separada com aprovação. */
+        char *argv[] = { (char *)"discover", (char *)"--sem-salvar" };
+        rc = cmd_tools(2, argv);
+    } else if (strcmp(m->base.nome, "tools.discover.persistir") == 0) {
         char *argv[] = { (char *)"discover" };
         rc = cmd_tools(1, argv);
     } else if (strcmp(m->base.nome, "tools.list") == 0) {
@@ -94,6 +101,15 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
         }
         rc = cmd_tools(n, argv);
     } else if (strcmp(m->base.nome, "tools.probe") == 0) {
+        if (!campo_bool(parametros, "safe", TRUE)) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("parametro_invalido");
+            r->erro_mensagem = g_strdup("'safe' só pode ser true nesta etapa — tools.probe sem --safe não existe");
+            return;
+        }
+        char *argv[] = { (char *)"probe", (char *)"--safe", (char *)"--sem-salvar" };
+        rc = cmd_tools(3, argv);
+    } else if (strcmp(m->base.nome, "tools.probe.persistir") == 0) {
         if (!campo_bool(parametros, "safe", TRUE)) {
             r->sucesso = FALSE;
             r->erro_codigo = g_strdup("parametro_invalido");
