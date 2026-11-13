@@ -14,10 +14,12 @@
  *     manifesto real, exatamente no mesmo código que valida qualquer
  *     'solicitar' (docs/protocolo.md, docs/THREAT-MODEL.md §5.2).
  *
- * Dois backends: modelo_mock.c (determinístico, para teste) e
- * modelo_ollama.c (ollama/cliente_ollama.c de verdade). Nenhum dos dois
- * jamais chama funções de aprovação/execução — essas funções nem são
- * visíveis para este módulo (não inclui executor.h nem sessiond.c).
+ * Três backends: modelo_mock.c (determinístico, para teste),
+ * modelo_ollama.c (ollama/cliente_ollama.c de verdade) e
+ * modelo_llama_cpp.c (ollama/cliente_llama_cpp.c, para um llama-server
+ * local servindo qualquer modelo .gguf). Nenhum deles jamais chama
+ * funções de aprovação/execução — essas funções nem são visíveis para
+ * este módulo (não inclui executor.h nem sessiond.c).
  */
 #ifndef LIA_SESSIOND_MODELO_H
 #define LIA_SESSIOND_MODELO_H
@@ -37,6 +39,15 @@ typedef struct {
 void modelo_resposta_liberar(ModeloResposta *r);
 
 typedef void (*ModeloConcluidoCb)(gpointer ctx, const ModeloResposta *r);
+
+/* Compartilhado entre backends reais (modelo_ollama.c, modelo_llama_cpp.c):
+ * preenche r->resposta_texto com 'texto_completo' e, se o modelo tiver
+ * incluído um bloco JSON de "proposta de ferramenta"
+ * ({"ferramenta":...,"parametros":{...},"justificativa":...}) em algum
+ * ponto do texto, extrai e preenche os campos correspondentes. Nunca
+ * interpreta o restante do texto como instrução, nunca chama nada por
+ * conta própria com isso (ver comentário no topo deste arquivo). */
+void modelo_preencher_proposta_de_texto(ModeloResposta *r, const char *texto_completo);
 
 typedef struct ModeloBackend ModeloBackend;
 struct ModeloBackend {
@@ -59,5 +70,6 @@ struct ModeloBackend {
 
 const ModeloBackend *modelo_mock_obter(void);
 const ModeloBackend *modelo_ollama_obter(void);
+const ModeloBackend *modelo_llama_cpp_obter(void);
 
 #endif

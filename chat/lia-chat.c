@@ -94,7 +94,7 @@ typedef struct {
     GMainLoop *loop;
 
     char *socket_caminho;
-    char *backend_assumido;  /* "mock" ou "ollama" — só exibição/probe local, nunca controla o daemon remotamente */
+    char *backend_assumido;  /* "mock", "ollama" ou "llama_cpp" — só exibição/probe local, nunca controla o daemon remotamente */
     char *modelo_assumido;   /* só repassado para LIA_OLLAMA_MODELO antes do probe */
     gboolean modo_json;      /* --json: NDJSON cru em vez do REPL humano */
     gboolean interativo;     /* isatty(stdin) */
@@ -446,7 +446,9 @@ static void probe_modelo(LiaChat *c, gboolean completo)
 {
     if (c->modelo_assumido)
         g_setenv("LIA_OLLAMA_MODELO", c->modelo_assumido, TRUE);
-    const ModeloBackend *m = !strcmp(c->backend_assumido, "ollama") ? modelo_ollama_obter() : modelo_mock_obter();
+    const ModeloBackend *m = !strcmp(c->backend_assumido, "ollama") ? modelo_ollama_obter() :
+                              !strcmp(c->backend_assumido, "llama_cpp") ? modelo_llama_cpp_obter() :
+                              modelo_mock_obter();
     char *detalhe = NULL;
     gboolean disp = m->disponivel(m, &detalhe);
     saida_linha(c, "backend assumido (local, não controla o daemon remotamente): %s", c->backend_assumido);
@@ -824,8 +826,8 @@ static void processar_comando(LiaChat *c, const char *linha_bruta)
     } else if (!strcmp(cmd, "/modelo")) {
         probe_modelo(c, TRUE);
     } else if (!strcmp(cmd, "/backend")) {
-        if (!partes[1] || (strcmp(partes[1], "mock") && strcmp(partes[1], "ollama"))) {
-            saida_linha(c, "[local] uso: /backend mock|ollama");
+        if (!partes[1] || (strcmp(partes[1], "mock") && strcmp(partes[1], "ollama") && strcmp(partes[1], "llama_cpp"))) {
+            saida_linha(c, "[local] uso: /backend mock|ollama|llama_cpp");
         } else {
             g_free(c->backend_assumido);
             c->backend_assumido = g_strdup(partes[1]);
@@ -1053,7 +1055,7 @@ static gboolean ao_sigint(gpointer dados)
 static void imprimir_uso(const char *argv0)
 {
     fprintf(stderr,
-        "uso: %s [--socket CAMINHO] [--backend mock|ollama] [--modelo NOME] [--json] [--help]\n"
+        "uso: %s [--socket CAMINHO] [--backend mock|ollama|llama_cpp] [--modelo NOME] [--json] [--help]\n"
         "\n"
         "Códigos de saída:\n"
         "  0   saída normal (/sair ou fim de entrada)\n"
@@ -1087,8 +1089,8 @@ int main(int argc, char **argv)
             c.socket_caminho = g_strdup(argv[++i]);
         } else if (!strcmp(argv[i], "--backend") && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "mock") && strcmp(argv[i], "ollama")) {
-                fprintf(stderr, "lia-chat: --backend precisa ser 'mock' ou 'ollama'\n");
+            if (strcmp(argv[i], "mock") && strcmp(argv[i], "ollama") && strcmp(argv[i], "llama_cpp")) {
+                fprintf(stderr, "lia-chat: --backend precisa ser 'mock', 'ollama' ou 'llama_cpp'\n");
                 return 2;
             }
             g_free(c.backend_assumido);

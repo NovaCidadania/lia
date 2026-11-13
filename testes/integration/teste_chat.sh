@@ -320,8 +320,11 @@ aguardar "$HOME_T/chat.out" "disponibilidade: sim" && ok "D1: backend mock sempr
 enviar_chat "/sair"
 fechar_chat
 
-echo "== D2. /backend ollama + /modelo sem Ollama instalado: funciona, reporta indisponível =="
-abrir_chat --backend ollama
+echo "== D2. /backend ollama + /modelo sem servidor Ollama alcançável: funciona, reporta indisponível =="
+# LIA_OLLAMA_PORTA=1 força uma porta sem ninguém ouvindo, independente de
+# a máquina ter (ou não) um Ollama de verdade instalado/rodando na porta
+# padrão (11434) — o teste nunca deve depender desse fato ambiental.
+LIA_OLLAMA_PORTA=1 abrir_chat --backend ollama
 enviar_chat "/modelo"
 aguardar "$HOME_T/chat.out" "disponibilidade: não" "30" && ok "D2: Ollama ausente reportado sem travar" || ko "D2: não reportou indisponibilidade"
 enviar_chat "/sair"

@@ -1179,20 +1179,24 @@ static void escolher_executor(void)
     }
 }
 
-/* Diferente do executor: "ollama" exige um servidor Ollama de verdade
- * rodando; "mock" não exige nada. Por isso, ao contrário do executor
- * (onde o padrão é "real", sem dependência extra), o padrão aqui é
- * "mock" — o modelo real é opt-in explícito (LIA_SESSIOND_MODELO=ollama),
- * nunca uma dependência silenciosa de produção. */
+/* Diferente do executor: "ollama"/"llama_cpp" exigem um servidor de
+ * verdade rodando; "mock" não exige nada. Por isso, ao contrário do
+ * executor (onde o padrão é "real", sem dependência extra), o padrão
+ * aqui é "mock" — o modelo real é opt-in explícito
+ * (LIA_SESSIOND_MODELO=ollama ou LIA_SESSIOND_MODELO=llama_cpp), nunca
+ * uma dependência silenciosa de produção. */
 static void escolher_modelo(void)
 {
     const char *modo = g_getenv("LIA_SESSIOND_MODELO");
     if (modo && strcmp(modo, "ollama") == 0) {
         g_modelo = modelo_ollama_obter();
         g_print("lia-sessiond: modelo = ollama (LIA_SESSIOND_MODELO=ollama)\n");
+    } else if (modo && strcmp(modo, "llama_cpp") == 0) {
+        g_modelo = modelo_llama_cpp_obter();
+        g_print("lia-sessiond: modelo = llama_cpp (LIA_SESSIOND_MODELO=llama_cpp)\n");
     } else {
         g_modelo = modelo_mock_obter();
-        g_print("lia-sessiond: modelo = mock (padrão — defina LIA_SESSIOND_MODELO=ollama para o modelo real)\n");
+        g_print("lia-sessiond: modelo = mock (padrão — defina LIA_SESSIOND_MODELO=ollama ou =llama_cpp para o modelo real)\n");
     }
 }
 

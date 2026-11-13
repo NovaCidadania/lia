@@ -18,6 +18,7 @@ trap '' PIPE
 RAIZ=$(cd "$(dirname "$0")/../.." && pwd)
 SESSIOND="$RAIZ/build/lia-sessiond"
 FAKE_OLLAMA="$RAIZ/testes/integration/ollama_fake.py"
+FAKE_LLAMACPP="$RAIZ/testes/integration/llama_cpp_fake.py"
 
 if [ ! -x "$SESSIOND" ]; then
     echo "lia-sessiond não encontrado em $SESSIOND — rode 'make sessiond' primeiro"
@@ -99,6 +100,23 @@ iniciar_fake_ollama() {
 }
 
 parar_fake_ollama() {
+    [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null
+    wait "$FAKE_PID" 2>/dev/null
+    FAKE_PID=""
+}
+
+# iniciar_fake_llama_cpp <modo> -> define FAKE_PORT (espelha iniciar_fake_ollama)
+iniciar_fake_llama_cpp() {
+    modo=$1
+    rm -f "$HOME_T/fake_llama_cpp.port"
+    env LLAMACPP_FAKE_MODO="$modo" python3 "$FAKE_LLAMACPP" 0 > "$HOME_T/fake_llama_cpp.port" 2>"$HOME_T/fake_llama_cpp.log" &
+    FAKE_PID=$!
+    i=0
+    while [ ! -s "$HOME_T/fake_llama_cpp.port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+    FAKE_PORT=$(head -1 "$HOME_T/fake_llama_cpp.port" | tr -dc '0-9')
+}
+
+parar_fake_llama_cpp() {
     [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null
     wait "$FAKE_PID" 2>/dev/null
     FAKE_PID=""
@@ -403,6 +421,150 @@ aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "cabe�
 fechar_a
 parar_daemon
 parar_fake_ollama
+
+# ========================================================================
+# PARTE E — backend real do modelo (llama.cpp / llama-server) contra o
+# servidor falso. Espelha a PARTE D, adaptada ao framing SSE.
+# ========================================================================
+
+echo "== E1. llama-server indisponível (nenhum servidor no ar): erro bem formado, sem travar o daemon =="
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA=1
+grep -q "modelo = llama_cpp" "$HOME_T/sessiond.log" && ok "LIA_SESSIOND_MODELO=llama_cpp ativa o backend real" || ko "backend llama_cpp não foi ativado"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e1","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"modelo_indisponivel"' "50" && ok "llama-server indisponível -> erro 'modelo_indisponivel'" \
+    || ko "E1: erro esperado não apareceu"
+fechar_a
+parar_daemon
+
+echo "== E2. streaming SSE normal via llama-server real (servidor falso) =="
+iniciar_fake_llama_cpp normal
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e2","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' "50" && ok "streaming SSE normal -> 'proposta' recebida" || ko "E2: sem proposta"
+grep -q "ola mundo" "$HOME_T/a.out" && ok "texto completo decodificado corretamente (SSE+chunked)" || ko "E2: texto incompleto/incorreto"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E3. resposta com proposta de ferramenta embutida no texto (servidor falso, modo 'ferramenta') =="
+iniciar_fake_llama_cpp ferramenta
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e3","em_resposta_a":null,"ts":"t","dados":{"mensagem":"pode me ajudar?"}}'
+aguardar "$HOME_T/a.out" '"ferramenta":"sistema.diagnosticar"' "50" && ok "bloco JSON de proposta extraído do texto corretamente" \
+    || ko "E3: proposta não extraída"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E4. streaming truncado (EOF antes de stop:true) -> erro, sem travar =="
+iniciar_fake_llama_cpp truncado
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e4","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "streaming truncado -> 'modelo_resposta_invalida'" \
+    || ko "E4: erro esperado não apareceu"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E5. JSON quebrado dentro de um evento SSE -> erro, sem travar =="
+iniciar_fake_llama_cpp json_quebrado
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e5","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "JSON quebrado -> 'modelo_resposta_invalida'" \
+    || ko "E5: erro esperado não apareceu"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E6. HTTP 500 do llama-server -> erro, sem travar =="
+iniciar_fake_llama_cpp http_erro
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e6","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"tipo":"erro"' "50" && ok "HTTP 500 -> mensagem de erro (sem travar o daemon)" || ko "E6: sem erro"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E7. timeout de inatividade (servidor lento + timeout curto) =="
+iniciar_fake_llama_cpp lento
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT" LIA_LLAMACPP_TIMEOUT_MS=500
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e7","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"limite_excedido"' "50" && ok "timeout de inatividade do cliente llama.cpp -> 'limite_excedido'" \
+    || ko "E7: timeout esperado não ocorreu"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E8. endpoint fora de 127.0.0.1/localhost é sempre rejeitado =="
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_HOST=evil.example.com LIA_LLAMACPP_PORTA=80
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e8","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"tipo":"erro"' "50" && ok "host não-loopback -> erro (nunca tenta I/O de rede remota)" \
+    || ko "E8: sem erro para host não-loopback"
+fechar_a
+parar_daemon
+
+echo "== E9. chunk sem CRLF correto depois dos dados -> erro, sem travar =="
+iniciar_fake_llama_cpp chunk_sem_crlf
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e9","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "chunk sem CRLF -> 'modelo_resposta_invalida'" \
+    || ko "E9: erro esperado não apareceu"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E10. extensão de chunk (';ext=') não suportada é rejeitada, não ignorada =="
+iniciar_fake_llama_cpp chunk_extensao
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e10","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "extensão de chunk -> 'modelo_resposta_invalida'" \
+    || ko "E10: erro esperado não apareceu"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E11. cabeçalho acima do limite (8 KiB) é rejeitado, nunca esperado indefinidamente =="
+iniciar_fake_llama_cpp cabecalho_gigante
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e11","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "cabeçalho gigante -> 'modelo_resposta_invalida'" \
+    || ko "E11: erro esperado não apareceu"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E12. evento SSE com 'error' embutido (HTTP 200) -> erro, sem travar =="
+iniciar_fake_llama_cpp erro_embutido
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e12","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"tipo":"erro"' "50" && ok "evento com 'error' embutido -> mensagem de erro (sem travar o daemon)" \
+    || ko "E12: sem erro"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
+
+echo "== E13. linha sem prefixo 'data:'/':' reconhecido dentro de um evento -> rejeitada, nunca ignorada =="
+iniciar_fake_llama_cpp prefixo_invalido
+iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e13","em_resposta_a":null,"ts":"t","dados":{"mensagem":"ola"}}'
+aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "prefixo SSE não reconhecido -> 'modelo_resposta_invalida'" \
+    || ko "E13: erro esperado não apareceu"
+fechar_a
+parar_daemon
+parar_fake_llama_cpp
 
 echo
 echo "$total testes, $falhas falhas"

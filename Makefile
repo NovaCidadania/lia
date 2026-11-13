@@ -171,6 +171,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-pic-sistema.o $(B)/sessiond-pic-ferramentas.o \
                   $(B)/sessiond-modelo-comum.o $(B)/sessiond-modelo-mock.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
+                  $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
                   $(B)/sessiond-prompt.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
@@ -207,6 +208,12 @@ $(B)/sessiond-modelo-ollama.o: sessiond/modelo_ollama.c sessiond/modelo.h ollama
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-cliente-ollama.o: ollama/cliente_ollama.c ollama/cliente_ollama.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-modelo-llama-cpp.o: sessiond/modelo_llama_cpp.c sessiond/modelo.h ollama/cliente_llama_cpp.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-cliente-llama-cpp.o: ollama/cliente_llama_cpp.c ollama/cliente_llama_cpp.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-prompt.o: sessiond/prompt.c sessiond/prompt.h | $(B)
@@ -247,6 +254,15 @@ $(B)/teste-cliente-ollama: $(B)/teste-cliente-ollama.o $(B)/sessiond-cliente-oll
 teste-ollama: $(B)/teste-cliente-ollama
 	sh testes/integration/teste_cliente_ollama.sh
 
+$(B)/teste-cliente-llama-cpp.o: testes/integration/teste_cliente_llama_cpp.c sessiond/modelo.h ollama/cliente_llama_cpp.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-cliente-llama-cpp: $(B)/teste-cliente-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-modelo-comum.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+teste-llama-cpp: $(B)/teste-cliente-llama-cpp
+	sh testes/integration/teste_cliente_llama_cpp.sh
+
 # ---------------------------------------------------------------------------
 # lia-chat (chat/): primeiro cliente de chat interativo de terminal para o
 # protocolo (docs/protocolo.md §9). Camada fina sobre gui/protocolo.c — não
@@ -267,7 +283,8 @@ $(B)/chat-lia-chat.o: chat/lia-chat.c gui/protocolo.h sessiond/modelo.h sessiond
 	$(CC) $(SESSIOND_CFLAGS) $(CHAT_CFLAGS) -c $< -o $@
 
 $(B)/lia-chat: $(B)/chat-lia-chat.o $(B)/sessiond-protocolo.o $(B)/sessiond-modelo-mock.o \
-               $(B)/sessiond-modelo-ollama.o $(B)/sessiond-modelo-comum.o $(B)/sessiond-cliente-ollama.o
+               $(B)/sessiond-modelo-ollama.o $(B)/sessiond-modelo-comum.o $(B)/sessiond-cliente-ollama.o \
+               $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o
 	$(CC) $^ $(SESSIOND_LIBS) $(CHAT_LIBS) -o $@
 
 chat: $(B)/lia-chat
@@ -278,4 +295,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama chat teste-chat chat-run
+.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp chat teste-chat chat-run
