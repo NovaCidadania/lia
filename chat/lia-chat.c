@@ -19,11 +19,23 @@
  * própria (padrão é sempre rejeitar — ver tratar_decisao_plano). Nunca
  * altera um plano recebido: envia de volta exatamente o plano_id que
  * recebeu, sem reconstruir nada.
+ *
+ * Edição de linha no terminal (setas, histórico, Ctrl-A/E/K/W, etc.) via
+ * libedit (BSD, API compatível com GNU readline) — nunca GNU readline em
+ * si: a licença do próprio projeto Lia ainda está em aberto (PLANO.md
+ * §8), e readline é GPL (contaminaria a licença do binário inteiro se
+ * distribuído); libedit é BSD, sem essa amarra. Histórico só em memória
+ * desta sessão — nunca gravado em disco por padrão (uma linha de chat
+ * pode conter o que quer que a pessoa tenha digitado; persistir isso
+ * sem política own seria o mesmo erro que o projeto já evita para
+ * ~/.lia/humano/memoria — origem/confiança/versão explícitos antes de
+ * guardar qualquer coisa).
  */
 #define _DEFAULT_SOURCE
 #include "../gui/protocolo.h"
 #include "../sessiond/modelo.h"
 #include "../sessiond/prompt.h"
+#include <editline/readline.h>
 #include <gio/gio.h>
 #include <gio/gunixinputstream.h>
 #include <gio/gunixsocketaddress.h>
@@ -35,6 +47,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 
 /* ------------------------------------------------------------- tipos --- */
@@ -75,7 +88,9 @@ typedef struct {
     GSocketConnection *conexao;
     GOutputStream *saida;
     GDataInputStream *entrada_socket;
-    GDataInputStream *entrada_stdin;
+    GDataInputStream *entrada_stdin; /* só usado quando !interativo (ver main()) */
+    gboolean readline_ativo; /* true depois de rl_callback_handler_install (edição de linha real) */
+    GString *buffer_saida;  /* ver flush_saida(): nunca chama o salva/redesenha do libedit mais de uma vez por "turno" */
     GMainLoop *loop;
 
     char *socket_caminho;
@@ -114,22 +129,68 @@ typedef struct {
 
 /* --------------------------------------------------------- utilidades --- */
 
-static void imprimir_prompt(LiaChat *c)
+/* Escreve 'texto' (sem \n final) por cima da linha de edição ativa do
+ * libedit, sem perder o que a pessoa já tinha digitado — o padrão
+ * documentado para saída assíncrona durante uma leitura em modo
+ * callback (mesma receita do manual do GNU Readline, que libedit
+ * também segue): esconde a linha atual, imprime, redesenha a linha e o
+ * prompt exatamente como estavam. Só chamada quando readline_ativo. */
+static void imprimir_sobre_readline(const char *texto)
 {
-    if (c->interativo && !c->modo_json) {
-        fputs("lia> ", stdout);
-        fflush(stdout);
-    }
+    /* NUNCA rl_save_prompt()/rl_restore_prompt()/rl_replace_line(): nesta
+     * libedit, a partir da SEGUNDA chamada na mesma sessão (mesmo sem
+     * nenhuma edição real em andamento) elas corrompem o estado interno
+     * — setas param de recuperar histórico simples e caem em busca
+     * incremental ("bck:"), confirmado isolando o problema num programa
+     * mínimo até sobrar só essas três chamadas como causa. O que a
+     * pessoa já digitou continua intacto o tempo todo no próprio
+     * rl_line_buffer/rl_point — não precisa (e não deve) ser salvo e
+     * restaurado à mão: só ir para uma linha nova, imprimir, e pedir
+     * pro libedit redesenhar o que ele já sabe. */
+    rl_crlf();
+    fputs(texto, stdout);
+    fputc('\n', stdout);
+    rl_on_new_line();
+    rl_forced_update_display();
 }
 
+/* saida_linha só ACUMULA — nunca chama imprimir_sobre_readline()
+ * diretamente. Chamar o salva-prompt/redesenha do libedit várias vezes
+ * em sequência rápida (uma por linha de uma resposta de várias linhas,
+ * como /status) corrompe o estado interno dele e quebra o
+ * reconhecimento de sequência de escape nas teclas seguintes (setas
+ * param de recuperar o histórico simples e entram em busca incremental,
+ * com um prompt "bck:" — comportamento confirmado isolando o problema
+ * num programa mínimo). flush_saida(), chamada uma vez por "turno"
+ * (depois de uma linha completa processada, ou de uma mensagem do
+ * daemon), é o único lugar que de fato escreve na tela. */
 static void saida_linha(LiaChat *c, const char *fmt, ...)
 {
     if (c->modo_json) return; /* --json: só NDJSON cru vai para stdout */
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    char *texto = NULL;
+    int n = vasprintf(&texto, fmt, ap);
     va_end(ap);
-    fputc('\n', stdout);
+    if (n < 0) return;
+    g_string_append(c->buffer_saida, texto);
+    g_string_append_c(c->buffer_saida, '\n');
+    free(texto);
+}
+
+static void flush_saida(LiaChat *c)
+{
+    if (c->buffer_saida->len == 0) return;
+    if (c->buffer_saida->str[c->buffer_saida->len - 1] == '\n')
+        g_string_truncate(c->buffer_saida, c->buffer_saida->len - 1);
+    if (c->readline_ativo) {
+        imprimir_sobre_readline(c->buffer_saida->str);
+    } else {
+        fputs(c->buffer_saida->str, stdout);
+        fputc('\n', stdout);
+        fflush(stdout);
+    }
+    g_string_truncate(c->buffer_saida, 0);
 }
 
 static const char *campo_str(JsonObject *obj, const char *chave)
@@ -791,7 +852,11 @@ static void processar_comando(LiaChat *c, const char *linha_bruta)
     } else if (!strcmp(cmd, "/cancelar")) {
         tratar_cancelar(c);
     } else if (!strcmp(cmd, "/limpar")) {
-        if (c->interativo && !c->modo_json) { fputs("\033[H\033[2J", stdout); fflush(stdout); }
+        if (c->interativo && !c->modo_json) {
+            fputs("\033[H\033[2J", stdout);
+            fflush(stdout);
+            if (c->readline_ativo) rl_forced_update_display(); /* redesenha o prompt no topo da tela limpa */
+        }
     } else if (!strcmp(cmd, "/sair") || !strcmp(cmd, "/exit") || !strcmp(cmd, "/quit")) {
         finalizar(c);
     } else {
@@ -829,30 +894,81 @@ static void processar_linha_json(LiaChat *c, const char *linha)
 
 /* --------------------------------------------------------- callbacks --- */
 
-static void agendar_leitura_stdin(LiaChat *c);
 static void agendar_leitura_socket(LiaChat *c);
 
-static void ao_ler_stdin(GObject *origem, GAsyncResult *res, gpointer dados)
+/* libedit (como o GNU Readline, cuja API ele imita) não tem um parâmetro
+ * de dados do usuário no manipulador de linha completa — só esta
+ * instância de LiaChat existe por processo, então um ponteiro global é
+ * seguro e é exatamente o padrão recomendado pela própria lib para este
+ * caso. */
+static LiaChat *g_chat_atual;
+
+static void ao_linha_completa(char *linha)
+{
+    LiaChat *c = g_chat_atual;
+    if (!linha) {
+        /* EOF (Ctrl-D): libedit já deixou o terminal em ordem. */
+        finalizar(c);
+        return;
+    }
+    if (*linha) add_history(linha); /* só em memória desta sessão — nunca gravado em disco */
+
+    if (c->modo_json) processar_linha_json(c, linha);
+    else processar_comando(c, linha);
+    free(linha); /* libedit aloca com malloc, não g_malloc */
+    flush_saida(c);
+}
+
+static gboolean ao_stdin_pronto(gint fd, GIOCondition condicao, gpointer dados)
+{
+    (void)condicao; (void)dados;
+    /* rl_callback_read_char() só consome UM byte por chamada. Uma seta
+     * chega como 3 bytes (ESC [ A) praticamente juntos no buffer do
+     * kernel — se cada byte só for consumido numa volta FUTURA do laço
+     * principal do GLib (em vez de todos agora, enquanto ainda há dados
+     * disponíveis), o atraso real entre eles passa do timeout interno de
+     * reconhecimento de sequência de escape do libedit, que então trata
+     * cada byte como tecla solta em vez de "seta pra cima" — sintoma
+     * visto na prática: em vez de recuperar o histórico, entrava em modo
+     * de busca incremental (prompt "bck:"). Drena tudo que já chegou,
+     * nesta mesma invocação, antes de voltar ao laço principal. */
+    for (;;) {
+        int disponivel = 0;
+        if (ioctl(fd, FIONREAD, &disponivel) != 0 || disponivel <= 0)
+            break;
+        rl_callback_read_char();
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+/* Modo não interativo (stdin redirecionado/pipe — scripts, testes de
+ * integração): libedit continua "editando" e ecoando caractere a
+ * caractere mesmo sem um terminal de verdade do outro lado, o que só
+ * produz lixo visual numa saída que ninguém vai ler com os olhos. Sem
+ * tty, não há edição nenhuma para ganhar — volta ao leitor de linha
+ * simples de sempre, sem eco próprio, sem controle de cursor. */
+static void agendar_leitura_stdin_pipe(LiaChat *c);
+
+static void ao_ler_stdin_pipe(GObject *origem, GAsyncResult *res, gpointer dados)
 {
     LiaChat *c = dados;
     GError *erro = NULL;
     gsize tam = 0;
     char *linha = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(origem), res, &tam, &erro);
     if (erro) { fprintf(stderr, "lia-chat: erro lendo stdin: %s\n", erro->message); g_error_free(erro); finalizar(c); return; }
-    if (!linha) { /* EOF */ finalizar(c); return; }
+    if (!linha) { finalizar(c); return; } /* EOF */
 
     if (c->modo_json) processar_linha_json(c, linha);
     else processar_comando(c, linha);
     g_free(linha);
+    flush_saida(c);
 
-    if (c->deve_sair) return;
-    imprimir_prompt(c);
-    agendar_leitura_stdin(c);
+    if (!c->deve_sair) agendar_leitura_stdin_pipe(c);
 }
 
-static void agendar_leitura_stdin(LiaChat *c)
+static void agendar_leitura_stdin_pipe(LiaChat *c)
 {
-    g_data_input_stream_read_line_async(c->entrada_stdin, G_PRIORITY_DEFAULT, NULL, ao_ler_stdin, c);
+    g_data_input_stream_read_line_async(c->entrada_stdin, G_PRIORITY_DEFAULT, NULL, ao_ler_stdin_pipe, c);
 }
 
 static void ao_ler_socket(GObject *origem, GAsyncResult *res, gpointer dados)
@@ -887,7 +1003,7 @@ static void ao_ler_socket(GObject *origem, GAsyncResult *res, gpointer dados)
             processar_msg_recebida(c, &m);
             lia_msg_liberar(&m);
         }
-        imprimir_prompt(c);
+        flush_saida(c);
     }
     g_free(linha);
     agendar_leitura_socket(c);
@@ -898,25 +1014,37 @@ static void agendar_leitura_socket(LiaChat *c)
     g_data_input_stream_read_line_async(c->entrada_socket, G_PRIORITY_DEFAULT, NULL, ao_ler_socket, c);
 }
 
+/* Mensagem de aviso do próprio Ctrl-C: sempre mostrada (mesmo em --json,
+ * onde saida_linha() é um no-op de propósito), por isso não reusa
+ * saida_linha — mas segue a mesma regra de nunca estragar a linha de
+ * edição ativa quando há uma. */
+static void anunciar_sigint(LiaChat *c, const char *texto)
+{
+    /* só acumula — flush_saida() é chamada uma vez só, ao final de
+     * ao_sigint, pelo mesmo motivo de saida_linha() (ver comentário lá). */
+    g_string_append(c->buffer_saida, texto);
+    g_string_append_c(c->buffer_saida, '\n');
+}
+
 static gboolean ao_sigint(gpointer dados)
 {
     LiaChat *c = dados;
     gint64 agora = g_get_monotonic_time();
     if (c->ultimo_sigint_us && (agora - c->ultimo_sigint_us) < 2 * G_USEC_PER_SEC) {
-        fprintf(stderr, "\nlia-chat: Ctrl-C duas vezes — encerrando\n");
+        anunciar_sigint(c, "lia-chat: Ctrl-C duas vezes — encerrando");
         c->codigo_saida = 130;
         finalizar(c);
+        flush_saida(c);
         return G_SOURCE_CONTINUE;
     }
     c->ultimo_sigint_us = agora;
     if ((c->plano_id_pendente && c->aguardando_decisao_plano) || c->execucao_id_pendente ||
         (c->pergunta_em_andamento && !c->pergunta_abandonada_localmente)) {
-        fprintf(stderr, "\n");
         tratar_cancelar(c);
     } else {
-        fprintf(stderr, "\nlia-chat: nada para cancelar; Ctrl-C de novo em até 2s para encerrar, ou /sair\n");
+        anunciar_sigint(c, "lia-chat: nada para cancelar; Ctrl-C de novo em até 2s para encerrar, ou /sair");
     }
-    imprimir_prompt(c);
+    flush_saida(c);
     return G_SOURCE_CONTINUE;
 }
 
@@ -948,6 +1076,7 @@ int main(int argc, char **argv)
     LiaChat c = { 0 };
     c.backend_assumido = g_strdup("mock");
     c.arquivos = g_ptr_array_new_with_free_func((GDestroyNotify)arquivo_anexo_liberar);
+    c.buffer_saida = g_string_new(NULL);
     c.codigo_saida = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -1012,30 +1141,59 @@ int main(int argc, char **argv)
     GInputStream *fluxo_socket = g_io_stream_get_input_stream(G_IO_STREAM(c.conexao));
     c.entrada_socket = g_data_input_stream_new(fluxo_socket);
 
-    GInputStream *fluxo_stdin = g_unix_input_stream_new(STDIN_FILENO, FALSE);
-    c.entrada_stdin = g_data_input_stream_new(fluxo_stdin);
-    g_object_unref(fluxo_stdin);
-
     c.loop = g_main_loop_new(NULL, FALSE);
     g_unix_signal_add(SIGINT, ao_sigint, &c); /* antes de qualquer saída: nunca há janela sem handler */
 
     if (!c.modo_json) {
         saida_linha(&c, "lia-chat: conectado a %s", c.socket_caminho);
         saida_linha(&c, "digite /help para ver os comandos");
+        flush_saida(&c); /* readline ainda não foi instalado aqui — sempre o caminho plain print */
+    }
+
+    if (c.interativo) {
+        /* Edição de linha real (setas, histórico, Ctrl-A/E/K/W, copiar/
+         * colar) via libedit em modo "callback": ela cuida do terminal
+         * (raw mode, eco, redesenho) e só devolve o controle quando uma
+         * linha completa chega ou dá EOF (Ctrl-D) — ao_linha_completa.
+         * rl_catch_signals=0 porque o SIGINT já tem o dono certo
+         * (g_unix_signal_add acima, instalado antes de qualquer saída);
+         * sem isto o libedit instalaria o próprio handler de Ctrl-C e
+         * brigaria com o nosso. */
+        rl_catch_signals = 0;
+        rl_catch_sigwinch = 1; /* redesenha certo quando o terminal é redimensionado */
+        /* libedit, sem isto, usa modo vi por padrão (ESC entra em modo de
+         * comando — "h"/"j"/"k"/"l" etc. deixam de inserir texto e viram
+         * comandos de movimento, o que pareceria "quebrado" para qualquer
+         * pessoa esperando um terminal normal). Modo emacs: digitar sempre
+         * insere, setas movem o cursor/histórico, sem modos. */
+        rl_variable_bind("editing-mode", "emacs");
+        g_chat_atual = &c;
+        rl_callback_handler_install(c.modo_json ? "" : "lia> ", ao_linha_completa);
+        c.readline_ativo = TRUE;
+        g_unix_fd_add(STDIN_FILENO, G_IO_IN, ao_stdin_pronto, &c);
+    } else {
+        /* stdin não é um terminal (pipe/arquivo/script, ou make
+         * teste-chat): libedit só ecoaria lixo sem um tty de verdade do
+         * outro lado — leitor de linha simples, sem edição nenhuma
+         * (não há humano ali para precisar dela). */
+        GInputStream *fluxo_stdin = g_unix_input_stream_new(STDIN_FILENO, FALSE);
+        c.entrada_stdin = g_data_input_stream_new(fluxo_stdin);
+        g_object_unref(fluxo_stdin);
+        agendar_leitura_stdin_pipe(&c);
     }
 
     agendar_leitura_socket(&c);
-    imprimir_prompt(&c);
-    agendar_leitura_stdin(&c);
 
     g_main_loop_run(c.loop);
 
+    if (c.readline_ativo) rl_callback_handler_remove();
+    if (c.entrada_stdin) g_object_unref(c.entrada_stdin);
     if (c.conexao) { g_io_stream_close(G_IO_STREAM(c.conexao), NULL, NULL); g_object_unref(c.conexao); }
     g_object_unref(c.entrada_socket);
-    g_object_unref(c.entrada_stdin);
     g_main_loop_unref(c.loop);
     lia_sessao_liberar(&c.sessao);
     g_ptr_array_free(c.arquivos, TRUE);
+    g_string_free(c.buffer_saida, TRUE);
     if (c.proposta_pendente) proposta_pendente_liberar(c.proposta_pendente);
     if (c.plano_dados_pendente) json_object_unref(c.plano_dados_pendente);
     g_free(c.plano_id_pendente);

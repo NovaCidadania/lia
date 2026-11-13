@@ -255,13 +255,20 @@ teste-ollama: $(B)/teste-cliente-ollama
 # compilados para "make sessiond" (mesmo probe de disponibilidade que o
 # daemon usaria, nunca a aprovação/execução em si). PODE enviar 'aprovar'
 # (desliga modo_leitura explicitamente) — é o próprio ponto desta CLI,
-# diferente de lia-gui.
+# diferente de lia-gui. Edição de linha real (setas, histórico, Ctrl-A/E/
+# K/W, copiar/colar) via libedit — BSD, não GNU readline (GPL): a licença
+# do projeto Lia ainda está em aberto (PLANO.md §8), e libedit evita
+# prender o binário inteiro a GPL caso ele venha a ser distribuído.
+CHAT_PKGS   := libedit
+CHAT_CFLAGS := $(shell pkg-config --cflags $(CHAT_PKGS))
+CHAT_LIBS   := $(shell pkg-config --libs $(CHAT_PKGS))
+
 $(B)/chat-lia-chat.o: chat/lia-chat.c gui/protocolo.h sessiond/modelo.h sessiond/prompt.h | $(B)
-	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+	$(CC) $(SESSIOND_CFLAGS) $(CHAT_CFLAGS) -c $< -o $@
 
 $(B)/lia-chat: $(B)/chat-lia-chat.o $(B)/sessiond-protocolo.o $(B)/sessiond-modelo-mock.o \
                $(B)/sessiond-modelo-ollama.o $(B)/sessiond-modelo-comum.o $(B)/sessiond-cliente-ollama.o
-	$(CC) $^ $(SESSIOND_LIBS) -o $@
+	$(CC) $^ $(SESSIOND_LIBS) $(CHAT_LIBS) -o $@
 
 chat: $(B)/lia-chat
 
