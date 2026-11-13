@@ -123,6 +123,11 @@ lia> MOCK_PROPOR:sistema.diagnosticar
 lia> /plano
 ```
 
+Mais rápido e sempre isolado do `~/.lia` real: `sh chat/rodar_local.sh`
+(compila, inicia o daemon num `$HOME` de teste e abre `lia-chat`, tudo
+num terminal — ver [docs/LIA-CLI.md](docs/LIA-CLI.md) para detalhes e a
+variante com executor mock).
+
 Pode enviar `aprovar` (é o próprio ponto desta CLI, diferente da GUI) —
 mas o padrão para qualquer plano pendente é sempre **rejeitar**: só uma
 resposta afirmativa explícita (`s`/`sim`/`/aprovar`) aprova. Nunca

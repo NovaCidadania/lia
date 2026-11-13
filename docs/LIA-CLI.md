@@ -352,6 +352,16 @@ lia> MOCK_PROPOR:sistema.diagnosticar
 lia> /plano
 ```
 
+**Mais rápido, sempre isolado do `~/.lia` real:** `sh chat/rodar_local.sh`
+compila, inicia o daemon num `$HOME` de teste (`/tmp/lia-chat-teste` por
+padrão, reaproveitado entre execuções) e abre `lia-chat`, tudo num só
+terminal — `/sair` já encerra o daemon. Executor real por padrão (as
+seis ferramentas de leitura de verdade, ex.: `MOCK_PROPOR:sistema.diagnosticar`
+acima lê dados reais da máquina); `sh chat/rodar_local.sh /tmp/lia-chat-teste mock`
+troca para o executor mock (`mock.leitura`/`mock.escrita`/`mock.admin`/
+`mock.timeout`, para testar aprovação/risco/cancelamento sem depender do
+sistema real).
+
 ### Testar com Ollama (quando instalado)
 
 ```sh
