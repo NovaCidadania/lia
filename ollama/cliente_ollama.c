@@ -471,6 +471,16 @@ static void ao_conectar(GObject *origem, GAsyncResult *res, gpointer dados)
     json_builder_add_string_value(b, prompt_guardado ? prompt_guardado : "");
     json_builder_set_member_name(b, "stream");
     json_builder_add_boolean_value(b, TRUE);
+    json_builder_set_member_name(b, "options");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "num_predict");
+    /* Limite de tokens gerados — sem isto, um modelo pequeno (ex.:
+     * llama3.2:3b) às vezes "pensa alto" em texto longo antes de chegar
+     * à proposta de ferramenta, multiplicando o tempo de resposta sem
+     * ganho nenhum (a pessoa só vê a resposta final mesmo). 400 tokens
+     * cobrem com folga um resumo em texto + um bloco JSON de proposta. */
+    json_builder_add_int_value(b, 400);
+    json_builder_end_object(b);
     json_builder_end_object(b);
     JsonNode *raiz = json_builder_get_root(b);
     JsonGenerator *gen = json_generator_new();

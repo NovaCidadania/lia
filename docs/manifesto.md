@@ -145,7 +145,7 @@ Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica u
     { "nome": "intervalo_ms", "tipo": "inteiro", "obrigatorio": false, "padrao": 200, "limites": { "min": 100, "max": 5000 } },
     { "nome": "ordenar_por", "tipo": "enum", "obrigatorio": false, "padrao": "cpu", "limites": { "valores": ["cpu"] } }
   ],
-  "capacidades": ["leitura_arquivo"],
+  "capacidades": ["leitura_arquivo", "processo"],
   "risco": "nenhum",
   "efeitos": [
     "lê /proc/<pid>/stat de cada processo (duas amostras, com uma pausa curta entre elas, nunca cmdline/environ)",
@@ -161,7 +161,13 @@ Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica u
 
 `sistema.processos_top_cpu` responde perguntas como "liste os 10 processos que mais estão usando CPU": amostra `/proc/<pid>/stat` duas vezes, com `intervalo_ms` de pausa entre as amostras, e calcula o percentual de CPU de cada processo no intervalo, normalizado pelo número de núcleos (um processo usando 100% de todos os núcleos aparece como 100%, nunca `100% × núcleos`). `idempotente: false` porque, ao contrário dos outros seis manifestos desta seção, o resultado depende do instante da amostragem — repetir a chamada não reproduz os mesmos números, mesmo sem nenhum efeito colateral.
 
-Nome e estado de processo já podem revelar informação sensível sobre o que a pessoa está rodando (ver `docs/THREAT-MODEL.md` §5.1) — por isso esta ferramenta nunca lê `/proc/<pid>/cmdline` nem `/proc/<pid>/environ` (argumentos completos, variáveis de ambiente, tokens e caminhos que poderiam vir embutidos neles) nesta primeira versão, mesmo sendo `risco: nenhum`.
+Nome e estado de processo já podem revelar informação sensível sobre o que a pessoa está rodando (ver `docs/THREAT-MODEL.md` §5.1) — por isso esta ferramenta nunca lê `/proc/<pid>/cmdline` nem `/proc/<pid>/environ` (argumentos completos, variáveis de ambiente, tokens e caminhos que poderiam vir embutidos neles) nesta primeira versão, mesmo sendo `risco: nenhum`. `capacidades` inclui `"processo"` (além de `"leitura_arquivo"`, já que a fonte é `/proc`) para o manifesto declarar com precisão o que de fato é lido — a mesma capacidade que `tools.discover`/`tools.probe` já usam para o catálogo de processos/binários.
+
+**Limitação conhecida:** não existe, nesta etapa, nenhuma ferramenta que ordene processos por uso de **memória** (`ordenar_por` só aceita `"cpu"`). Um pedido sobre "processos que mais usam memória" não tem ferramenta correspondente — a resposta certa é dizer isso em texto, nunca reaproveitar `sistema.processos_top_cpu` e apresentar números de CPU como se fossem de memória.
+
+### Validação independente da ferramenta proposta pelo modelo
+
+`sessiond/sessiond.c` (`classificar_ferramenta_esperada`) aplica uma segunda camada, puramente por palavra-chave e independente do que o modelo (LLM local, pequeno) respondeu: se o pedido da pessoa bate com um padrão de alta confiança para uma ferramenta diferente da que o modelo propôs (ex.: pedido claramente sobre "processos que mais consomem CPU" mas o modelo propôs `sistema.dispositivos`), a proposta enviada ao cliente é corrigida antes de sair do daemon — a `justificativa` da proposta corrigida deixa explícito que houve essa correção e qual era a proposta original do modelo. Isto nunca inventa uma ferramenta fora do manifesto nem altera o texto livre da resposta do modelo — só o campo estruturado `ferramenta_proposta`, que é o único que pode de fato ser executado.
 
 Estes sete manifestos (`tools.discover`, `tools.probe`, `tools.list` acima, mais estes quatro `sistema.*`) são exatamente os implementados em `sessiond/manifesto_real.c` e expostos pelo executor real do daemon de sessão (`docs/protocolo.md` §8) — a mesma tabela, sem duplicação de lógica.
 

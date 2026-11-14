@@ -49,6 +49,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <locale.h>
 
 /* ------------------------------------------------------------- tipos --- */
 
@@ -127,9 +128,17 @@ typedef struct {
 
     int codigo_saida;
     gboolean deve_sair;
+
+    /* true só entre "ao_linha_completa acabou de aceitar uma linha" e o
+     * flush_saida() correspondente — ver o comentário grande em
+     * ao_linha_completa sobre por que isto precisa reinstalar o
+     * manipulador de callback em vez de só redesenhar. */
+    gboolean reinstalar_prompt_apos_flush;
 } LiaChat;
 
 /* --------------------------------------------------------- utilidades --- */
+
+static void ao_linha_completa(char *linha); /* definida mais abaixo; imprimir_sobre_readline() precisa reinstalá-la */
 
 /* Escreve 'texto' (sem \n final) por cima da linha de edição ativa do
  * libedit, sem perder o que a pessoa já tinha digitado — o padrão
@@ -137,23 +146,48 @@ typedef struct {
  * callback (mesma receita do manual do GNU Readline, que libedit
  * também segue): esconde a linha atual, imprime, redesenha a linha e o
  * prompt exatamente como estavam. Só chamada quando readline_ativo. */
-static void imprimir_sobre_readline(const char *texto)
+static void imprimir_sobre_readline(LiaChat *c, const char *texto)
 {
-    /* NUNCA rl_save_prompt()/rl_restore_prompt()/rl_replace_line(): nesta
-     * libedit, a partir da SEGUNDA chamada na mesma sessão (mesmo sem
-     * nenhuma edição real em andamento) elas corrompem o estado interno
-     * — setas param de recuperar histórico simples e caem em busca
-     * incremental ("bck:"), confirmado isolando o problema num programa
-     * mínimo até sobrar só essas três chamadas como causa. O que a
-     * pessoa já digitou continua intacto o tempo todo no próprio
-     * rl_line_buffer/rl_point — não precisa (e não deve) ser salvo e
-     * restaurado à mão: só ir para uma linha nova, imprimir, e pedir
-     * pro libedit redesenhar o que ele já sabe. */
-    rl_crlf();
+    /* NUNCA rl_save_prompt()/rl_restore_prompt()/rl_replace_line() aqui:
+     * nesta libedit, a partir da SEGUNDA chamada na mesma sessão (mesmo
+     * sem nenhuma edição real em andamento) elas corrompem o estado
+     * interno — setas param de recuperar histórico simples e caem em
+     * busca incremental ("bck:"), confirmado isolando o problema num
+     * programa mínimo até sobrar só essas três chamadas como causa.
+     * Durante uma edição real em andamento (pessoa digitando a próxima
+     * linha quando isto é chamado), rl_line_buffer/rl_point refletem o
+     * que já foi digitado corretamente — redesenhar com
+     * rl_on_new_line()+rl_forced_update_display() preserva isso sem
+     * precisar salvar/restaurar nada à mão. A limpeza do estado logo
+     * depois de uma linha ACEITA (Enter) é responsabilidade de quem
+     * aceitou a linha (ver ao_linha_completa) — nunca daqui.
+     *
+     * rl_crlf() aqui (em vez de só "\r\n" literal) ficava sem efeito
+     * logo depois de reinstalar o manipulador de callback (buffer vazio
+     * — parece que esta libedit decide não quebrar linha quando rl_end
+     * é 0), deixando o texto colado bem depois do "lia> " recém-escrito
+     * pela reinstalação. "\r\n" direto sempre quebra a linha, sem
+     * depender dessa heurística interna. */
+    fputs("\r\n", stdout);
     fputs(texto, stdout);
     fputc('\n', stdout);
-    rl_on_new_line();
-    rl_forced_update_display();
+    if (c->reinstalar_prompt_apos_flush) {
+        /* Caminho usado só por ao_linha_completa, bem depois de aceitar
+         * uma linha: em vez de rl_on_new_line()+rl_forced_update_display()
+         * (que aqui redesenharia o prompt uma SEGUNDA vez, por cima do
+         * que a reinstalação abaixo já vai mostrar — uma linha "lia> "
+         * órfã sobrando no meio da saída), reinstala o manipulador de
+         * callback: única operação que de fato reseta o estado interno
+         * da linha nesta libedit (ver comentário grande em
+         * ao_linha_completa) e já imprime o prompt vazio certo, uma
+         * única vez. */
+        c->reinstalar_prompt_apos_flush = FALSE;
+        rl_callback_handler_remove();
+        rl_callback_handler_install(c->modo_json ? "" : "lia> ", ao_linha_completa);
+    } else {
+        rl_on_new_line();
+        rl_forced_update_display();
+    }
 }
 
 /* saida_linha só ACUMULA — nunca chama imprimir_sobre_readline()
@@ -186,7 +220,7 @@ static void flush_saida(LiaChat *c)
     if (c->buffer_saida->str[c->buffer_saida->len - 1] == '\n')
         g_string_truncate(c->buffer_saida, c->buffer_saida->len - 1);
     if (c->readline_ativo) {
-        imprimir_sobre_readline(c->buffer_saida->str);
+        imprimir_sobre_readline(c, c->buffer_saida->str);
     } else {
         fputs(c->buffer_saida->str, stdout);
         fputc('\n', stdout);
@@ -320,7 +354,16 @@ static gboolean ao_timer_progresso_pergunta(gpointer dados)
 {
     LiaChat *c = dados;
     gint64 decorrido_s = (g_get_monotonic_time() - c->pergunta_enviada_us) / 1000000;
-    saida_linha(c, "[local] ainda aguardando resposta do modelo... (%" G_GINT64_FORMAT "s)", decorrido_s);
+    /* saida_linha só acumula no buffer — sem este flush_saida explícito,
+     * nada disto aparece na tela em tempo real; fica só empilhado até a
+     * próxima mensagem do daemon chegar e esvaziar tudo de uma vez junto
+     * com a resposta final. Era exatamente esse bug que fazia o "[local]
+     * ainda aguardando..." nunca aparecer ao vivo — só tudo junto no
+     * final, dando a impressão de nenhum progresso real. Mensagem nunca
+     * expõe raciocínio do modelo — só o estado observável "consultando",
+     * igual ao que aparece para qualquer execução de ferramenta. */
+    saida_linha(c, "[local] consultando modelo... (%" G_GINT64_FORMAT "s)", decorrido_s);
+    flush_saida(c);
     return G_SOURCE_CONTINUE;
 }
 
@@ -952,10 +995,50 @@ static void ao_linha_completa(char *linha)
     }
     if (*linha) add_history(linha); /* só em memória desta sessão — nunca gravado em disco */
 
+    /* Nesta libedit, depois de aceitar a linha (Enter) e chamar este
+     * handler, rl_line_buffer/rl_point/rl_end NÃO refletem "linha vazia"
+     * — ficam travados mostrando a linha que acabou de ser digitada
+     * (confirmado instrumentando: nem escrever direto nos três campos,
+     * nem rl_replace_line("", 0), muda o que rl_forced_update_display()
+     * desenha depois — só uma tecla nova faz essa biblioteca de verdade
+     * reiniciar o estado interno da linha). Qualquer redesenho
+     * assíncrono nesse intervalo (ex.: flush_saida chamado daqui mesmo,
+     * ou por uma mensagem do daemon que chegue antes do usuário digitar
+     * a tecla seguinte) reimprimiria essa linha velha por cima do prompt
+     * — sintoma visto na prática: a pergunta já enviada reaparecia
+     * duplicada depois de "[local] pergunta enviada". A única forma que
+     * de fato reinicia o estado interno (confirmada testando) é
+     * remover e reinstalar o manipulador de callback — o mesmo par de
+     * chamadas do main() no início do programa. Isto não afeta
+     * add_history/histórico (lista separada, mantida pela própria lib) —
+     * só o estado de edição da linha atual.
+     *
+     * Reinstalar JÁ AQUI (antes do flush_saida abaixo) funciona para o
+     * estado interno, mas rl_callback_handler_install() imprime o prompt
+     * na hora — uma linha "lia> " vazia sobraria ANTES da saída de
+     * "[local] pergunta enviada...", só pra ganhar outra "lia> " de
+     * verdade no final. Em vez disso, só marca a intenção aqui;
+     * imprimir_sobre_readline() (chamada pelo flush_saida logo abaixo)
+     * reinstala depois de escrever o texto, no lugar de
+     * rl_on_new_line()+rl_forced_update_display() — um único "lia> ",
+     * sempre depois do conteúdo. */
+    c->reinstalar_prompt_apos_flush = c->readline_ativo;
+
     if (c->modo_json) processar_linha_json(c, linha);
     else processar_comando(c, linha);
     free(linha); /* libedit aloca com malloc, não g_malloc */
     flush_saida(c);
+    if (c->reinstalar_prompt_apos_flush) {
+        /* buffer_saida estava vazio (linha em branco, ou comando sem
+         * nenhuma saída) — flush_saida() voltou sem chamar
+         * imprimir_sobre_readline(), o único lugar que consome esta
+         * flag. Reinstala aqui mesmo, pelo mesmo motivo do comentário
+         * grande acima: é a única forma de sair do estado "linha
+         * antiga ainda tida como atual" antes da próxima tecla. */
+        c->reinstalar_prompt_apos_flush = FALSE;
+        rl_callback_handler_remove();
+        rl_callback_handler_install(c->modo_json ? "" : "lia> ", ao_linha_completa);
+    }
 }
 
 static gboolean ao_stdin_pronto(gint fd, GIOCondition condicao, gpointer dados)
@@ -1105,6 +1188,17 @@ static void imprimir_uso(const char *argv0)
 
 int main(int argc, char **argv)
 {
+    /* Sem isto, o processo nasce na locale "C" (padrão da libc,
+     * independente do que o ambiente/terminal realmente usa) — e nessa
+     * locale, libedit trata cada BYTE de um caractere UTF-8 multibyte
+     * (qualquer acentuação do português: á, ã, ç, é, õ...) como uma
+     * tecla solta em vez de reconhecer a sequência, descartando ou
+     * corrompendo o caractere digitado (confirmado: "ação" digitado
+     * chegava como "ao" — 'ç' e 'ã' simplesmente desapareciam). Isto
+     * segue a variável de ambiente (LANG/LC_*) do terminal real da
+     * pessoa; nunca força um valor fixo. */
+    setlocale(LC_ALL, "");
+
     /* stdout é totalmente bufferizado por padrão quando não é um TTY
      * (redirecionado a arquivo/pipe) — sem isto, nada apareceria até o
      * processo terminar, mesmo em modo interativo real com stdout
@@ -1113,11 +1207,19 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IOLBF, BUFSIZ);
 
     LiaChat c = { 0 };
-    c.backend_assumido = g_strdup("mock");
-    c.arquivos = g_ptr_array_new_with_free_func((GDestroyNotify)arquivo_anexo_liberar);
-    c.buffer_saida = g_string_new(NULL);
     c.codigo_saida = 0;
 
+    /* Nenhuma alocação de heap antes do laço de argv abaixo, de propósito:
+     * cada "uso inválido" dentro dele retorna direto (2, ou 0 para
+     * --help), sem passar pela liberação do final de main() — alocar
+     * antes (como este código fazia) vazava essas poucas alocações
+     * nesses caminhos (achado rodando com AddressSanitizer/
+     * LeakSanitizer: o próprio código de saída do processo vinha trocado
+     * de 2 para 1, já que o LeakSanitizer força isso ao detectar o
+     * vazamento). c.backend_assumido fica NULL durante o laço — a
+     * branch de --backend já trata isso bem (g_free(NULL) é sempre
+     * seguro); o padrão "mock" só é aplicado depois, se ninguém pediu
+     * outro. */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             imprimir_uso(argv[0]);
@@ -1162,6 +1264,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "lia-chat: não foi possível conectar a %s (%s) — o daemon está rodando? (build/lia-sessiond)\n",
                 c.socket_caminho, erro ? erro->message : "?");
         if (erro) g_error_free(erro);
+        g_free(c.socket_caminho);
+        g_free(c.backend_assumido);
+        g_free(c.modelo_assumido);
         return 1;
     }
     /* o timeout do GSocketClient (acima) vale só para a tentativa de
@@ -1171,6 +1276,11 @@ int main(int argc, char **argv)
      * falharia com G_IO_ERROR_TIMED_OUT depois de 5s. Uma conversa não
      * tem prazo — zera para "sem timeout" assim que a conexão existe. */
     g_socket_set_timeout(g_socket_connection_get_socket(c.conexao), 0);
+
+    if (!c.backend_assumido)
+        c.backend_assumido = g_strdup("mock");
+    c.arquivos = g_ptr_array_new_with_free_func((GDestroyNotify)arquivo_anexo_liberar);
+    c.buffer_saida = g_string_new(NULL);
 
     lia_sessao_iniciar(&c.sessao);
     c.sessao.modo_leitura = FALSE; /* lia-chat PODE enviar 'aprovar' — é o próprio ponto desta CLI */

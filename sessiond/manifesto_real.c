@@ -146,7 +146,7 @@ static const ManifestoReal TABELA[] = {
              * mas repetir não reproduz os mesmos números). */
             .nome = "sistema.processos_top_cpu", .risco = "nenhum", .requer_aprovacao = FALSE,
             .versao = "0.1.0", .idempotente = FALSE,
-            .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
+            .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "lê /proc/<pid>/stat de cada processo (duas amostras, com uma pausa curta entre elas); não lê cmdline/environ; não escreve nada",
             .timeout_padrao_ms = 8000,
         },

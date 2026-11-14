@@ -581,13 +581,16 @@ static void despachar_execucao(Cliente *c, const ExecutorManifesto *mf)
 typedef struct {
     Cliente *c;
     char *pergunta_id;
+    char *mensagem_original; /* pedido crua da pessoa, NULL quando não se aplica (ver disparar_resumo_modelo) —
+                               * só para classificar_ferramenta_esperada(); nunca reenviada a lugar nenhum. */
 } PerguntaCtx;
 
-static PerguntaCtx *pergunta_ctx_novo(Cliente *c, const char *pergunta_id)
+static PerguntaCtx *pergunta_ctx_novo(Cliente *c, const char *pergunta_id, const char *mensagem_original)
 {
     PerguntaCtx *pc = g_new(PerguntaCtx, 1);
     pc->c = cliente_ref(c);
     pc->pergunta_id = g_strdup(pergunta_id);
+    pc->mensagem_original = mensagem_original ? g_strdup(mensagem_original) : NULL;
     return pc;
 }
 
@@ -595,7 +598,78 @@ static void pergunta_ctx_liberar(PerguntaCtx *pc)
 {
     cliente_unref(pc->c);
     g_free(pc->pergunta_id);
+    g_free(pc->mensagem_original);
     g_free(pc);
+}
+
+/* ---- validação independente da proposta do modelo (docs/manifesto.md) ---
+ * O modelo (llama3.2:3b local, pequeno) já demonstrou na prática confundir
+ * sistema.dispositivos com sistema.processos_top_cpu para um pedido
+ * claramente sobre processos/CPU. Esta é uma segunda camada,
+ * DETERMINÍSTICA, independente do texto que o modelo gerou: só corrige a
+ * ferramenta proposta quando o pedido da pessoa bate com um padrão de
+ * ALTA confiança para uma ferramenta REAL diferente da proposta — nunca
+ * inventa uma ferramenta fora da lista, nunca decide nada por ambiguidade
+ * (sem palavra-chave clara, a proposta do modelo é respeitada como está).
+ * Não cobre "processos por memória" de propósito: não existe, nesta
+ * etapa, nenhuma ferramenta real que ordene por memória — forçar
+ * sistema.processos_top_cpu nesse caso devolveria dados de CPU
+ * apresentados como se fossem de memória, exatamente o tipo de invenção
+ * que esta validação existe para evitar (ver docs/manifesto.md, limitação
+ * registrada). */
+static gboolean contem_ci_sd(const char *texto, const char *alvo)
+{
+    if (!texto || !alvo) return FALSE;
+    char *t = g_utf8_strdown(texto, -1);
+    gboolean achou = strstr(t, alvo) != NULL;
+    g_free(t);
+    return achou;
+}
+
+static const char *classificar_ferramenta_esperada(const char *pedido)
+{
+    if (!pedido) return NULL;
+    static const char *const KW_PROCESSOS_CPU[] = {
+        "consomem cpu", "consome cpu", "uso de cpu", "usam cpu", "usa cpu",
+        "top cpu", "mais cpu", "cpu agora", NULL
+    };
+    static const char *const KW_DISPOSITIVOS[] = {
+        "rede", "interface", " pci", "bloco", "block", "disco", "dispositivo", "hardware", NULL
+    };
+    static const char *const KW_DIAGNOSTICAR[] = {
+        "modelo da cpu", "núcleos", "nucleos", "kernel", "distribuição", "distribuicao", NULL
+    };
+    static const char *const KW_RECURSOS[] = {
+        "swap", "memória ram", "memoria ram", "de ram", "uptime", "carga média", "carga media", "load average", NULL
+    };
+    for (int i = 0; KW_PROCESSOS_CPU[i]; i++) if (contem_ci_sd(pedido, KW_PROCESSOS_CPU[i])) return "sistema.processos_top_cpu";
+    for (int i = 0; KW_DISPOSITIVOS[i]; i++) if (contem_ci_sd(pedido, KW_DISPOSITIVOS[i])) return "sistema.dispositivos";
+    for (int i = 0; KW_DIAGNOSTICAR[i]; i++) if (contem_ci_sd(pedido, KW_DIAGNOSTICAR[i])) return "sistema.diagnosticar";
+    for (int i = 0; KW_RECURSOS[i]; i++) if (contem_ci_sd(pedido, KW_RECURSOS[i])) return "sistema.recursos";
+    return NULL;
+}
+
+/* Pedidos de alta confiança para os quais NENHUMA ferramenta real desta
+ * etapa é correta — ao contrário de classificar_ferramenta_esperada()
+ * (que corrige para a ferramenta certa), aqui a única correção segura é
+ * remover a proposta por completo. "processos por memória" é o caso
+ * conhecido: só existe ordenação por CPU (sistema.processos_top_cpu,
+ * ordenar_por aceita só "cpu" — ver docs/manifesto.md, limitação
+ * registrada); se o modelo propuser essa ferramenta mesmo assim, rodar
+ * e depois descrever os números de CPU como se fossem de memória seria
+ * exatamente a invenção de dado que esta validação existe para evitar. */
+static gboolean pedido_sem_ferramenta_disponivel(const char *pedido)
+{
+    if (!pedido) return FALSE;
+    static const char *const KW_SEM_FERRAMENTA_MEMORIA[] = {
+        "mais memória", "mais memoria", "usando memória", "usando memoria",
+        "usam memória", "usam memoria", "consomem memória", "consomem memoria",
+        "consome memória", "consome memoria", "uso de memória", "uso de memoria", NULL
+    };
+    for (int i = 0; KW_SEM_FERRAMENTA_MEMORIA[i]; i++)
+        if (contem_ci_sd(pedido, KW_SEM_FERRAMENTA_MEMORIA[i]))
+            return TRUE;
+    return FALSE;
 }
 
 /* Lista as ferramentas do backend ATIVO (real ou mock) para a seção
@@ -667,10 +741,50 @@ static void ao_concluido_pergunta(gpointer ctx, const ModeloResposta *r)
     gboolean ainda_valido = !c->fechado && c->pergunta_pendente_id &&
                              strcmp(pc->pergunta_id, c->pergunta_pendente_id) == 0;
     if (ainda_valido) {
-        if (r->sucesso)
-            enviar_proposta(c, NULL, pc->pergunta_id, r);
-        else
+        if (r->sucesso && r->ferramenta_proposta && pedido_sem_ferramenta_disponivel(pc->mensagem_original)) {
+            /* Veto, não correção: para este padrão de pedido não existe
+             * NENHUMA ferramenta certa (ver comentário em
+             * pedido_sem_ferramenta_disponivel) — deixar executar
+             * qualquer proposta aqui (mesmo a mais "parecida") e depois
+             * resumir o resultado como se respondesse à pergunta
+             * original seria inventar que a ferramenta devolveu um dado
+             * que ela não devolve. resposta_texto do modelo continua
+             * indo como está (pode já avisar corretamente que não há
+             * ferramenta); só a proposta estruturada é removida. */
+            ModeloResposta sem_proposta = *r;
+            sem_proposta.ferramenta_proposta = NULL;
+            sem_proposta.parametros_json = NULL;
+            sem_proposta.justificativa = NULL;
+            enviar_proposta(c, NULL, pc->pergunta_id, &sem_proposta);
+        } else if (r->sucesso) {
+            const char *esperado = classificar_ferramenta_esperada(pc->mensagem_original);
+            if (esperado && g_executor->buscar_manifesto(esperado) &&
+                (!r->ferramenta_proposta || strcmp(esperado, r->ferramenta_proposta) != 0)) {
+                /* validação independente corrigiu a ferramenta — nunca
+                 * muda resposta_texto (o que o modelo disse em texto
+                 * continua indo como está; só a proposta estruturada,
+                 * que é o que de fato pode ser executado, é corrigida). */
+                char *justificativa_corrigida = r->ferramenta_proposta
+                    ? g_strdup_printf(
+                        "corrigido por validação independente do pedido (sem depender do modelo): "
+                        "o pedido bate com um padrão de alta confiança para '%s'; o modelo tinha proposto '%s'",
+                        esperado, r->ferramenta_proposta)
+                    : g_strdup_printf(
+                        "corrigido por validação independente do pedido (sem depender do modelo): "
+                        "o pedido bate com um padrão de alta confiança para '%s'; o modelo não propôs nenhuma",
+                        esperado);
+                ModeloResposta corrigida = *r;
+                corrigida.ferramenta_proposta = (char *)esperado;
+                corrigida.parametros_json = (char *)"{}";
+                corrigida.justificativa = justificativa_corrigida;
+                enviar_proposta(c, NULL, pc->pergunta_id, &corrigida);
+                g_free(justificativa_corrigida);
+            } else {
+                enviar_proposta(c, NULL, pc->pergunta_id, r);
+            }
+        } else {
             enviar_erro(c, NULL, r->erro_codigo ? r->erro_codigo : "modelo_resposta_invalida", r->erro_mensagem);
+        }
         g_free(c->pergunta_pendente_id);
         c->pergunta_pendente_id = NULL;
     }
@@ -715,7 +829,7 @@ static void disparar_resumo_modelo(Cliente *c, const char *ferramenta,
     }
 
     char *pergunta_id_nova = lia_novo_id("perg");
-    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id_origem); /* referencia a pergunta ORIGINAL, para o cliente correlacionar */
+    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id_origem, NULL); /* referencia a pergunta ORIGINAL, para o cliente correlacionar; sem classificação aqui — isto é um resumo, não uma nova seleção de ferramenta */
     g_modelo->perguntar(g_modelo, pergunta_id_nova, prompt_final, ao_concluido_resumo, pc);
     g_free(pergunta_id_nova);
     g_free(prompt_final);
@@ -764,7 +878,7 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
 
     char *pergunta_id = lia_novo_id("perg");
     c->pergunta_pendente_id = g_strdup(pergunta_id);
-    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id);
+    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id, mensagem);
     g_modelo->perguntar(g_modelo, pergunta_id, prompt_final, ao_concluido_pergunta, pc);
     g_free(pergunta_id);
     g_free(prompt_final);
