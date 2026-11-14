@@ -176,6 +176,34 @@ else
     ko "lia-mem-teste: binário não encontrado em $MEM_TESTE"
 fi
 
+# build/lia-processos-teste é outro binário próprio (sem libc) no mesmo
+# espírito: constrói suas próprias fixtures de "/proc" sob um diretório
+# vazio (nunca o /proc real) e testa lia_proc_coletar_amostra()/
+# lia_proc_calcular_cpu() (cli/sistema.c) sem depender de timing real.
+PROC_TESTE="$RAIZ/build/lia-processos-teste"
+PROC_FIXTURE_DIR=$(mktemp -d)
+case "$PROC_FIXTURE_DIR" in
+    /tmp/*) : ;;
+    *) echo "ERRO FATAL: diretório de fixture de processos não está sob /tmp — abortando"; exit 1 ;;
+esac
+if [ -x "$PROC_TESTE" ]; then
+    saida_proc=$("$PROC_TESTE" "$PROC_FIXTURE_DIR" 2>&1)
+    printf '%s\n' "$saida_proc"
+    linhas_proc=0
+    while IFS= read -r linha; do
+        case $linha in
+            "ok   "*)    total=$((total+1)); linhas_proc=$((linhas_proc+1));;
+            "FALHA "*)   total=$((total+1)); falhas=$((falhas+1)); linhas_proc=$((linhas_proc+1));;
+        esac
+    done <<EOF_PROC
+$saida_proc
+EOF_PROC
+    [ "$linhas_proc" -gt 0 ] || ko "lia-processos-teste: nenhuma linha ok/FALHA na saída"
+else
+    ko "lia-processos-teste: binário não encontrado em $PROC_TESTE"
+fi
+rm -rf "$PROC_FIXTURE_DIR"
+
 # nenhum dos binários do núcleo referencia fopen/system/fork/execve/libc:
 # são estáticos, sem libc (-nostdlib), então nem poderiam resolver esses símbolos;
 # a verificação é sobre os .o antes do link, onde uma referência indevida apareceria
@@ -184,6 +212,7 @@ if command -v nm >/dev/null; then
     for o in lia-cat.o lia-echo.o lia-hex.o lia-tipo.o \
              lia_cat_ref.o lia_echo_ref.o lia_hex_ref.o lia_tipo_ref.o \
              lia-cpuid.o lia-mem.o lia_mem.o lia_mem_ref.o teste_mem.o bench_mem.o \
+             teste_processos_top_cpu.o \
              entrada.o sys.o texto.o; do
         proibidos=$(nm -u "$RAIZ/build/$o" 2>/dev/null | grep -Ei '\b(fopen|fclose|fread|fwrite|system|popen|fork|execve|execvp|execv|malloc|printf)\b')
         [ -z "$proibidos" ] && ok "$o: sem referência a fopen/system/fork/execve/malloc/printf" \
@@ -191,7 +220,7 @@ if command -v nm >/dev/null; then
     done
 fi
 for prog in "$CAT" "$ECHO" "$HEX" "$TIPO" "$CAT_REF" "$ECHO_REF" "$HEX_REF" "$TIPO_REF" \
-            "$RAIZ/build/lia-mem-teste" "$RAIZ/build/lia-mem-bench"; do
+            "$RAIZ/build/lia-mem-teste" "$RAIZ/build/lia-mem-bench" "$RAIZ/build/lia-processos-teste"; do
     nome=$(basename "$prog")
     strings -a "$prog" 2>/dev/null | grep -qiE '^(fopen|system|execve)$' \
         && ko "$nome: string de símbolo proibido encontrada no binário" \
@@ -330,6 +359,50 @@ vendor_lia=$("$LIA" system dispositivos --json | python3 -I -c "import json,sys;
 "$LIA" system >/dev/null 2>&1; [ $? -eq 2 ] && ok "system sem subcomando: exit 2" || ko "system sem subcomando"
 "$LIA" system bogus >/dev/null 2>&1; [ $? -eq 2 ] && ok "system subcomando desconhecido: exit 2" || ko "system subcomando desconhecido"
 "$LIA" system diagnosticar --bogus >/dev/null 2>&1; [ $? -eq 2 ] && ok "system opção desconhecida: exit 2" || ko "system opção desconhecida"
+
+# ---------- lia system processos_top_cpu (somente leitura; ver também testes/nucleo/ para a referência pura testável) ----------
+"$LIA" system processos_top_cpu --limite 0 >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_cpu: --limite 0 -> exit 2" || ko "processos_top_cpu: --limite 0"
+"$LIA" system processos_top_cpu --limite 101 >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_cpu: --limite 101 -> exit 2" || ko "processos_top_cpu: --limite 101"
+"$LIA" system processos_top_cpu --limite abc >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_cpu: --limite não numérico -> exit 2" || ko "processos_top_cpu: --limite não numérico"
+"$LIA" system processos_top_cpu --intervalo-ms 99 >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_cpu: --intervalo-ms 99 -> exit 2" || ko "processos_top_cpu: --intervalo-ms 99"
+"$LIA" system processos_top_cpu --intervalo-ms 5001 >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_cpu: --intervalo-ms 5001 -> exit 2" || ko "processos_top_cpu: --intervalo-ms 5001"
+"$LIA" system processos_top_cpu --ordenar-por memoria >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_cpu: --ordenar-por inválido -> exit 2" || ko "processos_top_cpu: --ordenar-por inválido"
+"$LIA" system processos_top_cpu --raiz-proc /caminho/que/nao/existe --intervalo-ms 100 >/dev/null 2>&1
+[ $? -eq 1 ] && ok "processos_top_cpu: raiz /proc inexistente -> exit 1 (erro estruturado)" || ko "processos_top_cpu: raiz inexistente"
+
+"$LIA" system processos_top_cpu --json --limite 5 --intervalo-ms 150 > "$T/proc_top.json"
+python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["limite"] == 5
+assert d["intervalo_ms"] == 150
+assert isinstance(d["amostrados"], int) and d["amostrados"] > 0
+procs = d["processos"]
+assert len(procs) <= 5
+anteriores = None
+for p in procs:
+    for campo in ("pid", "nome", "estado", "cpu_pct_centesimos", "tempo_cpu_centesimos_s"):
+        assert campo in p, campo
+    assert isinstance(p["pid"], int) and p["pid"] > 0
+    assert isinstance(p["cpu_pct_centesimos"], int)  # nunca float (ver PLANO.md item 13: json-glib perde precisão em decimal)
+    assert isinstance(p["tempo_cpu_centesimos_s"], int)
+    if anteriores is not None:
+        assert p["cpu_pct_centesimos"] <= anteriores, "não está ordenado decrescente"
+    anteriores = p["cpu_pct_centesimos"]
+' "$T/proc_top.json" \
+    && ok "processos_top_cpu --json: formato estável, inteiro (nunca float), ordenado decrescente, <= limite" \
+    || ko "processos_top_cpu --json: formato inesperado"
+
+"$LIA" system processos_top_cpu --limite 3 --intervalo-ms 100 > "$T/proc_top.txt"
+head -1 "$T/proc_top.txt" | grep -qE 'PID.*NOME.*EST.*CPU%' && ok "processos_top_cpu: cabeçalho do texto humano presente" || ko "processos_top_cpu: cabeçalho ausente"
+# /usr/bin/wc explícito: a partir daqui o PATH já foi deliberadamente
+# poluído (seção "lia tools" acima planta um "wc" falso em "$T/bin" para
+# testar detecção de saída binária, e nunca restaura o PATH original).
+[ "$(/usr/bin/wc -l < "$T/proc_top.txt")" -ge 2 ] && ok "processos_top_cpu: texto humano tem ao menos uma linha de dados" || ko "processos_top_cpu: sem linhas de dados"
+
+env -i "$LIA" system processos_top_cpu --json --limite 1 --intervalo-ms 100 >/dev/null 2>&1 \
+    && ok "processos_top_cpu: funciona sem nenhuma variável de ambiente (nem HOME)" \
+    || ko "processos_top_cpu depende do ambiente"
 
 # nenhum comando somente leitura chama fork/execve (sem shell, sem processo filho, sem privilégio)
 if command -v nm >/dev/null; then

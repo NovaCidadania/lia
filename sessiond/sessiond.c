@@ -3,7 +3,7 @@
  *
  * O executor é plugável (sessiond/executor.h): por padrão, o real
  * (sessiond/executor_real.c, chama cli/sistema.c e cli/ferramentas.c de
- * verdade, limitado às seis ferramentas de leitura de
+ * verdade, limitado às sete ferramentas de leitura de
  * sessiond/manifesto_real.c); LIA_SESSIOND_EXECUTOR=mock troca para o
  * simulado (sessiond/executor_mock.c, sessiond/manifesto_mock.c), usado só
  * nos testes unitários do protocolo que precisam de aprovação/risco admin
@@ -1175,7 +1175,7 @@ static void escolher_executor(void)
         g_print("lia-sessiond: executor = mock (LIA_SESSIOND_EXECUTOR=mock) — NUNCA o padrão em produção\n");
     } else {
         g_executor = executor_real_obter();
-        g_print("lia-sessiond: executor = real (seis ferramentas de leitura + duas de persistência explícita, docs/manifesto.md)\n");
+        g_print("lia-sessiond: executor = real (sete ferramentas de leitura + duas de persistência explícita, docs/manifesto.md)\n");
     }
 }
 

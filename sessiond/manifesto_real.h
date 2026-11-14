@@ -17,6 +17,7 @@ typedef enum {
     PARAM_STRING,
     PARAM_BOOLEANO,
     PARAM_ENUM,
+    PARAM_INTEIRO,
 } ParametroTipo;
 
 typedef struct {
@@ -24,6 +25,7 @@ typedef struct {
     ParametroTipo tipo;
     gboolean obrigatorio;
     const char * const *valores_enum; /* só para PARAM_ENUM; terminada em NULL */
+    gint64 min, max; /* só para PARAM_INTEIRO — faixa inclusiva, sempre validada */
 } ParametroManifesto;
 
 typedef struct {

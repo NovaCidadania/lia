@@ -65,6 +65,11 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
          * nunca propõe outra ferramenta nesta etapa (evita encadeamento
          * automático de ações sem nova aprovação humana). */
         r.resposta_texto = g_strdup("(mock) resultado recebido e resumido.");
+    } else if (contem_ci(prompt_montado, "processo") || contem_ci(prompt_montado, "cpu")) {
+        r.ferramenta_proposta = g_strdup("sistema.processos_top_cpu");
+        r.parametros_json = g_strdup("{\"limite\":10}");
+        r.justificativa = g_strdup("o pedido menciona processos/CPU");
+        r.resposta_texto = g_strdup("(mock) posso listar os processos que mais usam CPU.");
     } else if (contem_ci(prompt_montado, "diagnost") || contem_ci(prompt_montado, "sistema")) {
         r.ferramenta_proposta = g_strdup("sistema.diagnosticar");
         r.parametros_json = g_strdup("{}");

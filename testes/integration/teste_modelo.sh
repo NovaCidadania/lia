@@ -75,6 +75,17 @@ iniciar_daemon_mock() {
     while [ ! -S "$SOCK" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
 }
 
+# iniciar_daemon_executor_real: executor=real (ferramentas de verdade,
+# ex.: sistema.processos_top_cpu — não existe no executor mock); modelo =
+# mock (padrão) a menos que LIA_SESSIOND_MODELO já esteja no ambiente.
+iniciar_daemon_executor_real() {
+    case "$SOCK" in "$HOME_T"/*) : ;; *) echo "ERRO FATAL: socket fora de HOME_T, recusando iniciar"; exit 1 ;; esac
+    env HOME="$HOME_T" LIA_SESSIOND_EXECUTOR=real "$@" "$SESSIOND" > "$HOME_T/sessiond.log" 2>&1 &
+    DAEMON_PID=$!
+    i=0
+    while [ ! -S "$SOCK" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+}
+
 parar_daemon() {
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
     wait "$DAEMON_PID" 2>/dev/null
@@ -565,6 +576,50 @@ aguardar "$HOME_T/a.out" '"codigo":"modelo_resposta_invalida"' "50" && ok "prefi
 fechar_a
 parar_daemon
 parar_fake_llama_cpp
+
+# ========================================================================
+# PARTE F — fluxo completo de ponta a ponta para sistema.processos_top_cpu:
+# executor REAL (a ferramenta de verdade existe só nele) + modelo mock
+# reconhecendo "processo"/"cpu" (sessiond/modelo_mock.c).
+# ========================================================================
+
+echo "== F1. pergunta sobre processos/CPU -> modelo propõe sistema.processos_top_cpu =="
+iniciar_daemon_executor_real
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"f1","em_resposta_a":null,"ts":"t","dados":{"mensagem":"Liste os 10 processos com maior uso de CPU."}}'
+aguardar "$HOME_T/a.out" '"ferramenta":"sistema.processos_top_cpu"' && ok "modelo propõe sistema.processos_top_cpu" \
+    || ko "F1: ferramenta não proposta"
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+[ -n "$PERGUNTA_ID" ] && ok "F1: pergunta_id extraído da proposta" || ko "F1: pergunta_id ausente"
+
+echo "== F2. encaminhar a proposta como 'solicitar' -> 'plano' sem aprovação (risco nenhum) -> executa de verdade =="
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"f2","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.processos_top_cpu","parametros":{"limite":5,"intervalo_ms":150},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"plano"' "50" && ok "F2: 'plano' recebido" || ko "F2: sem 'plano'"
+grep -q '"requer_aprovacao":false' "$HOME_T/a.out" && ok "F2: plano não exige aprovação (risco nenhum)" || ko "F2: deveria ser requer_aprovacao:false"
+aguardar "$HOME_T/a.out" '"estado":"sucesso"' "80" && ok "F2: execução real conclui com sucesso" || ko "F2: sem resultado de sucesso"
+grep -q '"saida":{"limite":5,"intervalo_ms":150' "$HOME_T/a.out" && ok "F2: resultado contém o JSON estruturado da ferramenta de verdade" \
+    || ko "F2: JSON estruturado ausente/inesperado"
+grep -qE '"cpu_pct_centesimos":[0-9]+' "$HOME_T/a.out" && ok "F2: cpu_pct_centesimos é um inteiro (JSON estável, nunca float)" \
+    || ko "F2: campo cpu_pct_centesimos ausente ou não-inteiro"
+
+echo "== F3. 'resposta' automática resume o resultado, sem propor nova ferramenta administrativa =="
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" && ok "F3: 'resposta' automática recebida" || ko "F3: sem 'resposta'"
+LINHA_RESPOSTA_F=$(grep '"tipo":"resposta"' "$HOME_T/a.out" 2>/dev/null | tail -1)
+case "$LINHA_RESPOSTA_F" in
+    *ferramenta_proposta*) ko "F3: 'resposta' automática não deveria propor nova ferramenta" ;;
+    *) ok "F3: nenhuma ferramenta nova proposta no resumo" ;;
+esac
+
+echo "== F4. nenhuma ferramenta administrativa foi chamada =="
+# (nunca ler /proc/<pid>/cmdline ou /proc/<pid>/environ é garantido por
+# leitura de código em cli/sistema.c, não por grep: a própria descrição
+# do manifesto — "efeitos" — legitimamente contém essas duas palavras
+# para documentar a restrição, o que tornaria um grep ingênuo aqui um
+# falso positivo.)
+grep -qE '"risco":"admin"|sudo\.|root\.' "$HOME_T/a.out" && ko "F4: ferramenta administrativa apareceu na conversa" \
+    || ok "F4: nenhuma ferramenta administrativa chamada"
+fechar_a
+parar_daemon
 
 echo
 echo "$total testes, $falhas falhas"

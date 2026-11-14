@@ -17,7 +17,7 @@ MEM := $(B)/entrada.o $(B)/sys.o $(B)/texto.o $(B)/lia-cpuid.o $(B)/lia-mem.o \
 
 all: $(B)/lia $(B)/lia-cat $(B)/lia-echo $(B)/lia-hex $(B)/lia-tipo \
      $(B)/lia-cat-ref $(B)/lia-echo-ref $(B)/lia-hex-ref $(B)/lia-tipo-ref \
-     $(B)/lia-mem-teste $(B)/lia-mem-bench
+     $(B)/lia-mem-teste $(B)/lia-mem-bench $(B)/lia-processos-teste
 
 $(B):
 	mkdir -p $(B)
@@ -58,6 +58,9 @@ $(B)/teste_mem.o: testes/mem/teste_mem.c runtime/lia.h | $(B)
 $(B)/bench_mem.o: testes/mem/bench_mem.c runtime/lia.h | $(B)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(B)/teste_processos_top_cpu.o: testes/nucleo/teste_processos_top_cpu.c runtime/lia.h cli/cli.h | $(B)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(B)/lia: $(RUNTIME) $(CLI)
 	$(CC) $(LDFLAGS) $^ -o $@
 
@@ -89,6 +92,9 @@ $(B)/lia-mem-teste: $(MEM) $(B)/teste_mem.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
 $(B)/lia-mem-bench: $(MEM) $(B)/bench_mem.o
+	$(CC) $(LDFLAGS) $^ -o $@
+
+$(B)/lia-processos-teste: $(RUNTIME) $(B)/sistema.o $(B)/teste_processos_top_cpu.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
 teste: all

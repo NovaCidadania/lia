@@ -23,6 +23,15 @@ static const ParametroManifesto PARAM_VAZIO[] = {
     { .nome = NULL },
 };
 
+static const char *const ORDENAR_POR_VALORES[] = { "cpu", NULL };
+
+static const ParametroManifesto PARAM_PROCESSOS_TOP_CPU[] = {
+    { .nome = "limite", .tipo = PARAM_INTEIRO, .obrigatorio = FALSE, .min = 1, .max = 100 },
+    { .nome = "intervalo_ms", .tipo = PARAM_INTEIRO, .obrigatorio = FALSE, .min = 100, .max = 5000 },
+    { .nome = "ordenar_por", .tipo = PARAM_ENUM, .obrigatorio = FALSE, .valores_enum = ORDENAR_POR_VALORES },
+    { .nome = NULL },
+};
+
 static const ManifestoReal TABELA[] = {
     {
         .base = {
@@ -124,6 +133,25 @@ static const ManifestoReal TABELA[] = {
         },
         .parametros = PARAM_VAZIO,
     },
+    {
+        .base = {
+            /* Somente leitura: duas amostras de /proc/<pid>/stat separadas
+             * por 'intervalo_ms', nunca /proc/<pid>/cmdline ou
+             * /proc/<pid>/environ (nomes de processo e metadados de CPU
+             * já podem revelar informação sensível — docs/THREAT-MODEL.md
+             * §5.1 — argumentos completos/ambiente seriam bem mais
+             * sensíveis ainda, por isso ficam fora desta primeira
+             * versão). idempotente=FALSE porque o resultado depende do
+             * instante da amostragem (a leitura em si não tem efeito,
+             * mas repetir não reproduz os mesmos números). */
+            .nome = "sistema.processos_top_cpu", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = FALSE,
+            .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
+            .efeitos = "lê /proc/<pid>/stat de cada processo (duas amostras, com uma pausa curta entre elas); não lê cmdline/environ; não escreve nada",
+            .timeout_padrao_ms = 8000,
+        },
+        .parametros = PARAM_PROCESSOS_TOP_CPU,
+    },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))
 
@@ -202,6 +230,24 @@ char *manifesto_real_validar_parametros(const ManifestoReal *m, JsonObject *para
             if (!achou) {
                 g_list_free(chaves);
                 return g_strdup_printf("parâmetro '%s': valor '%s' fora do enum permitido", chave, valor);
+            }
+            break;
+        }
+        case PARAM_INTEIRO: {
+            /* json-glib representa todo literal numérico inteiro do JSON
+             * como G_TYPE_INT64 — um valor com ponto decimal (ex.: 10.5)
+             * vem como G_TYPE_DOUBLE e é rejeitado aqui, nunca truncado
+             * silenciosamente. */
+            if (tipo_json != G_TYPE_INT64) {
+                g_list_free(chaves);
+                return g_strdup_printf("parâmetro '%s': esperado inteiro", chave);
+            }
+            gint64 valor = json_node_get_int(n);
+            if (valor < p->min || valor > p->max) {
+                g_list_free(chaves);
+                return g_strdup_printf("parâmetro '%s': valor %" G_GINT64_FORMAT
+                                       " fora da faixa permitida (%" G_GINT64_FORMAT "..%" G_GINT64_FORMAT ")",
+                                       chave, valor, p->min, p->max);
             }
             break;
         }

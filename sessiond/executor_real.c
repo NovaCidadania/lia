@@ -127,6 +127,42 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
     } else if (strcmp(m->base.nome, "sistema.dispositivos") == 0) {
         char *argv[] = { (char *)"dispositivos", (char *)"--json" };
         rc = cmd_system(2, argv);
+    } else if (strcmp(m->base.nome, "sistema.processos_top_cpu") == 0) {
+        gint64 limite = 10, intervalo_ms = 200;
+        if (parametros && json_object_has_member(parametros, "limite")) {
+            JsonNode *n = json_object_get_member(parametros, "limite");
+            if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_INT64)
+                limite = json_node_get_int(n);
+        }
+        if (parametros && json_object_has_member(parametros, "intervalo_ms")) {
+            JsonNode *n = json_object_get_member(parametros, "intervalo_ms");
+            if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_INT64)
+                intervalo_ms = json_node_get_int(n);
+        }
+        /* sessiond.c já chamou manifesto_real_validar_parametros antes de
+         * chegar aqui — esta é uma segunda confirmação defensiva,
+         * nunca confiando só na primeira camada (docs/manifesto.md §5). */
+        if (limite < 1 || limite > 100 || intervalo_ms < 100 || intervalo_ms > 5000) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("parametro_invalido");
+            r->erro_mensagem = g_strdup("limite ou intervalo_ms fora da faixa permitida");
+            return;
+        }
+        char limite_s[16], intervalo_s[16];
+        g_snprintf(limite_s, sizeof limite_s, "%" G_GINT64_FORMAT, limite);
+        g_snprintf(intervalo_s, sizeof intervalo_s, "%" G_GINT64_FORMAT, intervalo_ms);
+        char *argv[] = { (char *)"processos_top_cpu", (char *)"--json",
+                          (char *)"--limite", limite_s, (char *)"--intervalo-ms", intervalo_s };
+        rc = cmd_system(6, argv);
+        if (rc == 1) {
+            /* /proc não disponível — cli/sistema.c já escreveu o motivo
+             * em lia_err; nunca reporta sucesso nem inventa um motivo
+             * genérico quando já temos um específico. */
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("recurso_indisponivel");
+            r->erro_mensagem = lia_err.n > 0 ? g_strndup(lia_err.p, lia_err.n) : g_strdup("/proc indisponível");
+            return;
+        }
     } else {
         r->sucesso = FALSE;
         r->erro_codigo = g_strdup("ferramenta_desconhecida");
@@ -268,7 +304,7 @@ static void real_iniciar(const Executor *self, const char *execucao_id, const Ex
                           ExecutorConcluidoCb concluido_cb, gpointer ctx)
 {
     (void)self;
-    (void)saida_cb; (void)progresso_cb; /* estas seis ferramentas são rápidas o bastante e
+    (void)saida_cb; (void)progresso_cb; /* estas sete ferramentas são rápidas o bastante e
                                           * síncronas: a saída inteira vai em resultado.dados,
                                           * sem streaming incremental nesta etapa. */
     garantir_thread();

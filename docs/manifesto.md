@@ -2,7 +2,7 @@
 
 Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica um manifesto. O executor valida o manifesto e a política do usuário **independentemente do modelo**: o modelo escolhe a ferramenta e os parâmetros, mas não decide se ela é permitida.
 
-> **Nota:** o daemon de sessão (`docs/protocolo.md` §8) implementa estas seis ferramentas de leitura em `sessiond/manifesto_real.c` (o executor padrão), mais duas ações explícitas de persistência (`tools.discover.persistir`, `tools.probe.persistir` — §6.1). `sessiond/manifesto_mock.c` define, separadamente, uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`, mais `mock.timeout` e `mock.saida_grande`, fixtures só para exercitar o watchdog de timeout e o limite de saída do daemon de verdade) só para testar a máquina de estados do protocolo — ativada apenas com `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão em produção; não deve ser confundida com as ferramentas reais.
+> **Nota:** o daemon de sessão (`docs/protocolo.md` §8) implementa estas sete ferramentas de leitura em `sessiond/manifesto_real.c` (o executor padrão), mais duas ações explícitas de persistência (`tools.discover.persistir`, `tools.probe.persistir` — §6.1). `sessiond/manifesto_mock.c` define, separadamente, uma tabela fixa e fictícia (`mock.leitura`, `mock.escrita`, `mock.admin`, mais `mock.timeout` e `mock.saida_grande`, fixtures só para exercitar o watchdog de timeout e o limite de saída do daemon de verdade) só para testar a máquina de estados do protocolo — ativada apenas com `LIA_SESSIOND_EXECUTOR=mock`, nunca o padrão em produção; não deve ser confundida com as ferramentas reais.
 
 ## 1. Campos obrigatórios
 
@@ -136,7 +136,34 @@ Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica u
 }
 ```
 
-Estes seis manifestos (`tools.discover`, `tools.probe`, `tools.list` acima, mais estes três `sistema.*`) são exatamente os implementados em `sessiond/manifesto_real.c` e expostos pelo executor real do daemon de sessão (`docs/protocolo.md` §8) — a mesma tabela, sem duplicação de lógica.
+```json
+{
+  "nome": "sistema.processos_top_cpu",
+  "versao": "0.1.0",
+  "parametros": [
+    { "nome": "limite", "tipo": "inteiro", "obrigatorio": false, "padrao": 10, "limites": { "min": 1, "max": 100 } },
+    { "nome": "intervalo_ms", "tipo": "inteiro", "obrigatorio": false, "padrao": 200, "limites": { "min": 100, "max": 5000 } },
+    { "nome": "ordenar_por", "tipo": "enum", "obrigatorio": false, "padrao": "cpu", "limites": { "valores": ["cpu"] } }
+  ],
+  "capacidades": ["leitura_arquivo"],
+  "risco": "nenhum",
+  "efeitos": [
+    "lê /proc/<pid>/stat de cada processo (duas amostras, com uma pausa curta entre elas, nunca cmdline/environ)",
+    "não escreve nada"
+  ],
+  "idempotente": false,
+  "timeout_padrao_ms": 8000,
+  "limites": {},
+  "reversivel": "nao_aplicavel",
+  "requer_aprovacao": false
+}
+```
+
+`sistema.processos_top_cpu` responde perguntas como "liste os 10 processos que mais estão usando CPU": amostra `/proc/<pid>/stat` duas vezes, com `intervalo_ms` de pausa entre as amostras, e calcula o percentual de CPU de cada processo no intervalo, normalizado pelo número de núcleos (um processo usando 100% de todos os núcleos aparece como 100%, nunca `100% × núcleos`). `idempotente: false` porque, ao contrário dos outros seis manifestos desta seção, o resultado depende do instante da amostragem — repetir a chamada não reproduz os mesmos números, mesmo sem nenhum efeito colateral.
+
+Nome e estado de processo já podem revelar informação sensível sobre o que a pessoa está rodando (ver `docs/THREAT-MODEL.md` §5.1) — por isso esta ferramenta nunca lê `/proc/<pid>/cmdline` nem `/proc/<pid>/environ` (argumentos completos, variáveis de ambiente, tokens e caminhos que poderiam vir embutidos neles) nesta primeira versão, mesmo sendo `risco: nenhum`.
+
+Estes sete manifestos (`tools.discover`, `tools.probe`, `tools.list` acima, mais estes quatro `sistema.*`) são exatamente os implementados em `sessiond/manifesto_real.c` e expostos pelo executor real do daemon de sessão (`docs/protocolo.md` §8) — a mesma tabela, sem duplicação de lógica.
 
 ## 4. Ferramentas de nível `admin` (já implementadas, fora do escopo "somente leitura")
 
