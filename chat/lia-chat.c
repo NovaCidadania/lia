@@ -108,6 +108,8 @@ typedef struct {
      * momento vai direto para PropostaPendente.pergunta_id. */
     gboolean pergunta_em_andamento;
     gboolean pergunta_abandonada_localmente; /* /cancelar numa pergunta: resposta, quando chegar, é ignorada */
+    guint timer_progresso_pergunta; /* 0 = parado; ver iniciar/parar_progresso_pergunta */
+    gint64 pergunta_enviada_us;     /* g_get_monotonic_time() de quando a pergunta foi enviada */
     PropostaPendente *proposta_pendente;
 
     char *plano_id_pendente;
@@ -299,6 +301,36 @@ static char *enviar(LiaChat *c, LiaMsgTipo tipo, JsonBuilder *dados,
     return id;
 }
 
+/* Respostas de modelo real (Ollama/llama.cpp) em CPU podem levar dezenas
+ * de segundos (medido: ~34s para um prompt típico da Lia contra
+ * llama3.2:3b nesta máquina) — sem isto, o terminal fica em silêncio
+ * total entre "pergunta enviada" e a resposta/erro final, parecendo
+ * travado mesmo quando está só funcionando normalmente. */
+#define LIA_PROGRESSO_PERGUNTA_INTERVALO_S 5
+
+static void parar_progresso_pergunta(LiaChat *c)
+{
+    if (c->timer_progresso_pergunta) {
+        g_source_remove(c->timer_progresso_pergunta);
+        c->timer_progresso_pergunta = 0;
+    }
+}
+
+static gboolean ao_timer_progresso_pergunta(gpointer dados)
+{
+    LiaChat *c = dados;
+    gint64 decorrido_s = (g_get_monotonic_time() - c->pergunta_enviada_us) / 1000000;
+    saida_linha(c, "[local] ainda aguardando resposta do modelo... (%" G_GINT64_FORMAT "s)", decorrido_s);
+    return G_SOURCE_CONTINUE;
+}
+
+static void iniciar_progresso_pergunta(LiaChat *c)
+{
+    parar_progresso_pergunta(c);
+    c->pergunta_enviada_us = g_get_monotonic_time();
+    c->timer_progresso_pergunta = g_timeout_add_seconds(LIA_PROGRESSO_PERGUNTA_INTERVALO_S, ao_timer_progresso_pergunta, c);
+}
+
 static void enviar_perguntar(LiaChat *c, const char *mensagem)
 {
     if (c->pergunta_em_andamento && !c->pergunta_abandonada_localmente) {
@@ -333,6 +365,7 @@ static void enviar_perguntar(LiaChat *c, const char *mensagem)
     if (id) {
         c->pergunta_em_andamento = TRUE;
         c->pergunta_abandonada_localmente = FALSE;
+        iniciar_progresso_pergunta(c);
         saida_linha(c, "[local] pergunta enviada (id da mensagem: %s)", id);
         g_free(id);
     }
@@ -434,6 +467,7 @@ static void tratar_cancelar(LiaChat *c)
          * forma de cancelar uma 'pergunta' em andamento no daemon — só
          * marcamos localmente para ignorar a resposta quando chegar. */
         c->pergunta_abandonada_localmente = TRUE;
+        parar_progresso_pergunta(c);
         saida_linha(c, "[local] não há como cancelar uma pergunta ao modelo em andamento nesta etapa do protocolo — a resposta, quando chegar, será ignorada");
         return;
     }
@@ -698,6 +732,7 @@ static void tratar_msg_erro(LiaChat *c, const LiaMsg *m)
         if (c->plano_id_pendente) limpar_pendencias_de_execucao(c);
         c->pergunta_em_andamento = FALSE;
         c->pergunta_abandonada_localmente = FALSE;
+        parar_progresso_pergunta(c);
         return;
     }
     /* erro assíncrono (resultado do modelo, timeout de execução —
@@ -709,6 +744,7 @@ static void tratar_msg_erro(LiaChat *c, const LiaMsg *m)
     if (c->pergunta_em_andamento) {
         c->pergunta_em_andamento = FALSE;
         c->pergunta_abandonada_localmente = FALSE;
+        parar_progresso_pergunta(c);
     }
     if (c->execucao_id_pendente)
         limpar_pendencias_de_execucao(c);
@@ -723,6 +759,7 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
     }
     gboolean abandonada = c->pergunta_abandonada_localmente;
     c->pergunta_em_andamento = FALSE;
+    parar_progresso_pergunta(c);
     c->pergunta_abandonada_localmente = FALSE;
     if (abandonada) {
         saida_linha(c, "[local] ignorado: resposta de uma pergunta cancelada localmente");

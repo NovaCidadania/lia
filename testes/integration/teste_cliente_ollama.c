@@ -86,9 +86,9 @@ static int modo_config_validar(void)
     erro = ollama_config_validar(cfg);
     checar(erro != NULL, "timeout_ms acima do limite (700000) -> rejeitado");
     g_free(erro);
-    cfg->timeout_ms = 15000;
+    cfg->timeout_ms = 60000;
     erro = ollama_config_validar(cfg);
-    checar(erro == NULL, "timeout_ms 15000 (padrão) -> aceito");
+    checar(erro == NULL, "timeout_ms 60000 (padrão) -> aceito");
     g_free(erro);
 
     g_free(cfg->modelo);

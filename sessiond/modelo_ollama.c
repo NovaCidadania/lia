@@ -5,7 +5,9 @@
  * conecta): LIA_OLLAMA_HOST (padrão "127.0.0.1", só aceita
  * "127.0.0.1"/"localhost" — docs/THREAT-MODEL.md), LIA_OLLAMA_PORTA
  * (padrão 11434), LIA_OLLAMA_MODELO (padrão "llama3"),
- * LIA_OLLAMA_TIMEOUT_MS (padrão 15000).
+ * LIA_OLLAMA_TIMEOUT_MS (padrão 60000 — CPU-only costuma precisar bem
+ * mais que o antigo padrão de 15000, que estourava rotineiramente antes
+ * do primeiro token chegar).
  *
  * Extrai, do texto de resposta, no máximo um bloco JSON de "proposta de
  * ferramenta" ({"ferramenta":...,"parametros":{...},"justificativa":...})
