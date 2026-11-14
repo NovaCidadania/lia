@@ -62,13 +62,22 @@ LLAMACPP_PORTA="${LIA_LLAMACPP_PORTA:-8080}"
 
 # detectar_ollama: 0 se http://$OLLAMA_HOST:$OLLAMA_PORTA tiver ao menos
 # um modelo baixado (/api/tags), 1 senão. Nunca assume: se 'curl' não
-# existir, trata como "não detectado" (nunca como "detectado").
+# existir, trata como "não detectado" (nunca como "detectado"). Também
+# guarda em OLLAMA_MODELO_DETECTADO o nome do primeiro modelo baixado —
+# sem isso, o daemon cairia no padrão hardcoded de
+# ollama/cliente_ollama.c ("llama3"), que quase nunca é o que está
+# realmente baixado (ex.: "llama3.2:3b"), e toda pergunta falharia com
+# "Ollama respondeu com erro HTTP" (model not found) sem nenhuma pista
+# de por quê.
 detectar_ollama() {
     command -v curl >/dev/null 2>&1 || return 1
     resposta=$(curl -s --max-time 2 "http://$OLLAMA_HOST:$OLLAMA_PORTA/api/tags" 2>/dev/null) || return 1
     case "$resposta" in
         *'"models":[]'*) return 1 ;;  # Ollama no ar, mas sem nenhum modelo baixado
-        *'"models":'*) return 0 ;;
+        *'"models":'*)
+            OLLAMA_MODELO_DETECTADO=$(printf '%s' "$resposta" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | head -1)
+            return 0
+            ;;
         *) return 1 ;;
     esac
 }
@@ -85,11 +94,12 @@ detectar_llama_cpp() {
 }
 
 echo "detectando modelos LLM locais..."
+OLLAMA_MODELO_DETECTADO=""
 OLLAMA_OK=1; detectar_ollama && OLLAMA_OK=0
 LLAMACPP_OK=1; detectar_llama_cpp && LLAMACPP_OK=0
 
 if [ "$OLLAMA_OK" -eq 0 ]; then
-    echo "  Ollama: alcançável em $OLLAMA_HOST:$OLLAMA_PORTA, com modelo(s) baixado(s)"
+    echo "  Ollama: alcançável em $OLLAMA_HOST:$OLLAMA_PORTA, modelo '$OLLAMA_MODELO_DETECTADO' baixado"
 else
     echo "  Ollama: não encontrado em $OLLAMA_HOST:$OLLAMA_PORTA (ou sem nenhum modelo baixado)"
 fi
@@ -141,8 +151,13 @@ ENV_EXECUTOR=""
 [ "$EXECUTOR" = mock ] && ENV_EXECUTOR="LIA_SESSIOND_EXECUTOR=mock"
 ENV_MODELO=""
 [ "$MODELO" != mock ] && ENV_MODELO="LIA_SESSIOND_MODELO=$MODELO"
+ENV_OLLAMA_MODELO=""
+if [ "$MODELO" = ollama ] && [ -z "${LIA_OLLAMA_MODELO:-}" ] && [ -n "$OLLAMA_MODELO_DETECTADO" ]; then
+    ENV_OLLAMA_MODELO="LIA_OLLAMA_MODELO=$OLLAMA_MODELO_DETECTADO"
+    echo "  usando o modelo Ollama detectado: $OLLAMA_MODELO_DETECTADO (defina LIA_OLLAMA_MODELO para escolher outro)"
+fi
 
-env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
+env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null' EXIT INT TERM
 
