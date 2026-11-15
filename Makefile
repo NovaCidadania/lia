@@ -164,7 +164,7 @@ gui-smoke: gui
 # (prefixo sessiond-pic-*, nunca reaproveita os .o não-PIC de build/ do
 # núcleo) e ligados com sessiond/lia_syscall_hospedado.c no lugar de
 # nucleo/x86_64/entrada.S (que define _start — colidiria com o do daemon).
-SESSIOND_PKGS   := gio-unix-2.0 json-glib-1.0
+SESSIOND_PKGS   := gio-unix-2.0 json-glib-1.0 libsoup-3.0
 SESSIOND_CFLAGS := -std=c17 -O2 -Wall -Wextra -Werror $(shell pkg-config --cflags $(SESSIOND_PKGS))
 SESSIOND_LIBS   := $(shell pkg-config --libs $(SESSIOND_PKGS))
 SESSIOND_PIC_CFLAGS := -std=c17 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fPIC
@@ -179,7 +179,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
                   $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
                   $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o \
-                  $(B)/sessiond-agente.o
+                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -233,6 +233,9 @@ $(B)/sessiond-apresentacao.o: sessiond/apresentacao.c sessiond/apresentacao.h | 
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-agente.o: sessiond/agente.c sessiond/agente.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-web-pesquisa.o: web/pesquisa.c web/pesquisa.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 # Testes unitários do Agent Runtime v2 (plano, validação, verificador,
@@ -302,6 +305,9 @@ $(B)/teste-cliente-llama-cpp: $(B)/teste-cliente-llama-cpp.o $(B)/sessiond-clien
 teste-llama-cpp: $(B)/teste-cliente-llama-cpp
 	sh testes/integration/teste_cliente_llama_cpp.sh
 
+teste-web: sessiond
+	sh testes/integration/teste_web.sh
+
 # ---------------------------------------------------------------------------
 # lia-chat (chat/): primeiro cliente de chat interativo de terminal para o
 # protocolo (docs/protocolo.md §9). Camada fina sobre gui/protocolo.c — não
@@ -332,4 +338,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp chat teste-chat chat-run
+.PHONY: teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run

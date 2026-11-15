@@ -538,6 +538,23 @@ static const char *const LIMITACOES_MALWARE[] = {
     NULL,
 };
 
+static char *web_parametros(const char *pedido)
+{
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "consulta");
+    json_builder_add_string_value(b, pedido ? pedido : "");
+    json_builder_set_member_name(b, "limite");
+    json_builder_add_int_value(b, 5);
+    json_builder_end_object(b);
+    JsonNode *n = json_builder_get_root(b);
+    JsonGenerator *g = json_generator_new();
+    json_generator_set_root(g, n);
+    char *s = json_generator_to_data(g, NULL);
+    json_node_unref(n); g_object_unref(g); g_object_unref(b);
+    return s;
+}
+
 AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteCompat *compat)
 {
     if (texto_direto) *texto_direto = NULL;
@@ -551,6 +568,7 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
     gboolean cpu = tem_algum(t, L(" cpu", " processador", " processamento"));
     gboolean memoria = tem_algum(t, L(" memoria", " ram "));
     gboolean malware = tem_algum(t, L(" virus", " malware", " infectad", " trojan", " ransomware", " rootkit", " spyware", " suspeit", " invadid", " hackead"));
+    gboolean web = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " preço", " fonte", " site", " online", " mercado"));
 
     if (malware) {
         if (tem_algum(t, L(" expli", " insuficient", " quais dados", " por que nao", " o que falta"))) {
@@ -586,6 +604,18 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
                     "mais usam CPU e memória, a carga e a memória, mas isso não prova que o sistema está livre de malware. "
                     "Nada foi executado. Se quiser essa coleta limitada, peça: \"colete evidências de processos suspeitos\".");
         }
+    } else if (web) {
+        if (compat) *compat = COMPAT_COMPATIVEL;
+        p = agente_plano_novo("pesquisar na internet e retornar fontes", "pesquisa_web");
+        char *params = web_parametros(pedido);
+        agente_plano_acrescentar(p, NULL, "web.pesquisar", params, NULL,
+                                 "buscar fontes atuais na internet", L("resultados_web"), 20000, FALSE);
+        g_free(params);
+        p->criterios_sucesso = strv_de((const char *[]) { "resultados_web", NULL });
+        p->limitacoes = strv_de((const char *[]) {
+            "a consulta é enviada a um mecanismo de busca externo",
+            "resultados de busca não são verificação independente da verdade",
+            NULL });
     } else if (tem_algum(t, L(" compar")) && cpu && memoria) {
         p = agente_plano_novo("comparar os processos que mais usam CPU com os que mais usam memória", "comparar_cpu_memoria");
         agente_plano_acrescentar(p, NULL, "sistema.processos_top_cpu", lim, NULL, "ranking por CPU", L("lista_processos_cpu"), 0, FALSE);
@@ -767,6 +797,12 @@ char **agente_extrair_evidencias(const char *ferramenta, const char *parametros_
         } else {
             lim = strv_acrescentar(lim, "a ferramenta não devolveu uma lista de processos válida");
         }
+    } else if (strcmp(f, "web.pesquisar") == 0) {
+        JsonArray *resultados = d ? jarr(d, "resultados") : NULL;
+        if (resultados && json_array_get_length(resultados) > 0)
+            ev = strv_acrescentar(ev, "resultados_web");
+        else
+            lim = strv_acrescentar(lim, "a busca não devolveu resultados estruturados");
     } else if (strcmp(f, "sistema.dispositivos") == 0) {
         if (JSON_NODE_TYPE(carga) == JSON_NODE_ARRAY) {
             char *classe = NULL;
@@ -841,6 +877,7 @@ static const struct { const char *evidencia, *ferramenta, *parametros; } FORNECE
     { "dispositivos_rede", "sistema.dispositivos", "{\"classe\":\"rede\"}" },
     { "dispositivos_bloco", "sistema.dispositivos", "{\"classe\":\"bloco\"}" },
     { "dispositivos_pci", "sistema.dispositivos", "{\"classe\":\"pci\"}" },
+    { "resultados_web", "web.pesquisar", "{}" },
 };
 
 static int tentativas(const AgentePlano *p, const char *ferramenta, const char *params_norm)
@@ -1259,6 +1296,19 @@ char *agente_relatorio(const AgentePlano *p, AgenteVeredito v, char **ausentes, 
         if (n_alerta) g_string_append_printf(concl, "Ponto de atenção: %s.", alertas->str);
         else if (completo) g_string_append(concl, "Nenhum dos limites fixos de atenção (carga, memória, swap) foi ultrapassado nesta medição.");
         g_string_append(prox, "nenhum necessário; para detalhar processos, peça os que mais usam CPU ou memória");
+    } else if (!strcmp(in, "pesquisa_web")) {
+        gboolean tem_resultados = FALSE;
+        for (guint i = 0; i < p->passos->len; i++) {
+            AgentePasso *s = g_ptr_array_index(p->passos, i);
+            if (s->estado == PASSO_SUCESSO && strv_tem(s->evidencias, "resultados_web")) tem_resultados = TRUE;
+        }
+        if (tem_resultados) {
+            g_string_append(concl, "A pesquisa web devolveu resultados estruturados e URLs para conferência humana.");
+            g_string_append(prox, "abrir as fontes e comparar a data e a credibilidade antes de tomar decisões");
+        } else {
+            g_string_append(concl, "A pesquisa não devolveu resultados estruturados suficientes para uma conclusão.");
+            g_string_append(prox, "reformular a consulta ou tentar novamente mais tarde");
+        }
     } else if (!strcmp(in, "inventario_de_hardware")) {
         if (a.tem_rede) g_string_append_printf(ev, "  - Interfaces de rede: %u [sistema.dispositivos classe=rede]\n", a.n_rede);
         if (a.tem_pci) g_string_append_printf(ev, "  - Dispositivos PCI: %u [sistema.dispositivos classe=pci]\n", a.n_pci);
@@ -1308,7 +1358,13 @@ char *agente_relatorio(const AgentePlano *p, AgenteVeredito v, char **ausentes, 
     }
     for (int i = 0; ausentes && ausentes[i]; i++, n_lim++) g_string_append_printf(o, "  - evidência não obtida: %s\n", ausentes[i]);
     if (!n_lim) g_string_append(o, "  - retrato do instante da coleta; não há histórico para comparar\n");
-    g_string_append(o, "\nAções realizadas (somente leitura):\n");
+    gboolean tem_rede = FALSE;
+    for (guint i = 0; i < p->passos->len; i++) {
+        AgentePasso *s = g_ptr_array_index(p->passos, i);
+        if (s->ferramenta && !strcmp(s->ferramenta, "web.pesquisar")) tem_rede = TRUE;
+    }
+    g_string_append(o, tem_rede ? "\nAções realizadas (sem escrita; houve acesso externo autorizado):\n"
+                                : "\nAções realizadas (somente leitura):\n");
     for (guint i = 0; i < p->passos->len; i++) {
         AgentePasso *s = g_ptr_array_index(p->passos, i);
         g_string_append_printf(o, "  - [%u/%d] %s %s — %s", i + 1, n_total, s->ferramenta, s->parametros_json, agente_passo_estado_texto(s->estado));

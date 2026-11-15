@@ -45,25 +45,26 @@ make gui-run       # compila e abre a janela
 make gui-smoke     # com display: confere ausência de sudo/pkexec/exec* e execução sem daemon
 ```
 
-A GUI pode enviar `solicitar` para as seis ferramentas de leitura reais
-(seletor + botão "Solicitar" na janela) — todas `risco: nenhum`, sem efeito
-observável fora do processo. Nunca envia `aprovar`: nenhuma delas chega ao
-estado "aguardando aprovação" (`gui/protocolo.c` recusa `aprovar` localmente,
-mesmo que tentasse). O campo de texto livre continua inerte (rascunho local,
-nunca enviado) — ele não corresponde a nenhum pedido estruturado do manifesto.
+A GUI pode enviar `solicitar` para as ferramentas locais de risco nenhum
+(seletor + botão "Solicitar" na janela). Ela não envia `aprovar`, portanto
+`web.pesquisar` deve ser usado pelo `lia-chat`, que mostra a consulta e pede a
+confirmação antes de acessar a internet. O campo de texto livre continua
+inerte (rascunho local, nunca enviado).
 
 ## Daemon de sessão (`lia-sessiond`, protocolo completo)
 
 `sessiond/` implementa o outro lado do protocolo: um servidor de socket Unix
 e máquina de estados, com um executor plugável
 (`sessiond/executor.h`). **Padrão em produção: o executor real**
-(`sessiond/executor_real.c`/`sessiond/manifesto_real.c`), limitado às oito
-ferramentas de leitura já existentes na CLI (`tools.discover/list/probe`,
+(`sessiond/executor_real.c`/`sessiond/manifesto_real.c`), com oito ferramentas
+locais de leitura (`tools.discover/list/probe`,
 `sistema.diagnosticar/recursos/dispositivos`, nenhuma delas grava nada — ver
 [docs/manifesto.md](docs/manifesto.md) §3) mais duas ações explícitas de
 persistência (`tools.discover.persistir`/`tools.probe.persistir`, `risco:
-baixo`, sempre com aprovação — §6.1) — nenhuma ferramenta de escrita fora do
-espaço de trabalho da própria Lia, nem privilégio, é alcançável.
+baixo`, sempre com aprovação — §6.1) e `web.pesquisar`, que acessa um buscador
+HTTPS externo e sempre exige aprovação. A pesquisa não grava nada, mas a
+consulta sai da máquina; nenhuma ferramenta de escrita fora do espaço de
+trabalho da própria Lia, nem privilégio, é alcançável.
 `LIA_SESSIOND_EXECUTOR=mock` troca para um executor
 inteiramente simulado, só para os testes unitários do protocolo (aprovação,
 replay, cancelamento, risco admin) — nunca o padrão
@@ -124,9 +125,14 @@ lia> /plano
 ```
 
 Mais rápido e sempre isolado do `~/.lia` real: `sh chat/rodar_local.sh`
-(compila, inicia o daemon num `$HOME` de teste e abre `lia-chat`, tudo
+(reutiliza os binários precompilados quando já existem, inicia o daemon num `$HOME` de teste e abre `lia-chat`, tudo
 num terminal — ver [docs/LIA-CLI.md](docs/LIA-CLI.md) para detalhes e a
 variante com executor mock).
+
+Use `LIA_CHAT_REBUILD=always` para recompilar explicitamente ou
+`LIA_CHAT_REBUILD=never` para exigir que os binários precompilados já existam.
+Pedidos de pesquisa, cotação e notícias usam `web.pesquisar`: a consulta é
+mostrada e precisa de aprovação antes de sair da máquina por HTTPS.
 
 Pode enviar `aprovar` (é o próprio ponto desta CLI, diferente da GUI) —
 mas o padrão para qualquer plano pendente é sempre **rejeitar**: só uma

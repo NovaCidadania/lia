@@ -238,6 +238,24 @@ static void render_dispositivos(GString *out, JsonArray *arr)
         g_string_append(out, "Nenhum dispositivo encontrado nesta classe.\n");
 }
 
+static void render_web(GString *out, JsonObject *d)
+{
+    g_string_append_printf(out, "Pesquisa web para: %s\n", texto(d, "consulta", "(sem consulta)"));
+    g_string_append_printf(out, "Fonte: %s\n", texto(d, "fonte", "desconhecida"));
+    JsonArray *arr = lista(d, "resultados");
+    guint n = arr ? json_array_get_length(arr) : 0;
+    for (guint i = 0; i < n; i++) {
+        JsonNode *el = json_array_get_element(arr, i);
+        if (JSON_NODE_TYPE(el) != JSON_NODE_OBJECT) continue;
+        JsonObject *o = json_node_get_object(el);
+        g_string_append_printf(out, "%u. %s\n   %s\n   %s\n", i + 1,
+                               texto(o, "titulo", "(sem título)"),
+                               texto(o, "url", "(sem URL)"),
+                               texto(o, "resumo", ""));
+    }
+    if (n == 0) g_string_append(out, "Nenhum resultado estruturado foi encontrado.\n");
+}
+
 static void render_generico(GString *out, JsonNode *n)
 {
     JsonGenerator *gen = json_generator_new();
@@ -278,6 +296,8 @@ char *apresentacao_renderizar(const char *ferramenta, const char *dados_json, gb
             render_diagnosticar(out, json_node_get_object(carga));
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_ARRAY && strcmp(f, "sistema.dispositivos") == 0)
             render_dispositivos(out, json_node_get_array(carga));
+        else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT && strcmp(f, "web.pesquisar") == 0)
+            render_web(out, json_node_get_object(carga));
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_VALUE && json_node_get_value_type(carga) == G_TYPE_STRING) {
             for (const char *q = json_node_get_string(carga); *q; q++) /* texto humano da ferramenta: tira controle, mantém \n e \t */
                 g_string_append_c(out, ((unsigned char)*q < 0x20 && *q != '\n' && *q != '\t') || *q == 0x7f ? '?' : *q);
@@ -615,6 +635,8 @@ RespostaModo apresentacao_modo_resposta(const char *ferramenta)
 {
     const char *f = ferramenta ? ferramenta : "";
     if (e_ranking(f) || strcmp(f, "sistema.dispositivos") == 0)
+        return RESPOSTA_DETERMINISTICA;
+    if (strcmp(f, "web.pesquisar") == 0)
         return RESPOSTA_DETERMINISTICA;
     if (strcmp(f, "sistema.recursos") == 0 || strcmp(f, "sistema.diagnosticar") == 0)
         return RESPOSTA_EXTRATIVA;

@@ -149,8 +149,18 @@ esac
 mkdir -p "$TEST_HOME"
 SOCK="$TEST_HOME/.lia/run/session.sock"
 
-echo "compilando (make chat sessiond)..."
-(cd "$RAIZ" && make chat sessiond) || exit 1
+REBUILD="${LIA_CHAT_REBUILD:-auto}"
+case "$REBUILD" in auto|always|never) : ;; *) echo "LIA_CHAT_REBUILD deve ser auto, always ou never" >&2; exit 2 ;; esac
+if [ "$REBUILD" = always ] || [ ! -x "$RAIZ/build/lia-chat" ] || [ ! -x "$RAIZ/build/lia-sessiond" ]; then
+    if [ "$REBUILD" = never ]; then
+        echo "binários precompilados ausentes; execute make chat sessiond ou remova LIA_CHAT_REBUILD=never" >&2
+        exit 1
+    fi
+    echo "binários ausentes/desatualização solicitada: compilando (make chat sessiond)..."
+    (cd "$RAIZ" && make chat sessiond) || exit 1
+else
+    echo "usando binários precompilados: build/lia-chat e build/lia-sessiond"
+fi
 
 echo "HOME de teste: $TEST_HOME (executor=$EXECUTOR, modelo=$MODELO, log em $TEST_HOME/sessiond.log)"
 ENV_EXECUTOR=""

@@ -3,6 +3,7 @@
 
 static const char *const CAP_LEITURA_PROCESSO[] = { "leitura_arquivo", "processo", NULL };
 static const char *const CAP_LEITURA[] = { "leitura_arquivo", NULL };
+static const char *const CAP_REDE[] = { "rede", NULL };
 
 static const char *const ESTADOS_TOOLS[] = {
     "DISCOVERED", "ACCESSIBLE", "PROBE_SUCCESS", "PROBE_FAILED",
@@ -20,6 +21,12 @@ static const ParametroManifesto PARAM_PROBE[] = {
 };
 
 static const ParametroManifesto PARAM_VAZIO[] = {
+    { .nome = NULL },
+};
+
+static const ParametroManifesto PARAM_WEB_PESQUISAR[] = {
+    { .nome = "consulta", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "limite", .tipo = PARAM_INTEIRO, .obrigatorio = FALSE, .min = 1, .max = 10 },
     { .nome = NULL },
 };
 
@@ -194,6 +201,18 @@ static const ManifestoReal TABELA[] = {
             .somente_leitura = TRUE, .uso = "processos que mais usam memória RAM agora; parâmetro opcional limite (1 a 100, padrão 10)",
         },
         .parametros = PARAM_PROCESSOS_TOP_MEMORIA,
+    },
+    {
+        .base = {
+            .nome = "web.pesquisar", .risco = "baixo", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = TRUE,
+            .reversivel = "nao_aplicavel", .capacidades = CAP_REDE,
+            .efeitos = "envia a consulta a um mecanismo de busca HTTPS externo; não grava dados e limita resposta e tempo",
+            .timeout_padrao_ms = 20000,
+            .somente_leitura = FALSE,
+            .uso = "pesquisar na internet e devolver títulos e URLs; a consulta sai da máquina e exige aprovação",
+        },
+        .parametros = PARAM_WEB_PESQUISAR,
     },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))

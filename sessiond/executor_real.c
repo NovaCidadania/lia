@@ -22,6 +22,7 @@
 #include "manifesto_real.h"
 #include "../runtime/lia.h"
 #include "../cli/cli.h"
+#include "../web/pesquisa.h"
 
 #include <string.h>
 
@@ -202,6 +203,26 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
             r->erro_mensagem = lia_err.n > 0 ? g_strndup(lia_err.p, lia_err.n) : g_strdup("/proc indisponível");
             return;
         }
+    } else if (strcmp(m->base.nome, "web.pesquisar") == 0) {
+        const char *consulta = campo_str(parametros, "consulta");
+        gint64 limite = 5;
+        if (parametros && json_object_has_member(parametros, "limite")) {
+            JsonNode *n = json_object_get_member(parametros, "limite");
+            if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_INT64)
+                limite = json_node_get_int(n);
+        }
+        char *erro_web = NULL;
+        char *dados_web = lia_web_pesquisar(consulta, (int)limite, &erro_web);
+        if (!dados_web) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("rede_indisponivel");
+            r->erro_mensagem = erro_web ? erro_web : g_strdup("pesquisa web indisponível");
+            return;
+        }
+        r->sucesso = TRUE;
+        r->codigo_saida = 0;
+        r->dados_json = dados_web;
+        return;
     } else {
         r->sucesso = FALSE;
         r->erro_codigo = g_strdup("ferramenta_desconhecida");
@@ -227,7 +248,7 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
      * subcomandos) — envolvemos texto humano numa string JSON para que
      * 'dados' seja sempre JSON válido. */
     const char *nome = m->base.nome;
-    gboolean ja_e_json = strcmp(nome, "tools.list") == 0 || strncmp(nome, "sistema.", 8) == 0;
+    gboolean ja_e_json = strcmp(nome, "tools.list") == 0 || strcmp(nome, "web.pesquisar") == 0 || strncmp(nome, "sistema.", 8) == 0;
     if (ja_e_json) {
         char *saida = g_strndup(lia_out.p, lia_out.n);
         r->dados_json = g_strdup_printf("{\"saida\":%s}", saida);

@@ -790,7 +790,7 @@ static gboolean capacidades_permitidas(const ExecutorManifesto *mf)
     if (!g_executor->restringe_a_leitura)
         return TRUE;
     for (int i = 0; mf->capacidades[i]; i++)
-        if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0)
+        if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0 && strcmp(mf->capacidades[i], "rede") != 0)
             return FALSE;
     return TRUE;
 }
@@ -832,7 +832,7 @@ static gboolean execucao_automatica_permitida(const ExecutorManifesto *mf)
     if (!mf || !mf->somente_leitura || mf->requer_aprovacao || strcmp(mf->risco, "nenhum") != 0)
         return FALSE;
     for (int i = 0; mf->capacidades[i]; i++)
-        if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0)
+        if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0 && strcmp(mf->capacidades[i], "rede") != 0)
             return FALSE;
     return TRUE;
 }
@@ -2367,7 +2367,7 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
     if (g_executor->restringe_a_leitura) {
         for (int i = 0; mf->capacidades[i]; i++) {
             const char *cap = mf->capacidades[i];
-            if (strcmp(cap, "leitura_arquivo") != 0 && strcmp(cap, "processo") != 0) {
+            if (strcmp(cap, "leitura_arquivo") != 0 && strcmp(cap, "processo") != 0 && strcmp(cap, "rede") != 0) {
                 enviar_erro(c, m->id, "capacidade_negada", cap);
                 return;
             }
@@ -2841,7 +2841,7 @@ static void escolher_executor(void)
         g_print("lia-sessiond: executor = mock (LIA_SESSIOND_EXECUTOR=mock) — NUNCA o padrão em produção\n");
     } else {
         g_executor = executor_real_obter();
-        g_print("lia-sessiond: executor = real (oito ferramentas de leitura + duas de persistência explícita, docs/manifesto.md)\n");
+        g_print("lia-sessiond: executor = real (oito ferramentas locais + web.pesquisar + duas de persistência explícita, docs/manifesto.md)\n");
     }
 }
 

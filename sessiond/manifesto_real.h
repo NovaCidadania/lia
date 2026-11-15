@@ -1,6 +1,6 @@
-/* lia-sessiond — manifesto real das seis ferramentas de leitura permitidas
+/* lia-sessiond — manifesto real das ferramentas reais permitidas
  * nesta etapa (docs/manifesto.md). Nenhuma delas tem `risco` acima de
- * `nenhum`: todas são somente leitura, sem efeito observável fora do
+ * `nenhum`: as ferramentas locais são somente leitura, sem efeito observável fora do
  * processo, e por isso `requer_aprovacao = false` em todas — a única
  * exceção concedida nesta etapa a "nunca executar comandos externos" é
  * `tools.probe`, que executa o catálogo de probes seguros já existente em
