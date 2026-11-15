@@ -88,7 +88,10 @@ parar_fake_ollama() { [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null; wait "
 abrir_chat() {
     rm -f "$HOME_T/chat.in"; mkfifo "$HOME_T/chat.in"
     : > "$HOME_T/chat.out"
-    env HOME="$HOME_T" "$CHAT" "$@" < "$HOME_T/chat.in" > "$HOME_T/chat.out" 2>&1 &
+    # AUTOPILOT_CHAT: as seções A–G (anteriores ao fluxo agente) testam o
+    # caminho manual (/plano, /aprovar...), então rodam com "manual"; a
+    # seção H exporta AUTOPILOT_CHAT=read-only (o padrão de produção).
+    env HOME="$HOME_T" LIA_CHAT_AUTOPILOT="${AUTOPILOT_CHAT:-manual}" "$CHAT" "$@" < "$HOME_T/chat.in" > "$HOME_T/chat.out" 2>&1 &
     CHAT_PID=$!
     exec 5> "$HOME_T/chat.in"
     i=0
@@ -435,6 +438,89 @@ enviar_chat "/sair"
 fechar_chat
 
 parar_daemon
+
+# ========================================================================
+# H — piloto automático (LIA_CHAT_AUTOPILOT, docs/protocolo.md §10): leitura
+# pura segue sozinha até a resposta final; escrita/admin param em confirmação
+# ========================================================================
+AUTOPILOT_CHAT=read-only
+iniciar_daemon_mock
+
+echo "== H1. leitura pura: proposta -> execução -> resultado -> resposta final, sem /plano =="
+abrir_chat
+aguardar "$HOME_T/chat.out" "piloto automático: read-only" && ok "H1: o chat anuncia a política ativa" || ko "H1: política não anunciada"
+enviar_chat "MOCK_PROPOR:mock.leitura"
+aguardar "$HOME_T/chat.out" "ferramenta selecionada: mock.leitura" && ok "H1: ferramenta de leitura selecionada automaticamente" || ko "H1: não selecionou"
+aguardar "$HOME_T/chat.out" "[resultado] estado=sucesso" && ok "H1: executou sem nenhum comando da pessoa" || ko "H1: não executou sozinha"
+aguardar "$HOME_T/chat.out" "[modelo, resumo]" && ok "H1: resposta final recebida" || ko "H1: sem resposta final"
+aguardar "$HOME_T/chat.out" "[concluído] total=" && ok "H1: turno concluído com os tempos de cada etapa" || ko "H1: sem linha de conclusão"
+grep -q "ferramenta sugerida" "$HOME_T/chat.out" && ko "H1: pediu /plano para uma leitura pura" || ok "H1: nenhum pedido de confirmação para leitura pura"
+enviar_chat "/status"
+aguardar "$HOME_T/chat.out" "piloto automático: read-only" && ok "H1: /status mostra a política" || ko "H1: /status sem política"
+enviar_chat "/sair"
+fechar_chat
+
+echo "== H2. ferramenta de ESCRITA (risco médio): nunca automática; com /plano ainda para em aprovação =="
+abrir_chat
+enviar_chat "MOCK_PROPOR:mock.escrita"
+aguardar "$HOME_T/chat.out" "ferramenta sugerida: mock.escrita" && ok "H2: escrita fica só como sugestão" || ko "H2: sem sugestão"
+nao_aparece "$HOME_T/chat.out" "Plano pendente" "8" && ok "H2: nenhum plano solicitado automaticamente para escrita" || ko "H2: plano de escrita solicitado sozinho"
+nao_aparece "$HOME_T/chat.out" "[resultado]" "3" && ok "H2: nada executou" || ko "H2: escrita executou sem aprovação"
+enviar_chat "/plano"
+aguardar "$HOME_T/chat.out" "Aprovar este plano? [s/N]" && ok "H2: com /plano, o daemon exige aprovação explícita" || ko "H2: sem pedido de aprovação"
+enviar_chat ""
+enviar_chat "qualquer coisa"
+aguardar "$HOME_T/chat.out" "rejeição enviado" && ok "H2: padrão continua sendo rejeitar" || ko "H2: não rejeitou por padrão"
+nao_aparece "$HOME_T/chat.out" "estado=sucesso" "5" && ok "H2: a escrita não rodou" || ko "H2: a escrita rodou"
+enviar_chat "/sair"
+fechar_chat
+
+echo "== H3. ferramenta ADMINISTRATIVA: nunca automática =="
+abrir_chat
+enviar_chat "MOCK_PROPOR:mock.admin"
+aguardar "$HOME_T/chat.out" "ferramenta sugerida: mock.admin" && ok "H3: admin fica só como sugestão" || ko "H3: sem sugestão"
+nao_aparece "$HOME_T/chat.out" "Plano pendente" "8" && ok "H3: nenhum plano administrativo solicitado automaticamente" || ko "H3: plano admin solicitado sozinho"
+enviar_chat "/sair"
+fechar_chat
+
+echo "== H4. /autopilot manual em tempo de execução; valor inexistente é recusado =="
+abrir_chat
+enviar_chat "/autopilot manual"
+aguardar "$HOME_T/chat.out" "piloto automático: manual" && ok "H4: /autopilot manual aceito" || ko "H4: /autopilot manual"
+enviar_chat "MOCK_PROPOR:mock.leitura"
+aguardar "$HOME_T/chat.out" "ferramenta sugerida: mock.leitura" && ok "H4: em manual, leitura pura também espera /plano" || ko "H4: manual não respeitado"
+nao_aparece "$HOME_T/chat.out" "[resultado]" "5" && ok "H4: nada executou em manual" || ko "H4: executou em manual"
+enviar_chat "/autopilot admin"
+aguardar "$HOME_T/chat.out" "nenhum outro valor existe" && ok "H4: /autopilot com valor inexistente é recusado" || ko "H4: valor inexistente aceito"
+enviar_chat "/sair"
+fechar_chat
+
+echo "== H5. LIA_CHAT_AUTOPILOT desconhecido -> recusa iniciar (código 2), sem conectar =="
+env HOME="$HOME_T" LIA_CHAT_AUTOPILOT=sim "$CHAT" < /dev/null > "$HOME_T/ap.out" 2>&1
+[ $? -eq 2 ] && ok "H5: valor desconhecido -> código 2" || ko "H5: código inesperado"
+grep -q "Recusando iniciar" "$HOME_T/ap.out" && ! grep -q "conectado a" "$HOME_T/ap.out" && ok "H5: falha segura, com explicação, antes de conectar" || ko "H5: não falhou de forma segura"
+env HOME="$HOME_T" LIA_CHAT_AUTOPILOT=manual "$CHAT" < /dev/null > "$HOME_T/ap.out" 2>&1
+[ $? -eq 0 ] && grep -q "piloto automático: manual" "$HOME_T/ap.out" && ok "H5: LIA_CHAT_AUTOPILOT=manual aceito" || ko "H5: manual recusado"
+parar_daemon
+
+echo "== H6. /cancelar cancela de verdade a pergunta ao modelo (modelo lento) =="
+iniciar_fake_ollama lento
+iniciar_daemon_mock LIA_SESSIOND_MODELO=ollama LIA_OLLAMA_PORTA="$FAKE_PORT"
+abrir_chat
+enviar_chat "pergunta lenta"
+aguardar "$HOME_T/chat.out" "pergunta enviada" || ko "H6: pergunta não enviada"
+sleep 0.5
+enviar_chat "/cancelar"
+aguardar "$HOME_T/chat.out" "cancelamento da pergunta ao modelo enviado" && ok "H6: /cancelar envia o cancelamento da pergunta" || ko "H6: sem cancelamento"
+aguardar "$HOME_T/chat.out" "[erro] cancelado" "30" && ok "H6: o daemon confirma o cancelamento" || ko "H6: sem confirmação do daemon"
+nao_aparece "$HOME_T/chat.out" "[modelo]" "70" && ok "H6: nenhuma resposta atrasada depois de cancelar" || ko "H6: resposta chegou depois de cancelada"
+enviar_chat "/cancelar"
+aguardar "$HOME_T/chat.out" "nada para cancelar" && ok "H6: depois de cancelar, não há mais nada pendente" || ko "H6: estado local travado"
+enviar_chat "/sair"
+fechar_chat
+parar_daemon
+parar_fake_ollama
+unset AUTOPILOT_CHAT
 
 # ========================================================================
 # G — segurança/ausência de chamadas perigosas, isolamento

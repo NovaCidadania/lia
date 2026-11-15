@@ -390,6 +390,107 @@ static void teste_calcular_ncpus_ou_elapsed_zero(void)
     checar(lia_proc_calcular_cpu(antes, 1, depois, 1, 0, 1, out, 2) == 0, "calcular: elapsed_ms=0 -> 0 resultados, nunca divide por zero");
 }
 
+/* ------------------------------ sistema.processos_top_memoria --- */
+
+/* Cria "<g_subraiz>/<pid>/status" com o texto dado (formato do kernel,
+ * ou malformado de propósito). */
+static void criar_status(const char *pid_str, const char *conteudo)
+{
+    char dirp[256], sp[256];
+    caminho(dirp, sizeof dirp, pid_str, "");
+    lia_mkdirat(AT_FDCWD, dirp, 0700);
+    caminho(sp, sizeof sp, pid_str, "status");
+    escrever_arquivo(sp, conteudo);
+}
+
+static const LiaProcMem *achar_mem(const LiaProcMem *v, long n, u32 pid)
+{
+    for (long i = 0; i < n; i++)
+        if (v[i].pid == pid)
+            return &v[i];
+    return NULL;
+}
+
+static void teste_memoria_coletar_basico(void)
+{
+    nova_subraiz("mem_basico");
+    criar_status("100", "Name:\tnavegador\nUmask:\t0022\nState:\tS (sleeping)\nPid:\t100\nVmPeak:\t  900000 kB\nVmRSS:\t  512000 kB\nThreads:\t4\n");
+    criar_status("200", "Name:\teditor\nState:\tR (running)\nVmRSS:\t    2048 kB\n");
+    criar_status("2", "Name:\tkthreadd\nState:\tS (sleeping)\nPid:\t2\nThreads:\t1\n"); /* thread de kernel: sem VmRSS */
+    criar_status("abc", "Name:\tnao_e_pid\nState:\tS (sleeping)\nVmRSS:\t 1 kB\n");
+    criar_status("300", "isto não é um status de verdade\n");
+    criar_status("400", "Name:\tquebrado\nState:\tS (sleeping)\nVmRSS:\t   abc kB\n");
+    /* 500: diretório de PID sem arquivo status — processo que desapareceu durante a leitura */
+    char dirp[256];
+    caminho(dirp, sizeof dirp, "500", "");
+    lia_mkdirat(AT_FDCWD, dirp, 0700);
+    /* arquivos que NUNCA devem ser lidos: se fossem, o "segredo" apareceria no nome */
+    char envp_[256], cmdp[256];
+    caminho(envp_, sizeof envp_, "100", "environ");
+    escrever_arquivo(envp_, "TOKEN=segredo-que-nunca-pode-vazar");
+    caminho(cmdp, sizeof cmdp, "100", "cmdline");
+    escrever_arquivo(cmdp, "navegador --senha=segredo-que-nunca-pode-vazar");
+
+    LiaProcMem m[16];
+    u64 sem = 99;
+    long n = lia_proc_coletar_memoria(g_subraiz, m, 16, &sem);
+    checar(n == 2, "memória/coletar: só os dois processos com VmRSS válido entram");
+    checar(sem == 1, "memória/coletar: thread de kernel (sem VmRSS) é contada à parte, não listada");
+    const LiaProcMem *a = achar_mem(m, n, 100), *b = achar_mem(m, n, 200);
+    checar(a && !lia_strcmp(a->nome, "navegador"), "memória/coletar: Name extraído");
+    checar(a && a->estado == 'S', "memória/coletar: State extraído (primeira letra)");
+    checar(a && a->rss_kb == 512000, "memória/coletar: VmRSS em kB (não confunde com VmPeak)");
+    checar(b && b->rss_kb == 2048 && b->estado == 'R', "memória/coletar: segundo processo correto");
+    checar(!achar_mem(m, n, 300) && !achar_mem(m, n, 400) && !achar_mem(m, n, 500),
+           "memória/coletar: status malformado, VmRSS não numérico e processo desaparecido são ignorados sem falhar");
+    int vazou = 0;
+    for (long i = 0; i < n; i++)
+        for (const char *q = m[i].nome; *q; q++)
+            if (!lia_strncmp(q, "segredo", 7))
+                vazou = 1;
+    checar(!vazou, "memória/coletar: nunca lê environ/cmdline (segredo plantado não aparece)");
+}
+
+static void teste_memoria_nome_longo_truncado(void)
+{
+    nova_subraiz("mem_nome");
+    criar_status("7", "Name:\tum_nome_de_processo_absurdamente_longo_que_passa_do_limite_do_campo\nState:\tS (sleeping)\nVmRSS:\t 10 kB\n");
+    LiaProcMem m[2];
+    long n = lia_proc_coletar_memoria(g_subraiz, m, 2, 0);
+    checar(n == 1 && lia_strlen(m[0].nome) == LIA_PROC_NOME_MAX - 1, "memória/coletar: nome longo truncado com segurança (sem transbordar)");
+}
+
+static void teste_memoria_raiz_inexistente_e_max(void)
+{
+    LiaProcMem m[4];
+    checar(lia_proc_coletar_memoria("/caminho/que/nao/existe/mesmo", m, 4, 0) == -1, "memória/coletar: raiz inexistente -> -1");
+    nova_subraiz("mem_max");
+    criar_status("1", "Name:\ta\nState:\tS (sleeping)\nVmRSS:\t 1 kB\n");
+    criar_status("2", "Name:\tb\nState:\tS (sleeping)\nVmRSS:\t 2 kB\n");
+    criar_status("3", "Name:\tc\nState:\tS (sleeping)\nVmRSS:\t 3 kB\n");
+    checar(lia_proc_coletar_memoria(g_subraiz, m, 2, 0) == 2, "memória/coletar: respeita 'max' (excesso descartado)");
+}
+
+static void teste_memoria_ordenar(void)
+{
+    LiaProcMem v[4];
+    memset(v, 0, sizeof v);
+    v[0].pid = 30; v[0].rss_kb = 1000;
+    v[1].pid = 10; v[1].rss_kb = 4000;
+    v[2].pid = 20; v[2].rss_kb = 1000;
+    v[3].pid = 40; v[3].rss_kb = 0;
+    lia_proc_ordenar_memoria(v, 4, 16000);
+    checar(v[0].pid == 10 && v[1].pid == 20 && v[2].pid == 30 && v[3].pid == 40,
+           "memória/ordenar: RSS decrescente, empate por pid crescente");
+    checar(v[0].mem_centesimos == 2500, "memória/ordenar: 4000 kB de 16000 kB = 25,00%");
+    checar(v[1].mem_centesimos == 625, "memória/ordenar: 1000 kB de 16000 kB = 6,25%");
+    checar(v[3].mem_centesimos == 0, "memória/ordenar: RSS zero = 0,00%");
+    lia_proc_ordenar_memoria(v, 4, 0);
+    checar(v[0].mem_centesimos == 0, "memória/ordenar: MemTotal zero nunca divide por zero (percentual 0)");
+    v[0].rss_kb = 1; lia_proc_ordenar_memoria(v, 1, 3);
+    checar(v[0].mem_centesimos == 3333, "memória/ordenar: arredonda (1/3 = 33,33%)");
+}
+
 long lia_main(long argc, char **argv, char **envp)
 {
     (void)argc; (void)envp;
@@ -426,6 +527,10 @@ long lia_main(long argc, char **argv, char **envp)
     teste_calcular_ordena_decrescente();
     teste_calcular_max_respeitado();
     teste_calcular_ncpus_ou_elapsed_zero();
+    teste_memoria_coletar_basico();
+    teste_memoria_nome_longo_truncado();
+    teste_memoria_raiz_inexistente_e_max();
+    teste_memoria_ordenar();
 
     b_c(&g_out, '\n');
     b_s(&g_out, "lia-processos-teste: "); b_u(&g_out, (u64)g_total); b_s(&g_out, " testes internos, ");

@@ -20,22 +20,33 @@
  * altera um plano recebido: envia de volta exatamente o plano_id que
  * recebeu, sem reconstruir nada.
  *
- * Edição de linha no terminal (setas, histórico, Ctrl-A/E/K/W, etc.) via
- * libedit (BSD, API compatível com GNU readline) — nunca GNU readline em
- * si: a licença do próprio projeto Lia ainda está em aberto (PLANO.md
- * §8), e readline é GPL (contaminaria a licença do binário inteiro se
- * distribuído); libedit é BSD, sem essa amarra. Histórico só em memória
- * desta sessão — nunca gravado em disco por padrão (uma linha de chat
- * pode conter o que quer que a pessoa tenha digitado; persistir isso
- * sem política own seria o mesmo erro que o projeto já evita para
- * ~/.lia/humano/memoria — origem/confiança/versão explícitos antes de
- * guardar qualquer coisa).
+ * Fluxo agente (docs/protocolo.md §10): uma pergunta segue, sem parar,
+ *   pergunta -> proposta validada pelo daemon -> execução -> dados reais
+ *            -> resposta final
+ * quando — e só quando — o DAEMON marca a proposta como leitura pura
+ * (validacao.execucao_automatica_permitida). O que este cliente faz nesse
+ * caso é enviar o mesmo 'solicitar' que /plano enviaria; quem valida,
+ * planeja e executa continua sendo o daemon (lia-chat não tem executor).
+ * Política: LIA_CHAT_AUTOPILOT=read-only (padrão) ou =manual (toda
+ * ferramenta exige /plano); qualquer outro valor recusa iniciar. Nada que
+ * grave, administre ou toque hardware roda sem aprovação explícita, com
+ * qualquer valor dessa variável.
+ *
+ * Terminal interativo: chat/terminal.c é o dono único do desenho —
+ * histórico acima, linha de status (fase atual, indicador de atividade,
+ * tempo decorrido) e uma linha de entrada única embaixo. Editor de linha
+ * próprio (UTF-8, setas, histórico só em memória, colagem); nenhuma
+ * biblioteca de readline. Histórico nunca é gravado em disco (uma linha
+ * de chat pode conter qualquer coisa que a pessoa tenha digitado).
+ * A linha de status mostra apenas estados operacionais observáveis
+ * (consultando modelo, executando leitura...) — nunca texto de raciocínio
+ * do modelo.
  */
 #define _DEFAULT_SOURCE
 #include "../gui/protocolo.h"
 #include "../sessiond/modelo.h"
 #include "../sessiond/prompt.h"
-#include <editline/readline.h>
+#include "terminal.h"
 #include <gio/gio.h>
 #include <gio/gunixinputstream.h>
 #include <gio/gunixsocketaddress.h>
@@ -90,8 +101,8 @@ typedef struct {
     GOutputStream *saida;
     GDataInputStream *entrada_socket;
     GDataInputStream *entrada_stdin; /* só usado quando !interativo (ver main()) */
-    gboolean readline_ativo; /* true depois de rl_callback_handler_install (edição de linha real) */
-    GString *buffer_saida;  /* ver flush_saida(): nunca chama o salva/redesenha do libedit mais de uma vez por "turno" */
+    Term *term;             /* != NULL só no modo interativo humano (tty e sem --json): chat/terminal.c */
+    GString *buffer_saida;  /* saida_linha acumula; flush_saida escreve tudo de uma vez acima da região viva */
     GMainLoop *loop;
 
     char *socket_caminho;
@@ -129,77 +140,31 @@ typedef struct {
     int codigo_saida;
     gboolean deve_sair;
 
-    /* true só entre "ao_linha_completa acabou de aceitar uma linha" e o
-     * flush_saida() correspondente — ver o comentário grande em
-     * ao_linha_completa sobre por que isto precisa reinstalar o
-     * manipulador de callback em vez de só redesenhar. */
-    gboolean reinstalar_prompt_apos_flush;
+    /* ---- fluxo agente ---- */
+    gboolean autopilot;            /* LIA_CHAT_AUTOPILOT: TRUE = read-only (padrão), FALSE = manual */
+    int fase;                      /* Fase: o que a linha de status mostra */
+    gboolean turno_espera_resposta;/* a execução atual veio de uma proposta: um 'resposta' final ainda vai chegar */
+    char *ferramenta_turno;        /* ferramenta do turno atual (para a linha de status) */
+    gint64 turno_inicio_us;        /* pergunta enviada */
+    gint64 t_proposta_ms, t_execucao_ms, t_resposta_ms; /* tempos informados pelo daemon; -1 = etapa não ocorreu */
+    char *ultimo_dados_json;       /* JSON bruto do último resultado (/dados) */
 } LiaChat;
+
+typedef enum {
+    FASE_OCIOSO = 0,
+    FASE_CONSULTANDO_MODELO,
+    FASE_VALIDANDO_PLANO,
+    FASE_AGUARDANDO_APROVACAO,
+    FASE_EXECUTANDO,
+    FASE_GERANDO_RESPOSTA,
+} Fase;
 
 /* --------------------------------------------------------- utilidades --- */
 
-static void ao_linha_completa(char *linha); /* definida mais abaixo; imprimir_sobre_readline() precisa reinstalá-la */
-
-/* Escreve 'texto' (sem \n final) por cima da linha de edição ativa do
- * libedit, sem perder o que a pessoa já tinha digitado — o padrão
- * documentado para saída assíncrona durante uma leitura em modo
- * callback (mesma receita do manual do GNU Readline, que libedit
- * também segue): esconde a linha atual, imprime, redesenha a linha e o
- * prompt exatamente como estavam. Só chamada quando readline_ativo. */
-static void imprimir_sobre_readline(LiaChat *c, const char *texto)
-{
-    /* NUNCA rl_save_prompt()/rl_restore_prompt()/rl_replace_line() aqui:
-     * nesta libedit, a partir da SEGUNDA chamada na mesma sessão (mesmo
-     * sem nenhuma edição real em andamento) elas corrompem o estado
-     * interno — setas param de recuperar histórico simples e caem em
-     * busca incremental ("bck:"), confirmado isolando o problema num
-     * programa mínimo até sobrar só essas três chamadas como causa.
-     * Durante uma edição real em andamento (pessoa digitando a próxima
-     * linha quando isto é chamado), rl_line_buffer/rl_point refletem o
-     * que já foi digitado corretamente — redesenhar com
-     * rl_on_new_line()+rl_forced_update_display() preserva isso sem
-     * precisar salvar/restaurar nada à mão. A limpeza do estado logo
-     * depois de uma linha ACEITA (Enter) é responsabilidade de quem
-     * aceitou a linha (ver ao_linha_completa) — nunca daqui.
-     *
-     * rl_crlf() aqui (em vez de só "\r\n" literal) ficava sem efeito
-     * logo depois de reinstalar o manipulador de callback (buffer vazio
-     * — parece que esta libedit decide não quebrar linha quando rl_end
-     * é 0), deixando o texto colado bem depois do "lia> " recém-escrito
-     * pela reinstalação. "\r\n" direto sempre quebra a linha, sem
-     * depender dessa heurística interna. */
-    fputs("\r\n", stdout);
-    fputs(texto, stdout);
-    fputc('\n', stdout);
-    if (c->reinstalar_prompt_apos_flush) {
-        /* Caminho usado só por ao_linha_completa, bem depois de aceitar
-         * uma linha: em vez de rl_on_new_line()+rl_forced_update_display()
-         * (que aqui redesenharia o prompt uma SEGUNDA vez, por cima do
-         * que a reinstalação abaixo já vai mostrar — uma linha "lia> "
-         * órfã sobrando no meio da saída), reinstala o manipulador de
-         * callback: única operação que de fato reseta o estado interno
-         * da linha nesta libedit (ver comentário grande em
-         * ao_linha_completa) e já imprime o prompt vazio certo, uma
-         * única vez. */
-        c->reinstalar_prompt_apos_flush = FALSE;
-        rl_callback_handler_remove();
-        rl_callback_handler_install(c->modo_json ? "" : "lia> ", ao_linha_completa);
-    } else {
-        rl_on_new_line();
-        rl_forced_update_display();
-    }
-}
-
-/* saida_linha só ACUMULA — nunca chama imprimir_sobre_readline()
- * diretamente. Chamar o salva-prompt/redesenha do libedit várias vezes
- * em sequência rápida (uma por linha de uma resposta de várias linhas,
- * como /status) corrompe o estado interno dele e quebra o
- * reconhecimento de sequência de escape nas teclas seguintes (setas
- * param de recuperar o histórico simples e entram em busca incremental,
- * com um prompt "bck:" — comportamento confirmado isolando o problema
- * num programa mínimo). flush_saida(), chamada uma vez por "turno"
- * (depois de uma linha completa processada, ou de uma mensagem do
- * daemon), é o único lugar que de fato escreve na tela. */
+/* saida_linha só ACUMULA; flush_saida(), chamada uma vez por "turno"
+ * (depois de uma linha processada, ou de uma mensagem do daemon), escreve
+ * tudo de uma vez: no terminal interativo, acima da região viva
+ * (term_imprimir — nunca sobre a linha de entrada); fora dele, em stdout. */
 static void saida_linha(LiaChat *c, const char *fmt, ...)
 {
     if (c->modo_json) return; /* --json: só NDJSON cru vai para stdout */
@@ -219,14 +184,101 @@ static void flush_saida(LiaChat *c)
     if (c->buffer_saida->len == 0) return;
     if (c->buffer_saida->str[c->buffer_saida->len - 1] == '\n')
         g_string_truncate(c->buffer_saida, c->buffer_saida->len - 1);
-    if (c->readline_ativo) {
-        imprimir_sobre_readline(c, c->buffer_saida->str);
+    if (c->term) {
+        term_imprimir(c->term, c->buffer_saida->str);
     } else {
         fputs(c->buffer_saida->str, stdout);
         fputc('\n', stdout);
         fflush(stdout);
     }
     g_string_truncate(c->buffer_saida, 0);
+}
+
+/* ---- estilo: só no terminal interativo com cor; fora dele, texto puro ---- */
+typedef enum { EST_NORMAL, EST_FRACO, EST_OK, EST_ERRO, EST_AVISO, EST_FORTE } Estilo;
+
+static const char *sgr(LiaChat *c, Estilo e)
+{
+    if (!c->term || !term_tem_cor(c->term)) return "";
+    switch (e) {
+    case EST_FRACO: return "\033[2m";
+    case EST_OK: return "\033[32m";
+    case EST_ERRO: return "\033[31m";
+    case EST_AVISO: return "\033[33m";
+    case EST_FORTE: return "\033[1m";
+    default: return "";
+    }
+}
+static const char *sgr0(LiaChat *c) { return c->term && term_tem_cor(c->term) ? "\033[0m" : ""; }
+
+/* texto vindo do daemon/modelo/sistema nunca leva caractere de controle ao
+ * terminal (ESC de um nome de processo, de um texto de modelo...): só
+ * '\n' e '\t' passam. Devolve cópia (g_free). */
+static char *sanear(const char *s)
+{
+    GString *out = g_string_new(NULL);
+    for (const char *p = s ? s : ""; *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+        if ((ch < 0x20 && ch != '\n' && ch != '\t') || ch == 0x7f) g_string_append_c(out, '?');
+        else g_string_append_c(out, (char)ch);
+    }
+    return g_string_free(out, FALSE);
+}
+
+/* ---- fase atual -> linha de status (só estados operacionais observáveis) ---- */
+static void definir_fase(LiaChat *c, Fase f)
+{
+    gboolean continua = c->fase != FASE_OCIOSO && f != FASE_OCIOSO; /* mesmo turno: o relógio não reinicia */
+    c->fase = f;
+    if (!c->term) return;
+    char *txt = NULL;
+    switch (f) {
+    case FASE_CONSULTANDO_MODELO: txt = g_strdup("consultando modelo"); break;
+    case FASE_VALIDANDO_PLANO: txt = g_strdup_printf("validando plano%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
+    case FASE_AGUARDANDO_APROVACAO: txt = g_strdup_printf("aguardando aprovação%s%s — responda s ou n", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
+    case FASE_EXECUTANDO: txt = g_strdup_printf("executando leitura%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
+    case FASE_GERANDO_RESPOSTA: txt = g_strdup("gerando resposta final"); break;
+    default:
+        txt = g_strdup_printf("conectado · pronto · %s · /help",
+                              c->autopilot ? "leituras seguras automáticas" : "modo manual (toda ferramenta pede /plano)");
+        break;
+    }
+    gboolean ativo = f != FASE_OCIOSO && f != FASE_AGUARDANDO_APROVACAO;
+    term_definir_status(c->term, txt, ativo, continua);
+    term_definir_prompt(c->term, f == FASE_AGUARDANDO_APROVACAO ? "aprovar? [s/N] " : "lia> ");
+    g_free(txt);
+}
+
+static void ms_legivel(char *dst, gsize cap, gint64 ms)
+{
+    if (ms < 1000) g_snprintf(dst, cap, "%" G_GINT64_FORMAT " ms", ms);
+    else g_snprintf(dst, cap, "%" G_GINT64_FORMAT ",%" G_GINT64_FORMAT " s", ms / 1000, (ms % 1000) / 100);
+}
+
+/* fim do turno (resposta final, erro, cancelamento, ou proposta que ficou
+ * aguardando /plano): volta ao estado ocioso; com 'concluido', registra os
+ * tempos reais de cada etapa. */
+static void encerrar_turno(LiaChat *c, gboolean concluido)
+{
+    if (concluido && c->turno_inicio_us) {
+        gint64 total = (g_get_monotonic_time() - c->turno_inicio_us) / 1000;
+        char t[32], a[32], b[32], d[32];
+        ms_legivel(t, sizeof t, total);
+        GString *det = g_string_new(NULL);
+        if (c->t_proposta_ms >= 0) { ms_legivel(a, sizeof a, c->t_proposta_ms); g_string_append_printf(det, "modelo/proposta %s", a); }
+        if (c->t_execucao_ms >= 0) { ms_legivel(b, sizeof b, c->t_execucao_ms); g_string_append_printf(det, "%sferramenta %s", det->len ? " · " : "", b); }
+        if (c->t_resposta_ms >= 0) { ms_legivel(d, sizeof d, c->t_resposta_ms); g_string_append_printf(det, "%sresposta final %s", det->len ? " · " : "", d); }
+        if (c->term)
+            saida_linha(c, "%s  ✓ concluído em %s%s%s%s%s", sgr(c, EST_FRACO), t, det->len ? " (" : "", det->str, det->len ? ")" : "", sgr0(c));
+        else
+            saida_linha(c, "[concluído] total=%" G_GINT64_FORMAT "ms proposta=%" G_GINT64_FORMAT "ms execucao=%" G_GINT64_FORMAT "ms resposta=%" G_GINT64_FORMAT "ms",
+                        total, c->t_proposta_ms, c->t_execucao_ms, c->t_resposta_ms);
+        g_string_free(det, TRUE);
+    }
+    c->turno_espera_resposta = FALSE;
+    c->turno_inicio_us = 0;
+    g_clear_pointer(&c->ferramenta_turno, g_free);
+    definir_fase(c, FASE_OCIOSO);
 }
 
 static const char *campo_str(JsonObject *obj, const char *chave)
@@ -362,7 +414,8 @@ static gboolean ao_timer_progresso_pergunta(gpointer dados)
      * final, dando a impressão de nenhum progresso real. Mensagem nunca
      * expõe raciocínio do modelo — só o estado observável "consultando",
      * igual ao que aparece para qualquer execução de ferramenta. */
-    saida_linha(c, "[local] consultando modelo... (%" G_GINT64_FORMAT "s)", decorrido_s);
+    saida_linha(c, "[local] %s... (%" G_GINT64_FORMAT "s)",
+                c->fase == FASE_GERANDO_RESPOSTA ? "gerando resposta final" : "consultando modelo", decorrido_s);
     flush_saida(c);
     return G_SOURCE_CONTINUE;
 }
@@ -371,13 +424,18 @@ static void iniciar_progresso_pergunta(LiaChat *c)
 {
     parar_progresso_pergunta(c);
     c->pergunta_enviada_us = g_get_monotonic_time();
-    c->timer_progresso_pergunta = g_timeout_add_seconds(LIA_PROGRESSO_PERGUNTA_INTERVALO_S, ao_timer_progresso_pergunta, c);
+    /* no terminal interativo a linha de status já mostra a fase, o
+     * indicador de atividade e o tempo decorrido, atualizados ao vivo —
+     * linhas periódicas no histórico seriam só ruído. Fora dele (pipe,
+     * script), continuam: é o único sinal de vida disponível. */
+    if (!c->term)
+        c->timer_progresso_pergunta = g_timeout_add_seconds(LIA_PROGRESSO_PERGUNTA_INTERVALO_S, ao_timer_progresso_pergunta, c);
 }
 
 static void enviar_perguntar(LiaChat *c, const char *mensagem)
 {
-    if (c->pergunta_em_andamento && !c->pergunta_abandonada_localmente) {
-        saida_linha(c, "[local] aguardando resposta da pergunta anterior (ou use /cancelar para abandoná-la)");
+    if (c->pergunta_em_andamento || c->fase != FASE_OCIOSO) {
+        saida_linha(c, "[local] ainda há um pedido em andamento — aguarde a resposta ou cancele (Ctrl-C ou /cancelar)");
         return;
     }
     if (strlen(mensagem) > LIA_PROMPT_LIMITE_PEDIDO_BYTES) {
@@ -408,8 +466,12 @@ static void enviar_perguntar(LiaChat *c, const char *mensagem)
     if (id) {
         c->pergunta_em_andamento = TRUE;
         c->pergunta_abandonada_localmente = FALSE;
+        c->turno_inicio_us = g_get_monotonic_time();
+        c->t_proposta_ms = c->t_execucao_ms = c->t_resposta_ms = -1;
         iniciar_progresso_pergunta(c);
-        saida_linha(c, "[local] pergunta enviada (id da mensagem: %s)", id);
+        definir_fase(c, FASE_CONSULTANDO_MODELO);
+        if (!c->term)
+            saida_linha(c, "[local] pergunta enviada (id da mensagem: %s)", id);
         g_free(id);
     }
 }
@@ -447,6 +509,18 @@ static void enviar_solicitar_da_proposta(LiaChat *c, const char *modo)
     json_builder_end_object(b);
     char *id = enviar(c, LIA_MSG_SOLICITAR, b, NULL, 0, FALSE);
     g_object_unref(b);
+    if (id) {
+        /* a execução vem de uma proposta: o daemon fecha o turno com uma
+         * 'resposta' final (resumo fundamentado, ou determinística). */
+        c->turno_espera_resposta = TRUE;
+        g_free(c->ferramenta_turno);
+        c->ferramenta_turno = g_strdup(p->ferramenta);
+        if (!c->turno_inicio_us) {
+            c->turno_inicio_us = g_get_monotonic_time();
+            c->t_proposta_ms = c->t_execucao_ms = c->t_resposta_ms = -1;
+        }
+        definir_fase(c, FASE_VALIDANDO_PLANO);
+    }
     g_free(id);
     if (!strcmp(modo, "simular"))
         saida_linha(c, "[local] nesta etapa, modo=\"simular\" não tem efeito distinto de \"executar\" no executor real — nenhuma ferramenta atual implementa simulação de verdade (ver docs/protocolo.md §8).");
@@ -474,6 +548,7 @@ static void tratar_decisao_plano(LiaChat *c, gboolean aprovar)
     g_free(id);
     saida_linha(c, "[local] %s enviado para o plano %s", aprovar ? "aprovação" : "rejeição", c->plano_id_pendente);
     c->aguardando_decisao_plano = FALSE;
+    if (aprovar) definir_fase(c, FASE_EXECUTANDO);
 }
 
 static void tratar_cancelar(LiaChat *c)
@@ -505,13 +580,19 @@ static void tratar_cancelar(LiaChat *c)
         saida_linha(c, "[local] cancelamento da execução %s enviado", c->execucao_id_pendente);
         return;
     }
-    if (c->pergunta_em_andamento && !c->pergunta_abandonada_localmente) {
-        /* o protocolo (docs/protocolo.md §9) não tem, nesta etapa, uma
-         * forma de cancelar uma 'pergunta' em andamento no daemon — só
-         * marcamos localmente para ignorar a resposta quando chegar. */
-        c->pergunta_abandonada_localmente = TRUE;
-        parar_progresso_pergunta(c);
-        saida_linha(c, "[local] não há como cancelar uma pergunta ao modelo em andamento nesta etapa do protocolo — a resposta, quando chegar, será ignorada");
+    if (c->pergunta_em_andamento || c->fase == FASE_GERANDO_RESPOSTA) {
+        /* conversa com o modelo em andamento (a pergunta, ou o resumo
+         * final): o daemon cancela a geração de verdade e confirma com um
+         * 'erro' de código "cancelado" (docs/protocolo.md §10). */
+        JsonBuilder *b = json_builder_new();
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "pergunta");
+        json_builder_add_boolean_value(b, TRUE);
+        json_builder_end_object(b);
+        char *id = enviar(c, LIA_MSG_CANCELAR, b, NULL, 0, TRUE);
+        g_object_unref(b);
+        g_free(id);
+        saida_linha(c, "[local] cancelamento da %s enviado", c->pergunta_em_andamento ? "pergunta ao modelo" : "resposta final");
         return;
     }
     saida_linha(c, "[local] nada para cancelar");
@@ -574,7 +655,6 @@ static void imprimir_plano(LiaChat *c, JsonObject *d)
     if (requer_aprovacao) {
         saida_linha(c, "");
         saida_linha(c, "Aprovar este plano? [s/N] ");
-        if (c->interativo && !c->modo_json) { fputs("Aprovar este plano? [s/N] ", stdout); fflush(stdout); }
     }
 }
 
@@ -594,11 +674,18 @@ static void imprimir_ajuda(LiaChat *c)
         "  /aprovar                   aprova o plano pendente (envia o plano_id recebido)\n"
         "  /rejeitar                  rejeita o plano pendente\n"
         "  /cancelar                  cancela o plano/execução/pergunta pendente (ou Ctrl-C)\n"
+        "  /autopilot read-only|manual  leituras seguras automáticas, ou toda ferramenta pede /plano\n"
+        "  /dados                     mostra o JSON bruto do último resultado\n"
         "  /limpar                    limpa a tela\n"
         "  /sair                      encerra (ou Ctrl-D)\n"
         "\n"
         "Qualquer outra linha é enviada ao modelo como uma pergunta — exceto quando um\n"
-        "plano está pendente: nesse caso a linha é lida como [s/N] (padrão: rejeitar).");
+        "plano está pendente: nesse caso a linha é lida como [s/N] (padrão: rejeitar).\n"
+        "\n"
+        "Piloto automático (LIA_CHAT_AUTOPILOT=read-only, padrão): quando o daemon valida a\n"
+        "proposta como LEITURA PURA, ela é solicitada e executada sem parar, e a resposta final\n"
+        "cita os dados reais. Tudo que grava, administra ou toca hardware continua exigindo\n"
+        "aprovação explícita — em qualquer modo.");
 }
 
 static void imprimir_status(LiaChat *c)
@@ -613,6 +700,7 @@ static void imprimir_status(LiaChat *c)
         (c->ferramenta_plano_pendente ? c->ferramenta_plano_pendente : c->plano_id_pendente) : "nenhum");
     saida_linha(c, "execução pendente: %s", c->execucao_id_pendente ? c->execucao_id_pendente : "nenhuma");
     saida_linha(c, "arquivos anexados: %u", c->arquivos->len);
+    saida_linha(c, "piloto automático: %s", c->autopilot ? "read-only (leituras seguras executam sozinhas)" : "manual (toda ferramenta pede /plano)");
 }
 
 /* ------------------------------------------------------- comando/arquivo */
@@ -717,9 +805,20 @@ static void tratar_msg_plano(LiaChat *c, const LiaMsg *m)
     c->ferramenta_plano_pendente = g_strdup(ferramenta ? ferramenta : "");
     c->plano_dados_pendente = json_object_ref(m->dados);
     c->aguardando_decisao_plano = campo_bool(m->dados, "requer_aprovacao", TRUE);
-    imprimir_plano(c, m->dados);
-    if (!c->aguardando_decisao_plano)
-        saida_linha(c, "[local] sem aprovação necessária — executando");
+    if (!c->ferramenta_turno && ferramenta) c->ferramenta_turno = g_strdup(ferramenta);
+    if (c->term && !c->aguardando_decisao_plano) {
+        /* leitura sem aprovação: uma linha basta (o plano completo continua
+         * disponível com /plano enquanto a execução durar) */
+        const char *risco = campo_str(m->dados, "risco");
+        (void)ferramenta;
+        saida_linha(c, "%s  ✓ plano validado pelo daemon: risco %s, somente leitura, sem aprovação%s",
+                    sgr(c, EST_FRACO), risco ? risco : "?", sgr0(c));
+    } else {
+        imprimir_plano(c, m->dados);
+        if (!c->aguardando_decisao_plano)
+            saida_linha(c, "[local] sem aprovação necessária — executando");
+    }
+    definir_fase(c, c->aguardando_decisao_plano ? FASE_AGUARDANDO_APROVACAO : FASE_EXECUTANDO);
 }
 
 static void tratar_msg_progresso_ou_saida(LiaChat *c, const LiaMsg *m, gboolean progresso)
@@ -744,22 +843,71 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
 {
     const char *estado = campo_str(m->dados, "estado");
     gint64 codigo = campo_int(m->dados, "codigo_saida", -1);
-    saida_linha(c, "[resultado] estado=%s codigo_saida=%" G_GINT64_FORMAT, estado ? estado : "?", codigo);
-    if (json_object_has_member(m->dados, "dados")) {
-        char *dados_texto = json_para_texto(json_object_get_member(m->dados, "dados"));
-        saida_linha(c, "  dados: %s", dados_texto);
-        g_free(dados_texto);
+    const char *apresentacao = campo_str(m->dados, "apresentacao");
+    gint64 exec_ms = campo_int(m->dados, "tempo_execucao_ms", -1);
+    gboolean sucesso = estado && !strcmp(estado, "sucesso");
+    c->t_execucao_ms = exec_ms;
+
+    g_free(c->ultimo_dados_json);
+    c->ultimo_dados_json = json_object_has_member(m->dados, "dados")
+        ? json_para_texto(json_object_get_member(m->dados, "dados")) : NULL;
+    char *apres = apresentacao ? sanear(apresentacao) : NULL;
+    if (apres) g_strchomp(apres);
+
+    if (c->term) {
+        const char *ferr = c->ferramenta_turno ? c->ferramenta_turno : (c->ferramenta_plano_pendente ? c->ferramenta_plano_pendente : "?");
+        if (sucesso) {
+            char t[32];
+            ms_legivel(t, sizeof t, exec_ms < 0 ? 0 : exec_ms);
+            saida_linha(c, "%s  ✓ dados reais recebidos de %s em %s%s", sgr(c, EST_OK), ferr, t, sgr0(c));
+            if (apres && *apres) {
+                saida_linha(c, "");
+                saida_linha(c, "%s", apres);
+                saida_linha(c, "");
+            } else if (c->ultimo_dados_json) {
+                char *d = sanear(c->ultimo_dados_json);
+                saida_linha(c, "  dados: %s", d);
+                g_free(d);
+            }
+        } else if (estado && !strcmp(estado, "cancelado")) {
+            saida_linha(c, "%s  ✗ execução cancelada%s", sgr(c, EST_AVISO), sgr0(c));
+        } else {
+            saida_linha(c, "%s  ✗ execução de %s terminou com estado=%s (código %" G_GINT64_FORMAT ")%s",
+                        sgr(c, EST_ERRO), ferr, estado ? estado : "?", codigo, sgr0(c));
+        }
+    } else {
+        saida_linha(c, "[resultado] estado=%s codigo_saida=%" G_GINT64_FORMAT, estado ? estado : "?", codigo);
+        if (c->ultimo_dados_json)
+            saida_linha(c, "  dados: %s", c->ultimo_dados_json);
+        if (apres && *apres)
+            saida_linha(c, "%s", apres);
     }
+    g_free(apres);
+    gboolean cancelado = estado && !strcmp(estado, "cancelado");
     limpar_pendencias_de_execucao(c);
+    if (c->turno_espera_resposta && !cancelado) {
+        /* o daemon vai fechar o turno com 'resposta' (resumo fundamentado
+         * do modelo, ou determinística se a execução falhou) */
+        iniciar_progresso_pergunta(c);
+        definir_fase(c, FASE_GERANDO_RESPOSTA);
+    } else {
+        encerrar_turno(c, sucesso);
+    }
 }
 
 static void tratar_msg_erro(LiaChat *c, const LiaMsg *m)
 {
     const char *codigo = campo_str(m->dados, "codigo");
-    const char *mensagem = campo_str(m->dados, "mensagem");
+    char *mensagem = sanear(campo_str(m->dados, "mensagem"));
     const char *detalhe = campo_str(m->dados, "detalhe");
-    saida_linha(c, "[erro] %s: %s%s%s", codigo ? codigo : "?", mensagem ? mensagem : "",
-                detalhe ? " — " : "", detalhe ? detalhe : "");
+    gboolean cancelado = codigo && !strcmp(codigo, "cancelado");
+    if (c->term)
+        saida_linha(c, "%s  ✗ %s%s: %s%s%s%s", sgr(c, cancelado ? EST_AVISO : EST_ERRO), cancelado ? "" : "erro ",
+                    codigo ? codigo : "?", mensagem, detalhe ? " — " : "", detalhe ? detalhe : "", sgr0(c));
+    else
+        saida_linha(c, "[erro] %s: %s%s%s", codigo ? codigo : "?", mensagem,
+                    detalhe ? " — " : "", detalhe ? detalhe : "");
+    g_free(mensagem);
     if (codigo && !strcmp(codigo, "protocolo_incompativel")) {
         saida_linha(c, "[local] protocolo incompatível com o daemon — encerrando");
         c->codigo_saida = 3;
@@ -770,28 +918,46 @@ static void tratar_msg_erro(LiaChat *c, const LiaMsg *m)
     /* um erro de validação imediata para a última mensagem que enviamos
      * (em_resposta_a == nosso id) encerra a pendência correspondente —
      * tratar_solicitar/tratar_perguntar/tratar_aprovar/tratar_cancelar
-     * sempre respondem assim para rejeições síncronas. */
+     * sempre respondem assim para rejeições síncronas. A confirmação de um
+     * cancelamento de pergunta/resumo ("cancelado") também chega assim. */
     if (m->em_resposta_a && c->ultimo_id_enviado && !strcmp(m->em_resposta_a, c->ultimo_id_enviado)) {
+        gboolean recusa_de_cancelar = codigo && !strcmp(codigo, "estado_invalido") &&
+                                      (c->pergunta_em_andamento || c->execucao_id_pendente || c->fase == FASE_GERANDO_RESPOSTA);
+        if (recusa_de_cancelar)
+            return; /* o daemon só recusou o nosso 'cancelar' (nada a cancelar do lado dele): o turno segue como estava */
         if (c->plano_id_pendente) limpar_pendencias_de_execucao(c);
         c->pergunta_em_andamento = FALSE;
         c->pergunta_abandonada_localmente = FALSE;
         parar_progresso_pergunta(c);
+        encerrar_turno(c, FALSE);
         return;
     }
-    /* erro assíncrono (resultado do modelo, timeout de execução —
-     * sessiond.c nunca usa em_resposta_a para esses, ver
-     * ao_concluir_ollama/ao_timeout_execucao): não há como saber ao
-     * certo qual pendência terminou, então limpa as que dependem de uma
-     * única resposta assíncrona por conexão — nunca deixa o estado local
-     * travado esperando algo que o daemon já resolveu de outro jeito. */
+    /* erro assíncrono (resultado do modelo, falha/timeout de execução —
+     * sessiond.c nunca usa em_resposta_a para esses): limpa as pendências
+     * que dependem de uma única resposta assíncrona por conexão — nunca
+     * deixa o estado local travado esperando algo que o daemon já resolveu
+     * de outro jeito. Uma falha de EXECUÇÃO é seguida de 'resultado'
+     * (estado=falha) e, no fluxo agente, de uma 'resposta' determinística:
+     * o turno só fecha quando essas chegarem. */
     if (c->pergunta_em_andamento) {
         c->pergunta_em_andamento = FALSE;
         c->pergunta_abandonada_localmente = FALSE;
         parar_progresso_pergunta(c);
+        encerrar_turno(c, FALSE);
+    } else if (c->fase == FASE_GERANDO_RESPOSTA) {
+        parar_progresso_pergunta(c);
+        encerrar_turno(c, FALSE);
     }
-    if (c->execucao_id_pendente)
-        limpar_pendencias_de_execucao(c);
 }
+
+static JsonObject *campo_obj(JsonObject *obj, const char *chave)
+{
+    if (!obj || !json_object_has_member(obj, chave)) return NULL;
+    JsonNode *n = json_object_get_member(obj, chave);
+    return JSON_NODE_TYPE(n) == JSON_NODE_OBJECT ? json_node_get_object(n) : NULL;
+}
+
+static void enviar_solicitar_da_proposta(LiaChat *c, const char *modo);
 
 static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
 {
@@ -800,43 +966,117 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         saida_linha(c, "[local] ignorado: proposta recebida sem nenhuma pergunta em andamento (talvez já cancelada)");
         return;
     }
-    gboolean abandonada = c->pergunta_abandonada_localmente;
     c->pergunta_em_andamento = FALSE;
     parar_progresso_pergunta(c);
     c->pergunta_abandonada_localmente = FALSE;
-    if (abandonada) {
-        saida_linha(c, "[local] ignorado: resposta de uma pergunta cancelada localmente");
-        return;
-    }
-    const char *texto = campo_str(m->dados, "resposta_texto");
-    saida_linha(c, "[modelo] %s", texto ? texto : "");
+
+    char *texto = sanear(campo_str(m->dados, "resposta_texto"));
+    g_strstrip(texto);
+    JsonObject *intencao = campo_obj(m->dados, "intencao");
+    JsonObject *validacao = campo_obj(m->dados, "validacao");
+    const char *veredito = campo_str(validacao, "veredito");
+    char *motivo = sanear(campo_str(validacao, "motivo"));
+    const char *do_modelo = campo_str(validacao, "ferramenta_do_modelo");
+    gboolean auto_ok = campo_bool(validacao, "execucao_automatica_permitida", FALSE);
+    gboolean requer = campo_bool(validacao, "requer_aprovacao", FALSE);
+    gboolean corrigida = veredito && !strcmp(veredito, "corrigida");
+    c->t_proposta_ms = campo_int(m->dados, "tempo_modelo_ms", -1);
+
+    const char *ferramenta = NULL;
+    JsonObject *fp = campo_obj(m->dados, "ferramenta_proposta");
+    if (fp) ferramenta = campo_str(fp, "ferramenta");
 
     if (c->proposta_pendente) { proposta_pendente_liberar(c->proposta_pendente); c->proposta_pendente = NULL; }
-    if (json_object_has_member(m->dados, "ferramenta_proposta")) {
-        JsonNode *n = json_object_get_member(m->dados, "ferramenta_proposta");
-        if (JSON_NODE_TYPE(n) == JSON_NODE_OBJECT) {
-            JsonObject *fp = json_node_get_object(n);
-            const char *ferramenta = campo_str(fp, "ferramenta");
-            if (ferramenta) {
-                PropostaPendente *p = g_new0(PropostaPendente, 1);
-                p->pergunta_id = g_strdup(pergunta_id);
-                p->ferramenta = g_strdup(ferramenta);
-                p->parametros_json = json_object_has_member(fp, "parametros")
-                    ? json_para_texto(json_object_get_member(fp, "parametros")) : g_strdup("{}");
-                const char *just = campo_str(fp, "justificativa");
-                p->justificativa = just ? g_strdup(just) : NULL;
-                c->proposta_pendente = p;
-                saida_linha(c, "[local] ferramenta sugerida: %s (parâmetros: %s) — use /plano para solicitar (executar) ou /simular",
-                            p->ferramenta, p->parametros_json);
-            }
-        }
+    if (ferramenta) {
+        PropostaPendente *p = g_new0(PropostaPendente, 1);
+        p->pergunta_id = g_strdup(pergunta_id);
+        p->ferramenta = g_strdup(ferramenta);
+        p->parametros_json = json_object_has_member(fp, "parametros")
+            ? json_para_texto(json_object_get_member(fp, "parametros")) : g_strdup("{}");
+        const char *just = campo_str(fp, "justificativa");
+        p->justificativa = just ? g_strdup(just) : NULL;
+        c->proposta_pendente = p;
     }
+    /* Piloto automático: só segue sozinho quando o DAEMON marcou a
+     * proposta como leitura pura E a política local é read-only. O que
+     * segue é o mesmo 'solicitar' de /plano — o daemon valida de novo,
+     * monta o plano e, se por qualquer motivo o plano exigir aprovação,
+     * para e pergunta do mesmo jeito (tratar_msg_plano). */
+    gboolean vai_auto = ferramenta && c->autopilot && auto_ok && !requer;
+
+    if (c->term) {
+        if (intencao)
+            saida_linha(c, "%s  ✓ intenção: %s (confiança %s)%s", sgr(c, EST_FRACO),
+                        campo_str(intencao, "descricao") ? campo_str(intencao, "descricao") : "?",
+                        campo_str(intencao, "confianca") ? campo_str(intencao, "confianca") : "?", sgr0(c));
+        if (ferramenta) {
+            saida_linha(c, "%s  ✓ ferramenta: %s %s%s", sgr(c, EST_FRACO), ferramenta, c->proposta_pendente->parametros_json, sgr0(c));
+            if (corrigida && do_modelo && strcmp(do_modelo, ferramenta) != 0)
+                saida_linha(c, "%s    corrigido pela validação independente: o modelo propôs %s%s", sgr(c, EST_AVISO), do_modelo, sgr0(c));
+            else if (veredito && !strcmp(veredito, "rota_direta"))
+                saida_linha(c, "%s    rota direta: intenção de alta confiança, modelo não consultado para escolher%s", sgr(c, EST_FRACO), sgr0(c));
+            else if (corrigida)
+                saida_linha(c, "%s    validação: %s%s", sgr(c, EST_FRACO), motivo, sgr0(c));
+            if (!vai_auto) {
+                if (*texto) saida_linha(c, "%sLia:%s %s", sgr(c, EST_FORTE), sgr0(c), texto);
+                saida_linha(c, "%s  ⏸ %s não roda sozinha (%s) — /plano para solicitar, /simular, ou faça outra pergunta%s",
+                            sgr(c, EST_AVISO), ferramenta,
+                            !c->autopilot ? "modo manual" : (requer ? "exige aprovação" : "não é leitura pura"), sgr0(c));
+            }
+        } else {
+            if (veredito && strcmp(veredito, "aceita") != 0)
+                saida_linha(c, "%s  ✗ validação (%s): %s%s", sgr(c, EST_AVISO), veredito, motivo, sgr0(c));
+            saida_linha(c, "%sLia:%s %s", sgr(c, EST_FORTE), sgr0(c), texto);
+        }
+    } else {
+        if (*texto || !ferramenta)
+            saida_linha(c, "[modelo] %s", texto);
+        if (validacao && (intencao || (veredito && strcmp(veredito, "aceita") != 0)))
+            saida_linha(c, "[validação] intenção=%s veredito=%s modelo_propôs=%s: %s",
+                        intencao && campo_str(intencao, "id") ? campo_str(intencao, "id") : "-",
+                        veredito ? veredito : "?", do_modelo ? do_modelo : "-", motivo);
+        if (ferramenta && vai_auto)
+            saida_linha(c, "[local] ferramenta selecionada: %s (parâmetros: %s) — leitura segura validada pelo daemon, executando automaticamente (LIA_CHAT_AUTOPILOT=read-only)",
+                        ferramenta, c->proposta_pendente->parametros_json);
+        else if (ferramenta)
+            saida_linha(c, "[local] ferramenta sugerida: %s (parâmetros: %s) — use /plano para solicitar (executar) ou /simular",
+                        ferramenta, c->proposta_pendente->parametros_json);
+    }
+    g_free(texto);
+    g_free(motivo);
+
+    if (vai_auto)
+        enviar_solicitar_da_proposta(c, "executar");
+    else
+        encerrar_turno(c, ferramenta == NULL); /* só texto: turno concluído; proposta pendente: aguardando /plano */
 }
 
 static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
 {
-    const char *texto = campo_str(m->dados, "resposta_texto");
-    saida_linha(c, "[modelo, resumo] %s", texto ? texto : "");
+    char *texto = sanear(campo_str(m->dados, "resposta_texto"));
+    g_strstrip(texto);
+    char *aviso = campo_str(m->dados, "aviso") ? sanear(campo_str(m->dados, "aviso")) : NULL;
+    const char *origem = campo_str(m->dados, "origem");
+    gboolean deterministica = origem && !strcmp(origem, "deterministica");
+    c->t_resposta_ms = campo_int(m->dados, "tempo_modelo_ms", -1);
+    parar_progresso_pergunta(c);
+    gboolean extrativa = origem && !strcmp(origem, "modelo_extrativa");
+    if (c->term) {
+        saida_linha(c, "%sLia:%s %s", sgr(c, EST_FORTE), sgr0(c), texto);
+        if (deterministica)
+            saida_linha(c, "%s  · resposta montada pelo daemon só com os dados reais acima (sem texto livre do modelo)%s", sgr(c, EST_FRACO), sgr0(c));
+        else if (extrativa)
+            saida_linha(c, "%s  · o modelo escolheu quais linhas respondem; o texto foi copiado dos dados reais%s", sgr(c, EST_FRACO), sgr0(c));
+        else
+            saida_linha(c, "%s  · resumo do modelo, conferido contra os dados reais%s", sgr(c, EST_FRACO), sgr0(c));
+        if (aviso) saida_linha(c, "%s  ! %s%s", sgr(c, EST_AVISO), aviso, sgr0(c));
+    } else {
+        saida_linha(c, deterministica ? "[resposta, determinística] %s" : (extrativa ? "[resposta, extrativa] %s" : "[modelo, resumo] %s"), texto);
+        if (aviso) saida_linha(c, "[aviso] %s", aviso);
+    }
+    g_free(texto);
+    g_free(aviso);
+    encerrar_turno(c, TRUE);
 }
 
 static void processar_msg_recebida(LiaChat *c, const LiaMsg *m)
@@ -850,7 +1090,10 @@ static void processar_msg_recebida(LiaChat *c, const LiaMsg *m)
     case LIA_MSG_PROGRESSO: tratar_msg_progresso_ou_saida(c, m, TRUE); break;
     case LIA_MSG_SAIDA: tratar_msg_progresso_ou_saida(c, m, FALSE); break;
     case LIA_MSG_RESULTADO: tratar_msg_resultado(c, m); break;
-    case LIA_MSG_AUDITORIA: saida_linha(c, "[auditoria registrada]"); break;
+    case LIA_MSG_AUDITORIA:
+        if (c->term) saida_linha(c, "%s  · auditoria registrada%s", sgr(c, EST_FRACO), sgr0(c));
+        else saida_linha(c, "[auditoria registrada]");
+        break;
     case LIA_MSG_ERRO: tratar_msg_erro(c, m); break;
     case LIA_MSG_PROPOSTA: tratar_msg_proposta(c, m); break;
     case LIA_MSG_RESPOSTA: tratar_msg_resposta(c, m); break;
@@ -934,11 +1177,23 @@ static void processar_comando(LiaChat *c, const char *linha_bruta)
     } else if (!strcmp(cmd, "/cancelar")) {
         tratar_cancelar(c);
     } else if (!strcmp(cmd, "/limpar")) {
-        if (c->interativo && !c->modo_json) {
-            fputs("\033[H\033[2J", stdout);
-            fflush(stdout);
-            if (c->readline_ativo) rl_forced_update_display(); /* redesenha o prompt no topo da tela limpa */
+        if (c->term) term_limpar_tela(c->term);
+    } else if (!strcmp(cmd, "/dados")) {
+        if (c->ultimo_dados_json) {
+            char *d = sanear(c->ultimo_dados_json);
+            saida_linha(c, "%s", d);
+            g_free(d);
+        } else {
+            saida_linha(c, "[local] nenhum resultado recebido ainda nesta sessão");
         }
+    } else if (!strcmp(cmd, "/autopilot")) {
+        if (partes[1] && !strcmp(partes[1], "read-only")) c->autopilot = TRUE;
+        else if (partes[1] && !strcmp(partes[1], "manual")) c->autopilot = FALSE;
+        else if (partes[1]) { saida_linha(c, "[local] uso: /autopilot read-only|manual (nenhum outro valor existe)"); g_strfreev(partes); g_free(linha); return; }
+        saida_linha(c, "[local] piloto automático: %s", c->autopilot
+            ? "read-only — leituras que o daemon validar como seguras executam sozinhas; escrita/admin/hardware continuam exigindo aprovação"
+            : "manual — toda ferramenta pede /plano");
+        if (c->fase == FASE_OCIOSO) definir_fase(c, FASE_OCIOSO);
     } else if (!strcmp(cmd, "/sair") || !strcmp(cmd, "/exit") || !strcmp(cmd, "/quit")) {
         finalizar(c);
     } else {
@@ -978,97 +1233,42 @@ static void processar_linha_json(LiaChat *c, const char *linha)
 
 static void agendar_leitura_socket(LiaChat *c);
 
-/* libedit (como o GNU Readline, cuja API ele imita) não tem um parâmetro
- * de dados do usuário no manipulador de linha completa — só esta
- * instância de LiaChat existe por processo, então um ponteiro global é
- * seguro e é exatamente o padrão recomendado pela própria lib para este
- * caso. */
-static LiaChat *g_chat_atual;
-
-static void ao_linha_completa(char *linha)
+/* Uma linha completa chegou do terminal interativo (chat/terminal.c já a
+ * ecoou no histórico e já redesenhou a entrada vazia). NULL = Ctrl-D. */
+static void ao_linha_terminal(const char *linha, gpointer dados)
 {
-    LiaChat *c = g_chat_atual;
+    LiaChat *c = dados;
     if (!linha) {
-        /* EOF (Ctrl-D): libedit já deixou o terminal em ordem. */
         finalizar(c);
         return;
     }
-    if (*linha) add_history(linha); /* só em memória desta sessão — nunca gravado em disco */
-
-    /* Nesta libedit, depois de aceitar a linha (Enter) e chamar este
-     * handler, rl_line_buffer/rl_point/rl_end NÃO refletem "linha vazia"
-     * — ficam travados mostrando a linha que acabou de ser digitada
-     * (confirmado instrumentando: nem escrever direto nos três campos,
-     * nem rl_replace_line("", 0), muda o que rl_forced_update_display()
-     * desenha depois — só uma tecla nova faz essa biblioteca de verdade
-     * reiniciar o estado interno da linha). Qualquer redesenho
-     * assíncrono nesse intervalo (ex.: flush_saida chamado daqui mesmo,
-     * ou por uma mensagem do daemon que chegue antes do usuário digitar
-     * a tecla seguinte) reimprimiria essa linha velha por cima do prompt
-     * — sintoma visto na prática: a pergunta já enviada reaparecia
-     * duplicada depois de "[local] pergunta enviada". A única forma que
-     * de fato reinicia o estado interno (confirmada testando) é
-     * remover e reinstalar o manipulador de callback — o mesmo par de
-     * chamadas do main() no início do programa. Isto não afeta
-     * add_history/histórico (lista separada, mantida pela própria lib) —
-     * só o estado de edição da linha atual.
-     *
-     * Reinstalar JÁ AQUI (antes do flush_saida abaixo) funciona para o
-     * estado interno, mas rl_callback_handler_install() imprime o prompt
-     * na hora — uma linha "lia> " vazia sobraria ANTES da saída de
-     * "[local] pergunta enviada...", só pra ganhar outra "lia> " de
-     * verdade no final. Em vez disso, só marca a intenção aqui;
-     * imprimir_sobre_readline() (chamada pelo flush_saida logo abaixo)
-     * reinstala depois de escrever o texto, no lugar de
-     * rl_on_new_line()+rl_forced_update_display() — um único "lia> ",
-     * sempre depois do conteúdo. */
-    c->reinstalar_prompt_apos_flush = c->readline_ativo;
-
-    if (c->modo_json) processar_linha_json(c, linha);
-    else processar_comando(c, linha);
-    free(linha); /* libedit aloca com malloc, não g_malloc */
+    processar_comando(c, linha);
     flush_saida(c);
-    if (c->reinstalar_prompt_apos_flush) {
-        /* buffer_saida estava vazio (linha em branco, ou comando sem
-         * nenhuma saída) — flush_saida() voltou sem chamar
-         * imprimir_sobre_readline(), o único lugar que consome esta
-         * flag. Reinstala aqui mesmo, pelo mesmo motivo do comentário
-         * grande acima: é a única forma de sair do estado "linha
-         * antiga ainda tida como atual" antes da próxima tecla. */
-        c->reinstalar_prompt_apos_flush = FALSE;
-        rl_callback_handler_remove();
-        rl_callback_handler_install(c->modo_json ? "" : "lia> ", ao_linha_completa);
-    }
 }
 
 static gboolean ao_stdin_pronto(gint fd, GIOCondition condicao, gpointer dados)
 {
-    (void)condicao; (void)dados;
-    /* rl_callback_read_char() só consome UM byte por chamada. Uma seta
-     * chega como 3 bytes (ESC [ A) praticamente juntos no buffer do
-     * kernel — se cada byte só for consumido numa volta FUTURA do laço
-     * principal do GLib (em vez de todos agora, enquanto ainda há dados
-     * disponíveis), o atraso real entre eles passa do timeout interno de
-     * reconhecimento de sequência de escape do libedit, que então trata
-     * cada byte como tecla solta em vez de "seta pra cima" — sintoma
-     * visto na prática: em vez de recuperar o histórico, entrava em modo
-     * de busca incremental (prompt "bck:"). Drena tudo que já chegou,
-     * nesta mesma invocação, antes de voltar ao laço principal. */
-    for (;;) {
-        int disponivel = 0;
-        if (ioctl(fd, FIONREAD, &disponivel) != 0 || disponivel <= 0)
-            break;
-        rl_callback_read_char();
+    (void)fd;
+    LiaChat *c = dados;
+    gboolean leu = term_entrada_disponivel(c->term);
+    if (!leu && (condicao & (G_IO_HUP | G_IO_ERR | G_IO_IN))) {
+        /* fd pronto, nada para ler: o terminal fechou */
+        finalizar(c);
+        return G_SOURCE_REMOVE;
     }
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean ao_sigwinch(gpointer dados)
+{
+    LiaChat *c = dados;
+    if (c->term) term_redimensionado(c->term);
+    return G_SOURCE_CONTINUE;
+}
+
 /* Modo não interativo (stdin redirecionado/pipe — scripts, testes de
- * integração): libedit continua "editando" e ecoando caractere a
- * caractere mesmo sem um terminal de verdade do outro lado, o que só
- * produz lixo visual numa saída que ninguém vai ler com os olhos. Sem
- * tty, não há edição nenhuma para ganhar — volta ao leitor de linha
- * simples de sempre, sem eco próprio, sem controle de cursor. */
+ * integração) e modo --json: sem região viva, sem edição própria — leitor
+ * de linha simples, uma linha de texto por linha de saída. */
 static void agendar_leitura_stdin_pipe(LiaChat *c);
 
 static void ao_ler_stdin_pipe(GObject *origem, GAsyncResult *res, gpointer dados)
@@ -1100,14 +1300,16 @@ static void ao_ler_socket(GObject *origem, GAsyncResult *res, gpointer dados)
     gsize tam = 0;
     char *linha = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(origem), res, &tam, &erro);
     if (erro) {
-        fprintf(stderr, "lia-chat: erro lendo o daemon: %s\n", erro->message);
+        if (c->term) { saida_linha(c, "%s  ✗ erro lendo o daemon: %s%s", sgr(c, EST_ERRO), erro->message, sgr0(c)); flush_saida(c); }
+        else fprintf(stderr, "lia-chat: erro lendo o daemon: %s\n", erro->message);
         g_error_free(erro);
         if (!c->deve_sair) c->codigo_saida = 1;
         finalizar(c);
         return;
     }
     if (!linha) {
-        fprintf(stderr, "lia-chat: daemon desconectou\n");
+        if (c->term) { saida_linha(c, "%s  ✗ o daemon desconectou — encerrando%s", sgr(c, EST_ERRO), sgr0(c)); flush_saida(c); }
+        else fprintf(stderr, "lia-chat: daemon desconectou\n");
         if (!c->deve_sair) c->codigo_saida = 1;
         finalizar(c);
         return;
@@ -1161,7 +1363,7 @@ static gboolean ao_sigint(gpointer dados)
     }
     c->ultimo_sigint_us = agora;
     if ((c->plano_id_pendente && c->aguardando_decisao_plano) || c->execucao_id_pendente ||
-        (c->pergunta_em_andamento && !c->pergunta_abandonada_localmente)) {
+        c->pergunta_em_andamento || c->fase == FASE_GERANDO_RESPOSTA) {
         tratar_cancelar(c);
     } else {
         anunciar_sigint(c, "lia-chat: nada para cancelar; Ctrl-C de novo em até 2s para encerrar, ou /sair");
@@ -1176,6 +1378,12 @@ static void imprimir_uso(const char *argv0)
 {
     fprintf(stderr,
         "uso: %s [--socket CAMINHO] [--backend mock|ollama|llama_cpp] [--modelo NOME] [--json] [--help]\n"
+        "\n"
+        "Ambiente:\n"
+        "  LIA_CHAT_AUTOPILOT=read-only  (padrão) leituras que o daemon validar como seguras executam\n"
+        "                                sozinhas; escrita/admin/hardware sempre pedem aprovação\n"
+        "  LIA_CHAT_AUTOPILOT=manual     toda ferramenta pede confirmação (/plano)\n"
+        "  (qualquer outro valor: recusa iniciar, código 2)\n"
         "\n"
         "Códigos de saída:\n"
         "  0   saída normal (/sair ou fim de entrada)\n"
@@ -1245,6 +1453,25 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Política de piloto automático: só dois valores existem. Um valor
+     * desconhecido NÃO cai em nenhum dos dois por palpite — recusa iniciar
+     * (falha segura). Não existe valor que libere escrita/admin/hardware:
+     * isso não é configurável por ambiente. */
+    const char *ap = g_getenv("LIA_CHAT_AUTOPILOT");
+    if (!ap || !*ap || !strcmp(ap, "read-only")) {
+        c.autopilot = TRUE;
+    } else if (!strcmp(ap, "manual")) {
+        c.autopilot = FALSE;
+    } else {
+        fprintf(stderr, "lia-chat: LIA_CHAT_AUTOPILOT='%s' não é um valor conhecido — use 'read-only' ou 'manual'. "
+                        "Recusando iniciar (falha segura; nenhum valor libera escrita, administração ou hardware).\n", ap);
+        g_free(c.socket_caminho);
+        g_free(c.backend_assumido);
+        g_free(c.modelo_assumido);
+        return 2;
+    }
+    c.t_proposta_ms = c.t_execucao_ms = c.t_resposta_ms = -1;
+
     if (!c.socket_caminho) {
         const char *home = g_get_home_dir();
         c.socket_caminho = g_strdup_printf("%s/.lia/run/session.sock", home);
@@ -1296,35 +1523,25 @@ int main(int argc, char **argv)
     if (!c.modo_json) {
         saida_linha(&c, "lia-chat: conectado a %s", c.socket_caminho);
         saida_linha(&c, "digite /help para ver os comandos");
-        flush_saida(&c); /* readline ainda não foi instalado aqui — sempre o caminho plain print */
+        saida_linha(&c, "piloto automático: %s", c.autopilot
+            ? "read-only — leituras seguras executam sozinhas; escrita/admin/hardware pedem aprovação (LIA_CHAT_AUTOPILOT=manual desliga)"
+            : "manual — toda ferramenta pede /plano");
+        flush_saida(&c); /* a região viva ainda não existe aqui — sempre texto simples */
     }
 
-    if (c.interativo) {
-        /* Edição de linha real (setas, histórico, Ctrl-A/E/K/W, copiar/
-         * colar) via libedit em modo "callback": ela cuida do terminal
-         * (raw mode, eco, redesenho) e só devolve o controle quando uma
-         * linha completa chega ou dá EOF (Ctrl-D) — ao_linha_completa.
-         * rl_catch_signals=0 porque o SIGINT já tem o dono certo
-         * (g_unix_signal_add acima, instalado antes de qualquer saída);
-         * sem isto o libedit instalaria o próprio handler de Ctrl-C e
-         * brigaria com o nosso. */
-        rl_catch_signals = 0;
-        rl_catch_sigwinch = 1; /* redesenha certo quando o terminal é redimensionado */
-        /* libedit, sem isto, usa modo vi por padrão (ESC entra em modo de
-         * comando — "h"/"j"/"k"/"l" etc. deixam de inserir texto e viram
-         * comandos de movimento, o que pareceria "quebrado" para qualquer
-         * pessoa esperando um terminal normal). Modo emacs: digitar sempre
-         * insere, setas movem o cursor/histórico, sem modos. */
-        rl_variable_bind("editing-mode", "emacs");
-        g_chat_atual = &c;
-        rl_callback_handler_install(c.modo_json ? "" : "lia> ", ao_linha_completa);
-        c.readline_ativo = TRUE;
-        g_unix_fd_add(STDIN_FILENO, G_IO_IN, ao_stdin_pronto, &c);
+    if (c.interativo && !c.modo_json)
+        c.term = term_novo(STDIN_FILENO, STDOUT_FILENO, "lia> ", ao_linha_terminal, &c);
+    if (c.term) {
+        /* Terminal interativo: chat/terminal.c assume o desenho (região
+         * viva: status + separador + entrada) e a edição de linha. O
+         * SIGINT já tem dono (g_unix_signal_add acima; o modo cru mantém
+         * ISIG) e o SIGWINCH só pede um redesenho. */
+        definir_fase(&c, FASE_OCIOSO);
+        g_unix_fd_add(STDIN_FILENO, G_IO_IN | G_IO_HUP | G_IO_ERR, ao_stdin_pronto, &c);
+        g_unix_signal_add(SIGWINCH, ao_sigwinch, &c);
     } else {
-        /* stdin não é um terminal (pipe/arquivo/script, ou make
-         * teste-chat): libedit só ecoaria lixo sem um tty de verdade do
-         * outro lado — leitor de linha simples, sem edição nenhuma
-         * (não há humano ali para precisar dela). */
+        /* stdin não é um terminal (pipe/arquivo/script, make teste-chat),
+         * ou modo --json: leitor de linha simples, sem região viva. */
         GInputStream *fluxo_stdin = g_unix_input_stream_new(STDIN_FILENO, FALSE);
         c.entrada_stdin = g_data_input_stream_new(fluxo_stdin);
         g_object_unref(fluxo_stdin);
@@ -1335,7 +1552,7 @@ int main(int argc, char **argv)
 
     g_main_loop_run(c.loop);
 
-    if (c.readline_ativo) rl_callback_handler_remove();
+    if (c.term) { term_liberar(c.term); c.term = NULL; }
     if (c.entrada_stdin) g_object_unref(c.entrada_stdin);
     if (c.conexao) { g_io_stream_close(G_IO_STREAM(c.conexao), NULL, NULL); g_object_unref(c.conexao); }
     g_object_unref(c.entrada_socket);
@@ -1349,6 +1566,8 @@ int main(int argc, char **argv)
     g_free(c.ferramenta_plano_pendente);
     g_free(c.execucao_id_pendente);
     g_free(c.ultimo_id_enviado);
+    g_free(c.ultimo_dados_json);
+    g_free(c.ferramenta_turno);
     g_free(c.socket_caminho);
     g_free(c.backend_assumido);
     g_free(c.modelo_assumido);

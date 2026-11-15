@@ -70,6 +70,13 @@ typedef void (*LlamaCppConcluidoCb)(gpointer ctx, LlamaCppErro erro, const char 
 LlamaCppRequisicao *llama_cpp_gerar(LlamaCppConfig *cfg, const char *prompt,
                                      LlamaCppConcluidoCb concluido_cb, gpointer ctx);
 
+/* Igual a llama_cpp_gerar, com saída estruturada: 'esquema_json' vai no
+ * campo "json_schema" de /completion (a geração fica restrita ao esquema)
+ * e 'n_predict' limita os tokens gerados (<= 0: padrão do servidor). */
+LlamaCppRequisicao *llama_cpp_gerar_opcoes(LlamaCppConfig *cfg, const char *prompt,
+                                            const char *esquema_json, int n_predict,
+                                            LlamaCppConcluidoCb concluido_cb, gpointer ctx);
+
 void llama_cpp_cancelar(LlamaCppRequisicao *req);
 
 #endif

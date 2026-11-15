@@ -57,4 +57,26 @@ const char *prompt_erro_texto(PromptErro e);
 PromptErro prompt_montar(const char *manifesto_texto, const char *pedido_usuario,
                           GList *arquivos /* PromptArquivo* */, char **prompt_saida);
 
+/* Acrescenta, ao final de um prompt já montado por prompt_montar, uma
+ * seção CONFIÁVEL de correção: usada para a única nova tentativa quando a
+ * primeira resposta do modelo foi inválida (ferramenta inexistente,
+ * parâmetros inválidos...). 'motivo' vem do validador do próprio daemon —
+ * nunca de dado externo. Devolve texto alocado (g_free). */
+char *prompt_acrescentar_correcao(const char *prompt_original, const char *motivo);
+
+/* Prompt do RESUMO FINAL: curto de propósito (não repete as instruções de
+ * escolha de ferramenta nem o manifesto — o modelo aqui só escreve a
+ * resposta). 'dados_reais' é o texto renderizado por
+ * sessiond/apresentacao.c a partir do JSON que a ferramenta devolveu:
+ * é DADO (vem do sistema: nomes de processo, de dispositivo...), e vai
+ * numa seção delimitada e rotulada como tal. Nunca falha: pedido ausente
+ * vira "(pedido não disponível)". */
+char *prompt_montar_resumo(const char *pedido_usuario, const char *ferramenta, const char *dados_reais);
+
+/* Prompt da resposta EXTRATIVA: o modelo recebe as linhas de dados já
+ * numeradas e devolve só {"linhas":[...]} — quais delas respondem à
+ * pergunta. Ele não escreve nenhum valor: quem monta o texto final, a
+ * partir das linhas escolhidas, é o daemon (sessiond/apresentacao.c). */
+char *prompt_montar_selecao(const char *pedido_usuario, const char *linhas_numeradas);
+
 #endif

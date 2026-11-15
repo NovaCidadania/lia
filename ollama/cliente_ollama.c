@@ -471,15 +471,29 @@ static void ao_conectar(GObject *origem, GAsyncResult *res, gpointer dados)
     json_builder_add_string_value(b, prompt_guardado ? prompt_guardado : "");
     json_builder_set_member_name(b, "stream");
     json_builder_add_boolean_value(b, TRUE);
+    const char *formato = g_object_get_data(G_OBJECT(req->cliente_socket), "lia-formato");
+    if (formato) {
+        /* saída estruturada: o Ollama restringe a geração a este esquema */
+        JsonParser *pf = json_parser_new();
+        if (json_parser_load_from_data(pf, formato, -1, NULL) && json_parser_get_root(pf)) {
+            json_builder_set_member_name(b, "format");
+            json_builder_add_value(b, json_node_copy(json_parser_get_root(pf)));
+        }
+        g_object_unref(pf);
+    }
+    int num_predict = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(req->cliente_socket), "lia-num-predict"));
     json_builder_set_member_name(b, "options");
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "num_predict");
     /* Limite de tokens gerados — sem isto, um modelo pequeno (ex.:
-     * llama3.2:3b) às vezes "pensa alto" em texto longo antes de chegar
-     * à proposta de ferramenta, multiplicando o tempo de resposta sem
-     * ganho nenhum (a pessoa só vê a resposta final mesmo). 400 tokens
-     * cobrem com folga um resumo em texto + um bloco JSON de proposta. */
-    json_builder_add_int_value(b, 400);
+     * llama3.2:3b) "pensa alto" em texto longo, multiplicando o tempo de
+     * resposta sem ganho nenhum. O chamador escolhe (proposta estruturada
+     * precisa de bem menos que um resumo); 400 é o padrão. */
+    json_builder_add_int_value(b, num_predict > 0 ? num_predict : 400);
+    /* temperatura 0: mesma pergunta, mesma escolha de ferramenta — e menos
+     * margem para o modelo "enfeitar" números num resumo. */
+    json_builder_set_member_name(b, "temperature");
+    json_builder_add_int_value(b, 0);
     json_builder_end_object(b);
     json_builder_end_object(b);
     JsonNode *raiz = json_builder_get_root(b);
@@ -532,6 +546,13 @@ static gboolean ao_idle_endpoint_invalido(gpointer dados)
 OllamaRequisicao *ollama_gerar(OllamaConfig *cfg, const char *prompt,
                                 OllamaConcluidoCb concluido_cb, gpointer ctx)
 {
+    return ollama_gerar_opcoes(cfg, prompt, NULL, 0, concluido_cb, ctx);
+}
+
+OllamaRequisicao *ollama_gerar_opcoes(OllamaConfig *cfg, const char *prompt,
+                                       const char *formato_json, int num_predict,
+                                       OllamaConcluidoCb concluido_cb, gpointer ctx)
+{
     OllamaRequisicao *req = g_new0(OllamaRequisicao, 1);
     req->cfg = cfg;
     req->concluido_cb = concluido_cb;
@@ -552,6 +573,9 @@ OllamaRequisicao *ollama_gerar(OllamaConfig *cfg, const char *prompt,
     req->cliente_socket = g_socket_client_new();
     g_socket_client_set_timeout(req->cliente_socket, (guint)((cfg->timeout_ms + 999) / 1000));
     g_object_set_data_full(G_OBJECT(req->cliente_socket), "lia-prompt", g_strdup(prompt), g_free);
+    if (formato_json)
+        g_object_set_data_full(G_OBJECT(req->cliente_socket), "lia-formato", g_strdup(formato_json), g_free);
+    g_object_set_data(G_OBJECT(req->cliente_socket), "lia-num-predict", GINT_TO_POINTER(num_predict));
     req->fase = FASE_CONECTANDO;
 
     g_socket_client_connect_to_host_async(req->cliente_socket, cfg->host, (guint16)cfg->porta,

@@ -86,6 +86,10 @@ static const ExecutorManifesto *mock_buscar_manifesto(const char *ferramenta)
     saida.idempotente = mf->idempotente;
     saida.reversivel = mf->reversivel;
     saida.capacidades = mf->capacidades;
+    /* no mock, "leitura pura" == risco nenhum sem aprovação (mock.leitura,
+     * mock.timeout, mock.saida_grande); mock.escrita/mock.admin nunca. */
+    saida.somente_leitura = !mf->requer_aprovacao && strcmp(mf->risco, "nenhum") == 0;
+    saida.uso = mf->efeito_simulado;
     saida.efeitos = mf->efeito_simulado;
     saida.timeout_padrao_ms = mf->timeout_padrao_ms;
     return &saida;

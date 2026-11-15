@@ -211,8 +211,17 @@ echo "== C4. uma ferramenta proposta mas desconhecida/proibida NUNCA executa soz
 # encaminharia a proposta como 'solicitar' e o daemon a rejeita.
 abrir_conexao a
 enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"p3","em_resposta_a":null,"ts":"t","dados":{"mensagem":"MOCK_PROPOR:admin.super.inventada"}}'
-aguardar "$HOME_T/a.out" '"ferramenta":"admin.super.inventada"' && ok "modelo propôs ferramenta inventada (permitido — é só um texto)" \
-    || ko "proposta não contém a ferramenta inventada"
+# a validação independente já barra na própria 'proposta' (depois de UMA
+# nova tentativa ao modelo): o que o modelo disse fica registrado em
+# validacao.ferramenta_do_modelo, mas ferramenta_proposta — a única coisa
+# que um cliente pode encaminhar — vem null.
+aguardar "$HOME_T/a.out" '"ferramenta_do_modelo":"admin.super.inventada"' && ok "o que o modelo propôs fica registrado na validação (é só um texto)" \
+    || ko "proposta não registra a ferramenta inventada pelo modelo"
+grep -q '"ferramenta_proposta":null' "$HOME_T/a.out" && grep -q '"veredito":"rejeitada"' "$HOME_T/a.out" \
+    && ok "ferramenta inventada é rejeitada na validação: nenhuma proposta executável sai do daemon" \
+    || ko "ferramenta inventada não foi rejeitada na proposta"
+grep -q '"tentativas":2' "$HOME_T/a.out" && ok "resposta inválida: exatamente uma nova tentativa ao modelo antes de rejeitar" \
+    || ko "nova tentativa limitada não registrada"
 enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"p3b","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"admin.super.inventada","parametros":{},"origem_modelo":true,"pergunta_id":"qualquer"}}'
 aguardar "$HOME_T/a.out" '"codigo":"ferramenta_desconhecida"' && ok "encaminhar a proposta como 'solicitar' é rejeitado (ferramenta_desconhecida)" \
     || ko "ferramenta inventada proposta pelo modelo não foi rejeitada ao ser solicitada"
@@ -339,7 +348,7 @@ parar_fake_ollama
 
 echo "== D3. resposta com proposta de ferramenta embutida no texto (servidor falso, modo 'ferramenta') =="
 iniciar_fake_ollama ferramenta
-iniciar_daemon_mock LIA_SESSIOND_MODELO=ollama LIA_OLLAMA_PORTA="$FAKE_PORT"
+iniciar_daemon_executor_real LIA_SESSIOND_MODELO=ollama LIA_OLLAMA_PORTA="$FAKE_PORT"
 abrir_conexao a
 enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"d3","em_resposta_a":null,"ts":"t","dados":{"mensagem":"pode me ajudar?"}}'
 aguardar "$HOME_T/a.out" '"ferramenta":"sistema.diagnosticar"' "50" && ok "bloco JSON de proposta extraído do texto corretamente" \
@@ -461,7 +470,7 @@ parar_fake_llama_cpp
 
 echo "== E3. resposta com proposta de ferramenta embutida no texto (servidor falso, modo 'ferramenta') =="
 iniciar_fake_llama_cpp ferramenta
-iniciar_daemon_mock LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
+iniciar_daemon_executor_real LIA_SESSIOND_MODELO=llama_cpp LIA_LLAMACPP_PORTA="$FAKE_PORT"
 abrir_conexao a
 enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"e3","em_resposta_a":null,"ts":"t","dados":{"mensagem":"pode me ajudar?"}}'
 aguardar "$HOME_T/a.out" '"ferramenta":"sistema.diagnosticar"' "50" && ok "bloco JSON de proposta extraído do texto corretamente" \
@@ -620,6 +629,226 @@ grep -qE '"risco":"admin"|sudo\.|root\.' "$HOME_T/a.out" && ko "F4: ferramenta a
     || ok "F4: nenhuma ferramenta administrativa chamada"
 fechar_a
 parar_daemon
+
+# ========================================================================
+# PARTE G — fluxo agente (docs/protocolo.md §10): intenção -> validação
+# independente -> proposta -> execução -> resposta final fundamentada.
+# Executor REAL + modelo mock (determinístico): o mock, de propósito,
+# erra a ferramenta ("processo" -> sistema.processos_top_cpu), e é o
+# roteador que precisa corrigir.
+# ========================================================================
+linha_tipo() { grep "\"tipo\":\"$1\"" "$HOME_T/a.out" 2>/dev/null | tail -1; }
+
+echo "== G1. processos por MEMÓRIA: modelo erra (propõe top_cpu), roteador corrige para sistema.processos_top_memoria =="
+# LIA_SESSIOND_ROTEAMENTO=modelo: o modelo é sempre consultado (é o caminho
+# que exercita a CORREÇÃO); a rota direta (padrão) é testada em G10.
+iniciar_daemon_executor_real LIA_SESSIOND_ROTEAMENTO=modelo
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g1","em_resposta_a":null,"ts":"t","dados":{"mensagem":"liste pra mim os processos que mais consumiram memoria ram"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' && ok "G1: proposta recebida" || ko "G1: sem proposta"
+P=$(linha_tipo proposta)
+case "$P" in *'"ferramenta_proposta":{"ferramenta":"sistema.processos_top_memoria"'*) ok "G1: ferramenta final é sistema.processos_top_memoria" ;; *) ko "G1: ferramenta final errada: $P" ;; esac
+case "$P" in *'"ferramenta_do_modelo":"sistema.processos_top_cpu"'*'"veredito":"corrigida"'*|*'"veredito":"corrigida"'*'"ferramenta_do_modelo":"sistema.processos_top_cpu"'*) ok "G1: validação registra que o modelo propôs top_cpu e foi corrigido" ;; *) ko "G1: correção não registrada" ;; esac
+case "$P" in *'"id":"processos_por_memoria"'*'"confianca":"alta"'*) ok "G1: intenção classificada (processos_por_memoria, alta)" ;; *) ko "G1: intenção ausente" ;; esac
+case "$P" in *'"execucao_automatica_permitida":true'*) ok "G1: leitura pura -> execução automática permitida pela política do daemon" ;; *) ko "G1: política de piloto automático ausente" ;; esac
+case "$P" in *sistema.recursos*|*'"ferramenta":"sistema.dispositivos"'*) ko "G1: recursos/dispositivos apareceu numa pergunta de processos" ;; *) ok "G1: nem sistema.recursos nem sistema.dispositivos aparecem" ;; esac
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+
+echo "== G2. execução real + 'resultado' com apresentação + 'resposta' final fundamentada =="
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g2","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.processos_top_memoria","parametros":{},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"estado":"sucesso"' "80" && ok "G2: execução real conclui" || ko "G2: sem resultado"
+R=$(linha_tipo resultado)
+case "$R" in *'"ordenar_por":"memoria"'*'"rss_kb":'*) ok "G2: resultado traz o JSON real (rss_kb por processo)" ;; *) ko "G2: JSON real ausente" ;; esac
+case "$R" in *'"apresentacao":"Processos que mais usam memória RAM agora'*) ok "G2: resultado traz a apresentação legível derivada do JSON" ;; *) ko "G2: apresentação ausente" ;; esac
+case "$R" in *'"tempo_execucao_ms":'*) ok "G2: tempo de execução medido" ;; *) ko "G2: tempo de execução ausente" ;; esac
+printf '%s' "$R" | python3 -I -c '
+import json, sys
+d = json.loads(sys.stdin.read())["dados"]
+procs = d["dados"]["saida"]["processos"]
+assert len(procs) == 10, len(procs)   # padrão do manifesto: o "limite" inventado pelo modelo não entra
+ap = d["apresentacao"]
+for p in procs:
+    assert str(p["pid"]) in ap and str((p["rss_kb"] + 512) // 1024) in ap, p
+assert procs == sorted(procs, key=lambda p: -p["rss_kb"])
+' && ok "G2: 10 processos (padrão), ordenados por RSS, e cada PID/RSS da apresentação vem do JSON" || ko "G2: apresentação diverge do JSON"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" && ok "G2: 'resposta' final recebida" || ko "G2: sem resposta final"
+F=$(linha_tipo resposta)
+case "$F" in *'"origem":"deterministica"'*'"fundamentada":true'*) ok "G2: ranking -> resposta final determinística (modelo não consultado para o resumo)" ;; *) ko "G2: resposta final sem origem/fundamentação: $F" ;; esac
+printf '%s\n%s' "$R" "$F" | python3 -I -c '
+import json, sys
+r, f = [json.loads(l)["dados"] for l in sys.stdin.read().split("\n")]
+p = r["dados"]["saida"]["processos"]
+t = f["resposta_texto"]
+assert "%s (PID %d)" % (p[0]["nome"], p[0]["pid"]) in t and "%d MiB" % ((p[0]["rss_kb"] + 512) // 1024) in t, t
+assert p[1]["nome"] in t and p[2]["nome"] in t, t
+' && ok "G2: a resposta final cita o 1º colocado real (nome, PID, RSS) e os dois seguintes" || ko "G2: resposta final não bate com o JSON"
+fechar_a
+
+echo "== G3. resumo livre (ferramenta sem resposta determinística): número inexistente ou recusa são descartados =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g3","em_resposta_a":null,"ts":"t","dados":{"mensagem":"MOCK_PROPOR:tools.discover MOCK_RESUMO_INVENTADO"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' || ko "G3: sem proposta"
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g3b","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"tools.discover","parametros":{},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "150" || ko "G3: sem resposta final"
+F=$(linha_tipo resposta)
+case "$F" in *'"origem":"deterministica"'*) ok "G3: resumo inventado NÃO é repassado — resposta final determinística" ;; *) ko "G3: resumo inventado passou: $F" ;; esac
+case "$F" in *'98765'*'não está nos dados'*) ok "G3: o aviso diz qual número não tinha origem" ;; *) ko "G3: aviso ausente" ;; esac
+case "$F" in *'"resposta_texto":"(mock) o processo fantasma'*) ko "G3: texto inventado apareceu como resposta" ;; *) ok "G3: o texto inventado não aparece como resposta" ;; esac
+fechar_a
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g3r","em_resposta_a":null,"ts":"t","dados":{"mensagem":"MOCK_PROPOR:tools.discover MOCK_RESUMO_RECUSA"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' || ko "G3: sem proposta (recusa)"
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g3s","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"tools.discover","parametros":{},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "150" || ko "G3: sem resposta final (recusa)"
+case "$(linha_tipo resposta)" in *'"origem":"deterministica"'*'negava ter os dados'*) ok "G3: resumo que nega ter os dados (\"não posso fornecer\") também é descartado" ;; *) ko "G3: recusa passou: $(linha_tipo resposta)" ;; esac
+fechar_a
+
+echo "== G3b. resposta EXTRATIVA (sistema.recursos): o modelo só escolhe linhas; o texto vem dos dados =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g3x","em_resposta_a":null,"ts":"t","dados":{"mensagem":"Quanto de RAM e swap estão disponíveis?"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' || ko "G3b: sem proposta"
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g3y","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.recursos","parametros":{},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" || ko "G3b: sem resposta final"
+printf '%s\n%s' "$(linha_tipo resultado)" "$(linha_tipo resposta)" | python3 -I -c '
+import json, sys
+r, f = [json.loads(l)["dados"] for l in sys.stdin.read().split("\n")]
+ap = [l.strip() for l in r["apresentacao"].split("\n") if l.strip()]
+t = f["resposta_texto"]
+assert f["origem"] == "modelo_extrativa", f["origem"]
+ram = next(l for l in ap if l.startswith("RAM:")); swap = next(l for l in ap if l.startswith("Swap:"))
+assert ram in t and swap in t, t            # o que foi perguntado está lá, copiado dos dados
+assert ap[0] in t                            # a linha 1, escolhida pelo modelo (mock), também
+assert "Uptime:" not in t and "Carga média:" not in t, t   # o que não foi perguntado nem escolhido, não
+total = int(next(l for l in open("/proc/meminfo") if l.startswith("MemTotal:")).split()[1]) // 1024
+assert "%d MiB no total" % total in t, t
+' && ok "G3b: resposta = linhas RAM e Swap (pedidas) + a escolhida pelo modelo, copiadas dos dados; MemTotal == /proc/meminfo" || ko "G3b: resposta extrativa incorreta: $(linha_tipo resposta)"
+fechar_a
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g3z","em_resposta_a":null,"ts":"t","dados":{"mensagem":"Qual kernel está em execução? MOCK_SELECAO_INVALIDA"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' || ko "G3b: sem proposta (seleção inválida)"
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g3w","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.diagnosticar","parametros":{},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" || ko "G3b: sem resposta final (seleção inválida)"
+F=$(linha_tipo resposta)
+case "$F" in *'"resposta_texto":"Kernel: Linux '"$(uname -r)"*'"origem":"deterministica"'*'inválida'*) ok "G3b: seleção fora da faixa é ignorada; sobra só a linha do kernel real, com aviso" ;; *) ko "G3b: seleção inválida mal tratada: $F" ;; esac
+fechar_a
+
+echo "== G4. intenção reconhecida SEM ferramenta (espaço em disco): proposta removida =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g4","em_resposta_a":null,"ts":"t","dados":{"mensagem":"quanto espaço livre tem no disco? MOCK_PROPOR:sistema.dispositivos"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' || ko "G4: sem proposta"
+P=$(linha_tipo proposta)
+case "$P" in *'"ferramenta_proposta":null'*'"veredito":"sem_ferramenta"'*) ok "G4: nenhuma ferramenta proposta (veto), mesmo com o modelo sugerindo sistema.dispositivos" ;; *) ko "G4: proposta deveria ter sido removida: $P" ;; esac
+case "$P" in *'Ainda não existe uma ferramenta'*) ok "G4: a pessoa recebe uma explicação clara" ;; *) ko "G4: explicação ausente" ;; esac
+fechar_a
+
+echo "== G5. política de piloto automático: só leitura pura; o resto continua exigindo confirmação =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g5","em_resposta_a":null,"ts":"t","dados":{"mensagem":"MOCK_PROPOR:tools.probe"}}'
+aguardar "$HOME_T/a.out" '"ferramenta":"tools.probe"' || ko "G5: sem proposta de tools.probe"
+case "$(linha_tipo proposta)" in *'"execucao_automatica_permitida":false'*) ok "G5: tools.probe (executa binários) NÃO pode rodar automaticamente" ;; *) ko "G5: tools.probe liberado para piloto automático" ;; esac
+fechar_a
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g5b","em_resposta_a":null,"ts":"t","dados":{"mensagem":"MOCK_PROPOR:tools.discover.persistir"}}'
+aguardar "$HOME_T/a.out" '"ferramenta":"tools.discover.persistir"' || ko "G5: sem proposta de persistir"
+case "$(linha_tipo proposta)" in *'"requer_aprovacao":true'*'"execucao_automatica_permitida":false'*) ok "G5: ferramenta que grava em disco: requer aprovação, nunca automática" ;; *) ko "G5: persistir liberado" ;; esac
+enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"g5c","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"tools.discover.persistir","parametros":{}}}'
+aguardar "$HOME_T/a.out" '"tipo":"plano"' || ko "G5: sem plano"
+nao_aparece "$HOME_T/a.out" '"tipo":"resultado"' 8 && ok "G5: mesmo solicitada, a ferramenta de escrita PARA em aprovação (nada executa)" || ko "G5: ferramenta de escrita executou sem aprovação"
+[ ! -e "$HOME_T/.lia/maquina/inventario/ferramentas.lia" ] && ok "G5: nada foi gravado em disco" || ko "G5: inventário gravado sem aprovação"
+fechar_a
+
+echo "== G6. parâmetros inválidos sem rota: uma nova tentativa, depois rejeição (nunca fabrica parâmetro) =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g6","em_resposta_a":null,"ts":"t","dados":{"mensagem":"MOCK_PARAMS_INVALIDOS"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' || ko "G6: sem proposta"
+P=$(linha_tipo proposta)
+case "$P" in *'"ferramenta_proposta":null'*'"veredito":"rejeitada"'*) ok "G6: proposta com parâmetro inválido é rejeitada" ;; *) ko "G6: deveria ser rejeitada: $P" ;; esac
+case "$P" in *'"tentativas":2'*) ok "G6: houve exatamente uma nova tentativa" ;; *) ko "G6: tentativas != 2" ;; esac
+fechar_a
+
+echo "== G7. interfaces de rede: parâmetro fixo da intenção (classe=rede) e resultado só com rede =="
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g7","em_resposta_a":null,"ts":"t","dados":{"mensagem":"Quais interfaces de rede existem?"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' || ko "G7: sem proposta"
+case "$(linha_tipo proposta)" in *'"ferramenta":"sistema.dispositivos","parametros":{"classe":"rede"}'*) ok "G7: sistema.dispositivos com classe=rede" ;; *) ko "G7: proposta errada: $(linha_tipo proposta)" ;; esac
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g7b","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.dispositivos","parametros":{"classe":"rede"},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"estado":"sucesso"' "80" || ko "G7: sem resultado"
+R=$(linha_tipo resultado)
+case "$R" in *'"classe":"bloco"'*|*'"classe":"pci"'*) ko "G7: veio dispositivo que não é de rede" ;; *'"classe":"rede"'*) ok "G7: só interfaces de rede no resultado" ;; *) ko "G7: nenhuma interface" ;; esac
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" && ok "G7: turno termina com resposta final" || ko "G7: sem resposta final"
+enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"g7c","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.dispositivos","parametros":{"classe":"usb"}}}'
+aguardar "$HOME_T/a.out" '"codigo":"parametro_invalido"' && ok "G7: classe fora do enum é recusada pelo manifesto" || ko "G7: classe inválida aceita"
+fechar_a
+parar_daemon
+
+echo "== G10. rota direta (padrão): intenção de alta confiança vira proposta sem consultar o modelo =="
+iniciar_fake_ollama http_erro   # se o modelo fosse consultado para a proposta, daria erro
+iniciar_daemon_executor_real LIA_SESSIOND_MODELO=ollama LIA_OLLAMA_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g10","em_resposta_a":null,"ts":"t","dados":{"mensagem":"top 5 processos que mais consomem memória RAM"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' "30" && ok "G10: proposta imediata mesmo com o modelo fora do ar" || ko "G10: sem proposta"
+P=$(linha_tipo proposta)
+case "$P" in *'"ferramenta":"sistema.processos_top_memoria","parametros":{"limite":5}'*) ok "G10: ferramenta e limite (dito pela pessoa) vêm da rota determinística" ;; *) ko "G10: proposta errada: $P" ;; esac
+case "$P" in *'"origem":"roteador"'*'"veredito":"rota_direta"'*) ok "G10: a proposta declara que veio do roteador, não do modelo" ;; *) ko "G10: origem não declarada" ;; esac
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g10b","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.processos_top_memoria","parametros":{"limite":5},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" && ok "G10: com o modelo fora do ar, o turno ainda termina com resposta final" || ko "G10: sem resposta final"
+case "$(linha_tipo resposta)" in *'"resposta_texto":"O processo que mais usa memória RAM agora é '*'"origem":"deterministica"'*) ok "G10: resposta final determinística com o dado real — o modelo nem é necessário" ;; *) ko "G10: resposta inesperada: $(linha_tipo resposta)" ;; esac
+printf '%s' "$(linha_tipo resultado)" | python3 -I -c 'import json,sys; assert len(json.loads(sys.stdin.read())["dados"]["dados"]["saida"]["processos"]) == 5' \
+    && ok "G10: exatamente 5 processos, como pedido" || ko "G10: quantidade errada"
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g10c","em_resposta_a":null,"ts":"t","dados":{"mensagem":"quanto espaço livre tem no disco?"}}'
+aguardar "$HOME_T/a.out" '"veredito":"sem_ferramenta"' "30" && ok "G10: intenção sem ferramenta também responde na hora (veto), sem modelo" || ko "G10: veto direto ausente"
+fechar_a
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g10d","em_resposta_a":null,"ts":"t","dados":{"mensagem":"Qual é a carga média e o uptime do sistema?"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' "30" || ko "G10: sem proposta (recursos)"
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g10e","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"sistema.recursos","parametros":{},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" || ko "G10: sem resposta final (recursos, modelo fora do ar)"
+case "$(linha_tipo resposta)" in *'"resposta_texto":"Uptime: '*'Carga média: '*'"origem":"deterministica"'*'o modelo não respondeu'*) ok "G10: resposta extrativa com o modelo fora do ar: linhas de uptime e carga, pelo que foi perguntado" ;; *) ko "G10: extrativa sem modelo falhou: $(linha_tipo resposta)" ;; esac
+fechar_a
+parar_daemon
+parar_fake_ollama
+env HOME="$HOME_T" LIA_SESSIOND_ROTEAMENTO=qualquer "$SESSIOND" >/dev/null 2>&1; [ $? -eq 1 ] && ok "G10: LIA_SESSIOND_ROTEAMENTO desconhecido -> daemon recusa iniciar" || ko "G10: valor desconhecido aceito"
+
+echo "== G8. cancelar a pergunta ao modelo em andamento (modelo lento) =="
+iniciar_fake_ollama lento
+iniciar_daemon_executor_real LIA_SESSIOND_MODELO=ollama LIA_OLLAMA_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g8","em_resposta_a":null,"ts":"t","dados":{"mensagem":"oi"}}'
+sleep 0.5
+enviar_a '{"protocolo":"lia.v1","tipo":"cancelar","id":"g8b","em_resposta_a":null,"ts":"t","dados":{"pergunta":true}}'
+aguardar "$HOME_T/a.out" '"codigo":"cancelado"' "30" && ok "G8: 'cancelar' de pergunta responde 'cancelado' imediatamente" || ko "G8: cancelamento não confirmado"
+nao_aparece "$HOME_T/a.out" '"tipo":"proposta"' 60 && ok "G8: nenhuma 'proposta' atrasada chega depois do cancelamento" || ko "G8: proposta chegou depois de cancelada"
+enviar_a '{"protocolo":"lia.v1","tipo":"cancelar","id":"g8c","em_resposta_a":null,"ts":"t","dados":{"pergunta":true}}'
+aguardar "$HOME_T/a.out" 'nenhuma pergunta ao modelo em andamento' && ok "G8: cancelar sem pergunta em andamento -> estado_invalido" || ko "G8: segundo cancelar aceito"
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g8d","em_resposta_a":null,"ts":"t","dados":{"mensagem":"oi de novo"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' "100" && ok "G8: a conexão aceita uma nova pergunta depois do cancelamento" || ko "G8: conexão travada depois do cancelamento"
+fechar_a
+parar_daemon
+parar_fake_ollama
+
+echo "== G9. saída estruturada: o backend manda o esquema (enum de ferramentas) e limite de tokens; o resumo vai sem esquema =="
+iniciar_fake_ollama estruturado
+iniciar_daemon_mock LIA_SESSIOND_MODELO=ollama LIA_OLLAMA_PORTA="$FAKE_PORT"
+abrir_conexao a
+enviar_a '{"protocolo":"lia.v1","tipo":"perguntar","id":"g9","em_resposta_a":null,"ts":"t","dados":{"mensagem":"leia algo"}}'
+aguardar "$HOME_T/a.out" '"tipo":"proposta"' "50" || ko "G9: sem proposta"
+P=$(linha_tipo proposta)
+case "$P" in *'"ferramenta_proposta":{"ferramenta":"mock.leitura"'*'"saida_estruturada":true'*) ok "G9: resposta estruturada (objeto JSON inteiro) interpretada, sem extrair JSON de texto livre" ;; *) ko "G9: resposta estruturada não reconhecida: $P" ;; esac
+case "$P" in *'"resposta_texto":"vou ler"'*) ok "G9: texto do modelo separado da proposta" ;; *) ko "G9: texto do modelo não separado" ;; esac
+PERGUNTA_ID=$(extrair_pergunta_id "$HOME_T/a.out")
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"solicitar","id":"g9b","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"mock.leitura","parametros":{},"origem_modelo":true,"pergunta_id":"%s"}}' "$PERGUNTA_ID")"
+aguardar "$HOME_T/a.out" '"tipo":"resposta"' "80" || ko "G9: sem resposta final"
+case "$(linha_tipo resposta)" in *'resumo sem format ok'*) ok "G9: pedido de resumo vai como texto livre (sem esquema) e nunca vira proposta" ;; *) ko "G9: resumo inesperado: $(linha_tipo resposta)" ;; esac
+fechar_a
+parar_daemon
+parar_fake_ollama
 
 echo
 echo "$total testes, $falhas falhas"

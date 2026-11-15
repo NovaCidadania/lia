@@ -12,6 +12,7 @@ void modelo_resposta_liberar(ModeloResposta *r)
     g_free(r->justificativa);
     g_free(r->erro_codigo);
     g_free(r->erro_mensagem);
+    g_free(r->tipo);
 }
 
 /* Procura o primeiro objeto JSON top-level em 'texto' (varredura simples
@@ -80,4 +81,56 @@ void modelo_preencher_proposta_de_texto(ModeloResposta *r, const char *texto_com
     }
     g_object_unref(p);
     g_free(bloco);
+}
+
+static const char *membro_string(JsonObject *obj, const char *chave)
+{
+    if (!json_object_has_member(obj, chave)) return NULL;
+    JsonNode *n = json_object_get_member(obj, chave);
+    if (JSON_NODE_TYPE(n) != JSON_NODE_VALUE || json_node_get_value_type(n) != G_TYPE_STRING) return NULL;
+    return json_node_get_string(n);
+}
+
+void modelo_preencher_proposta_estruturada(ModeloResposta *r, const char *texto_completo)
+{
+    /* o texto INTEIRO precisa ser um objeto JSON (só espaço em volta é
+     * tolerado) — nada de procurar um bloco no meio de prosa aqui. */
+    const char *ini = texto_completo ? texto_completo : "";
+    while (*ini == ' ' || *ini == '\n' || *ini == '\t' || *ini == '\r') ini++;
+    JsonParser *p = json_parser_new();
+    gboolean ok = *ini == '{' && json_parser_load_from_data(p, ini, -1, NULL) &&
+                  json_parser_get_root(p) && JSON_NODE_TYPE(json_parser_get_root(p)) == JSON_NODE_OBJECT;
+    JsonObject *obj = ok ? json_node_get_object(json_parser_get_root(p)) : NULL;
+    /* precisa ter cara do formato pedido: ao menos "resposta" (texto) ou "tipo" */
+    if (!obj || (!membro_string(obj, "resposta") && !membro_string(obj, "tipo"))) {
+        g_object_unref(p);
+        modelo_preencher_proposta_de_texto(r, texto_completo ? texto_completo : "");
+        r->estruturada = FALSE;
+        return;
+    }
+    r->estruturada = TRUE;
+    const char *resposta = membro_string(obj, "resposta");
+    r->resposta_texto = g_strdup(resposta ? resposta : "");
+    g_strstrip(r->resposta_texto);
+    const char *tipo = membro_string(obj, "tipo");
+    r->tipo = tipo ? g_strdup(tipo) : NULL;
+    const char *ferramenta = membro_string(obj, "ferramenta");
+    if (ferramenta && *ferramenta && strcmp(ferramenta, "nenhuma") != 0 && strcmp(ferramenta, "null") != 0) {
+        r->ferramenta_proposta = g_strdup(ferramenta);
+        if (json_object_has_member(obj, "parametros")) {
+            JsonNode *np = json_object_get_member(obj, "parametros");
+            JsonGenerator *gen = json_generator_new();
+            json_generator_set_root(gen, np);
+            /* qualquer coisa que não seja objeto segue como veio (ex.:
+             * "[]", "\"x\""): quem decide que isso é inválido é o roteador,
+             * nunca este parser trocando silenciosamente por {}. */
+            r->parametros_json = json_generator_to_data(gen, NULL);
+            g_object_unref(gen);
+        } else {
+            r->parametros_json = g_strdup("{}");
+        }
+        const char *just = membro_string(obj, "justificativa");
+        if (just && *just) r->justificativa = g_strdup(just);
+    }
+    g_object_unref(p);
 }

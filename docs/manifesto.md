@@ -163,13 +163,51 @@ Toda ferramenta que a Lia pode executar — por CLI, GUI ou modelo — publica u
 
 Nome e estado de processo já podem revelar informação sensível sobre o que a pessoa está rodando (ver `docs/THREAT-MODEL.md` §5.1) — por isso esta ferramenta nunca lê `/proc/<pid>/cmdline` nem `/proc/<pid>/environ` (argumentos completos, variáveis de ambiente, tokens e caminhos que poderiam vir embutidos neles) nesta primeira versão, mesmo sendo `risco: nenhum`. `capacidades` inclui `"processo"` (além de `"leitura_arquivo"`, já que a fonte é `/proc`) para o manifesto declarar com precisão o que de fato é lido — a mesma capacidade que `tools.discover`/`tools.probe` já usam para o catálogo de processos/binários.
 
-**Limitação conhecida:** não existe, nesta etapa, nenhuma ferramenta que ordene processos por uso de **memória** (`ordenar_por` só aceita `"cpu"`). Um pedido sobre "processos que mais usam memória" não tem ferramenta correspondente — a resposta certa é dizer isso em texto, nunca reaproveitar `sistema.processos_top_cpu` e apresentar números de CPU como se fossem de memória.
+```json
+{
+  "nome": "sistema.processos_top_memoria",
+  "versao": "0.1.0",
+  "descricao": "Lista os processos que mais usam memória RAM (RSS) agora.",
+  "parametros": {
+    "limite": { "tipo": "inteiro", "min": 1, "max": 100, "padrao": 10 },
+    "ordenar_por": { "tipo": "enum", "valores": ["memoria"], "padrao": "memoria" }
+  },
+  "capacidades": ["leitura_arquivo", "processo"],
+  "risco": "nenhum",
+  "efeitos": ["lê /proc/<pid>/status de cada processo e /proc/meminfo; não lê cmdline/environ; não escreve e não inicia processos"],
+  "requer_aprovacao": false,
+  "idempotente": false,
+  "timeout_padrao_ms": 5000,
+  "reversivel": "nao_aplicavel"
+}
+```
 
-### Validação independente da ferramenta proposta pelo modelo
+`sistema.processos_top_memoria` responde "liste os processos que mais usam memória RAM". Uma única passada por `/proc`:
 
-`sessiond/sessiond.c` (`classificar_ferramenta_esperada`) aplica uma segunda camada, puramente por palavra-chave e independente do que o modelo (LLM local, pequeno) respondeu: se o pedido da pessoa bate com um padrão de alta confiança para uma ferramenta diferente da que o modelo propôs (ex.: pedido claramente sobre "processos que mais consomem CPU" mas o modelo propôs `sistema.dispositivos`), a proposta enviada ao cliente é corrigida antes de sair do daemon — a `justificativa` da proposta corrigida deixa explícito que houve essa correção e qual era a proposta original do modelo. Isto nunca inventa uma ferramenta fora do manifesto nem altera o texto livre da resposta do modelo — só o campo estruturado `ferramenta_proposta`, que é o único que pode de fato ser executado.
+- **Fonte: `/proc/<pid>/status` (campos `Name`, `State`, `VmRSS`), não `/proc/<pid>/statm`.** `status` já traz o RSS em kB, rotulado pelo kernel; `statm` traz *páginas*, e converter exige o tamanho de página — que, sem libc (`cli/sistema.c` não tem `sysconf`), teria de ser presumido como 4096, premissa falsa em kernels com página de 16K/64K. `status` também distingue thread de kernel (sem linha `VmRSS`) de processo com RSS zero.
+- **Saída (JSON estável, só inteiros):** `ordenar_por`, `limite`, `considerados` (processos com memória de usuário), `sem_memoria_de_usuario` (threads de kernel/zumbis, contadas e deixadas fora), `memoria_total_kb` (`MemTotal`) e `processos[]` com `pid`, `nome`, `estado`, `rss_kb`, `mem_pct_centesimos` (percentual da RAM × 100 — centésimos, nunca ponto flutuante, pelo mesmo motivo de `cpu_pct_centesimos`). Ordenado por `rss_kb` decrescente; empate por `pid` crescente.
+- **Nunca** lê `/proc/<pid>/cmdline` nem `/proc/<pid>/environ`, nunca executa comando externo, nunca usa shell, nunca exige root. Processo que desaparece entre listar e ler é ignorado, sem falhar a coleta.
+- **Limites:** no máximo 8192 processos considerados (vetor estático, sem alocação dinâmica), no máximo 100 devolvidos, 5 s de execução (watchdog do daemon).
+- Saída humana pela CLI: `lia system processos_top_memoria [--limite N]`.
 
-Estes sete manifestos (`tools.discover`, `tools.probe`, `tools.list` acima, mais estes quatro `sistema.*`) são exatamente os implementados em `sessiond/manifesto_real.c` e expostos pelo executor real do daemon de sessão (`docs/protocolo.md` §8) — a mesma tabela, sem duplicação de lógica.
+`sistema.recursos` também devolve `carga_media_centesimos` (`1min`/`5min`/`15min`, de `/proc/loadavg`) e `uptime_segundos`; `sistema.dispositivos` aceita o parâmetro opcional `classe` (`rede`, `bloco` ou `pci`) para devolver só uma classe.
+
+### Roteamento: validação independente da ferramenta proposta
+
+`sessiond/roteador.c` (código puro, testado em `testes/unit/teste_roteador.c`) fica **entre o modelo e o executor**:
+
+```
+pedido da pessoa → intenção classificada → ferramenta candidata → validação independente → (só então) plano/execução
+```
+
+- **Classificação por intenção, não por palavra solta.** Combina conceitos do pedido: "processo" + "memória" → `processos_por_memoria`; "o que/quem mais consome CPU" → `processos_por_cpu`; "quanta memória livre" (sem processo, sem ranking) → `recursos_do_sistema`; "modelo do processador" não é confundido com "processo".
+- **Cada intenção tem a lista das ferramentas compatíveis.** Intenção de processos nunca aceita `sistema.dispositivos` nem `sistema.recursos`; processos por memória só aceita `sistema.processos_top_memoria`. Proposta incompatível do modelo é substituída pela ferramenta da rota (veredito `corrigida`), e a `proposta` registra o que o modelo tinha dito (`validacao.ferramenta_do_modelo`).
+- **Ferramenta inexistente nunca passa**; sem rota que a corrija, o modelo recebe **uma** nova tentativa com o motivo da rejeição e, se insistir, a proposta sai sem ferramenta (veredito `rejeitada`).
+- **Parâmetro inválido nunca é consertado por palpite**: volta ao padrão do manifesto ou a proposta é rejeitada. Um inteiro que o modelo colocou sem que a pessoa tenha dito aquele número (o modelo local inventou `"limite": 100` em teste) é descartado. O limite só vale quando a própria pessoa o disse ("os 5 processos", "top 5").
+- **Intenção reconhecida sem ferramenta** (ex.: espaço livre em disco) remove a proposta (veredito `sem_ferramenta`) em vez de reaproveitar uma ferramenta parecida; **pedido ambíguo** (CPU e memória ao mesmo tempo) vira pergunta de esclarecimento.
+- **Rota direta** (`LIA_SESSIOND_ROTEAMENTO=direto`, padrão): para intenção de confiança alta, a proposta sai na hora pela rota determinística, sem consultar o modelo para escolher a ferramenta (medido: o modelo local levava ~41 s só nessa etapa). `LIA_SESSIOND_ROTEAMENTO=modelo` faz o modelo sempre propor e o roteador validar/corrigir. A decisão passa pela mesma função nos dois modos.
+
+Estes oito manifestos de leitura (`tools.discover`, `tools.probe`, `tools.list`, `sistema.diagnosticar`, `sistema.recursos`, `sistema.dispositivos`, `sistema.processos_top_cpu`, `sistema.processos_top_memoria`), mais as duas ações de persistência da §6.1, são exatamente os implementados em `sessiond/manifesto_real.c` e expostos pelo executor real do daemon de sessão (`docs/protocolo.md` §8) — a mesma tabela, sem duplicação de lógica. Cada um declara também `somente_leitura` (`sessiond/executor.h`): só os que são leitura pura podem seguir sem confirmação no piloto automático (`docs/protocolo.md` §10); `tools.probe` é `risco: nenhum` mas executa binários do catálogo de probes, então **não** é leitura pura.
 
 ## 4. Ferramentas de nível `admin` (já implementadas, fora do escopo "somente leitura")
 

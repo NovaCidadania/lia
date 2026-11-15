@@ -32,6 +32,21 @@ static const ParametroManifesto PARAM_PROCESSOS_TOP_CPU[] = {
     { .nome = NULL },
 };
 
+static const char *const ORDENAR_POR_MEMORIA[] = { "memoria", NULL };
+
+static const ParametroManifesto PARAM_PROCESSOS_TOP_MEMORIA[] = {
+    { .nome = "limite", .tipo = PARAM_INTEIRO, .obrigatorio = FALSE, .min = 1, .max = 100 },
+    { .nome = "ordenar_por", .tipo = PARAM_ENUM, .obrigatorio = FALSE, .valores_enum = ORDENAR_POR_MEMORIA },
+    { .nome = NULL },
+};
+
+static const char *const CLASSES_DISPOSITIVO[] = { "rede", "bloco", "pci", NULL };
+
+static const ParametroManifesto PARAM_DISPOSITIVOS[] = {
+    { .nome = "classe", .tipo = PARAM_ENUM, .obrigatorio = FALSE, .valores_enum = CLASSES_DISPOSITIVO },
+    { .nome = NULL },
+};
+
 static const ManifestoReal TABELA[] = {
     {
         .base = {
@@ -50,6 +65,7 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "lê PATH e diretórios convencionais do sistema; não grava nada (ver tools.discover.persistir para persistir o resultado)",
             .timeout_padrao_ms = 15000,
+            .somente_leitura = TRUE, .uso = "inventariar os programas/ferramentas instalados (varre o PATH)",
         },
         .parametros = PARAM_VAZIO,
     },
@@ -67,6 +83,7 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "lê PATH e diretórios convencionais; grava ~/.lia/maquina/inventario/ferramentas.lia e ~/.lia/humano/diagnosticos/ferramentas.md",
             .timeout_padrao_ms = 15000,
+            .somente_leitura = FALSE, .uso = "gravar em disco o inventário de programas (exige aprovação)",
         },
         .parametros = PARAM_VAZIO,
     },
@@ -77,6 +94,7 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
             .efeitos = "lê ~/.lia/maquina/inventario/ferramentas.lia; não escreve nada",
             .timeout_padrao_ms = 5000,
+            .somente_leitura = TRUE, .uso = "listar o inventário de programas já gravado",
         },
         .parametros = PARAM_LIST,
     },
@@ -90,6 +108,7 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "executa, por até poucos segundos cada, só ferramentas do catálogo de probes seguros, com argumento inofensivo e sem privilégio; não grava nada (ver tools.probe.persistir)",
             .timeout_padrao_ms = 45000,
+            .somente_leitura = FALSE, .uso = "testar se os programas do catálogo seguro funcionam (executa cada um; exige pedido explícito)",
         },
         .parametros = PARAM_PROBE,
     },
@@ -100,6 +119,7 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "repete o probe seguro e grava ~/.lia/maquina/inventario/ferramentas.lia e ~/.lia/humano/diagnosticos/ferramentas.md",
             .timeout_padrao_ms = 45000,
+            .somente_leitura = FALSE, .uso = "testar os programas do catálogo seguro e gravar o resultado (exige aprovação)",
         },
         .parametros = PARAM_PROBE,
     },
@@ -110,6 +130,7 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
             .efeitos = "lê /etc/os-release, /proc/cpuinfo, /proc/meminfo, uname; não escreve nada",
             .timeout_padrao_ms = 5000,
+            .somente_leitura = TRUE, .uso = "distribuição, kernel, modelo e núcleos da CPU",
         },
         .parametros = PARAM_VAZIO,
     },
@@ -118,8 +139,9 @@ static const ManifestoReal TABELA[] = {
             .nome = "sistema.recursos", .risco = "nenhum", .requer_aprovacao = FALSE,
             .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
-            .efeitos = "lê /proc/meminfo, /proc/cpuinfo, /proc/uptime; não escreve nada",
+            .efeitos = "lê /proc/meminfo, /proc/cpuinfo, /proc/uptime, /proc/loadavg; não escreve nada",
             .timeout_padrao_ms = 5000,
+            .somente_leitura = TRUE, .uso = "RAM total/livre/disponível, swap, uptime e carga média",
         },
         .parametros = PARAM_VAZIO,
     },
@@ -130,8 +152,9 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA,
             .efeitos = "lê /sys/class/net, /sys/class/block, /sys/bus/pci/devices; não escreve nada",
             .timeout_padrao_ms = 5000,
+            .somente_leitura = TRUE, .uso = "interfaces de rede, dispositivos de bloco (discos) e dispositivos PCI; parâmetro opcional classe = rede|bloco|pci",
         },
-        .parametros = PARAM_VAZIO,
+        .parametros = PARAM_DISPOSITIVOS,
     },
     {
         .base = {
@@ -149,8 +172,28 @@ static const ManifestoReal TABELA[] = {
             .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
             .efeitos = "lê /proc/<pid>/stat de cada processo (duas amostras, com uma pausa curta entre elas); não lê cmdline/environ; não escreve nada",
             .timeout_padrao_ms = 8000,
+            .somente_leitura = TRUE, .uso = "processos que mais usam CPU agora; parâmetro opcional limite (1 a 100, padrão 10)",
         },
         .parametros = PARAM_PROCESSOS_TOP_CPU,
+    },
+    {
+        .base = {
+            /* Somente leitura: uma passada por /proc/<pid>/status (Name,
+             * State, VmRSS) e /proc/meminfo (MemTotal). Nunca cmdline nem
+             * environ, nunca um processo filho, nunca shell — mesma
+             * fronteira de sistema.processos_top_cpu (docs/THREAT-MODEL.md
+             * §5.1). idempotente=FALSE: a leitura não tem efeito, mas
+             * repetir não reproduz os mesmos números. Limites: no máximo
+             * 8192 processos considerados (vetor estático em
+             * cli/sistema.c), 100 devolvidos, 5 s de execução. */
+            .nome = "sistema.processos_top_memoria", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = FALSE,
+            .reversivel = "nao_aplicavel", .capacidades = CAP_LEITURA_PROCESSO,
+            .efeitos = "lê /proc/<pid>/status de cada processo e /proc/meminfo; não lê cmdline/environ; não escreve e não inicia processos",
+            .timeout_padrao_ms = 5000,
+            .somente_leitura = TRUE, .uso = "processos que mais usam memória RAM agora; parâmetro opcional limite (1 a 100, padrão 10)",
+        },
+        .parametros = PARAM_PROCESSOS_TOP_MEMORIA,
     },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))

@@ -88,6 +88,17 @@ OllamaRequisicao *ollama_gerar(OllamaConfig *cfg, const char *prompt,
 /* Cancelamento cooperativo: fecha a conexão e garante que concluido_cb
  * seja chamada (OLLAMA_ERRO_CANCELADO) se ainda não tiver sido. Nunca
  * chame depois que concluido_cb já tiver sido chamada para esta req. */
+/* Igual a ollama_gerar, com controle da geração:
+ *   formato_json: esquema JSON (texto) para o campo "format" de
+ *     /api/generate — a resposta sai restrita a esse esquema (saída
+ *     estruturada), em vez de texto livre. NULL = texto livre.
+ *   num_predict: limite de tokens gerados (<= 0 usa o padrão, 400).
+ * Um esquema que não seja JSON válido é ignorado (texto livre) — nunca
+ * vai um corpo de requisição malformado para o servidor. */
+OllamaRequisicao *ollama_gerar_opcoes(OllamaConfig *cfg, const char *prompt,
+                                       const char *formato_json, int num_predict,
+                                       OllamaConcluidoCb concluido_cb, gpointer ctx);
+
 void ollama_cancelar(OllamaRequisicao *req);
 
 #endif

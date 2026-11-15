@@ -33,6 +33,17 @@ typedef struct {
     const char * const *capacidades; /* terminada em NULL */
     const char *efeitos;          /* descrição legível, única (docs/manifesto.md exige "nunca vazio") */
     int timeout_padrao_ms;        /* docs/manifesto.md §1 "timeout_padrao_ms" */
+    /* TRUE só para ferramentas PURAMENTE de leitura: não gravam nada, não
+     * iniciam nenhum processo, não tocam hardware. É o único tipo que a
+     * política de piloto automático (LIA_CHAT_AUTOPILOT=read-only, ver
+     * docs/protocolo.md §10) deixa seguir de 'proposta' a 'resultado' sem
+     * confirmação. Declarado à mão por ferramenta, nunca deduzido de
+     * risco/capacidades — tools.probe, por exemplo, é risco "nenhum" mas
+     * executa binários do catálogo de probes, então fica FALSE. */
+    gboolean somente_leitura;
+    /* frase curta de "quando usar" — é o que vai para o prompt do modelo
+     * (bem menor que 'efeitos', que descreve o que a ferramenta toca). */
+    const char *uso;
 } ExecutorManifesto;
 
 typedef struct {

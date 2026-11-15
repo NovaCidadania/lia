@@ -318,7 +318,7 @@ máquina de estados do protocolo (reaproveita `gui/protocolo.c`).
 ```sh
 make chat          # compila build/lia-chat
 make chat-run       # compila e abre build/lia-chat (usa ~/.lia/run/session.sock)
-make teste-chat     # suíte de integração (make teste-chat), 53 testes
+make teste-chat     # integração em pipe (teste_chat.sh) + em pseudo-terminal real (teste_chat_pty.py)
 ```
 
 ### Uso
@@ -336,10 +336,32 @@ lia-chat [--socket CAMINHO] [--backend mock|ollama] [--modelo NOME] [--json] [--
 - `--json`: modo NDJSON cru — lê linhas de protocolo prontas de stdin, escreve
   as respostas do daemon cruas em stdout (scriptável; ver `testes/integration/teste_chat.sh`, PARTE E).
 
+**Fluxo agente (piloto automático de leitura).** Uma pergunta de leitura
+não para em "ferramenta sugerida": o daemon classifica a intenção, valida a
+ferramenta, executa e devolve os dados reais e uma resposta final
+(`docs/protocolo.md` §10). `LIA_CHAT_AUTOPILOT=read-only` é o padrão;
+`LIA_CHAT_AUTOPILOT=manual` volta a exigir `/plano` para tudo; qualquer
+outro valor faz o `lia-chat` recusar iniciar. Ferramentas que gravam,
+administram ou tocam hardware continuam parando em aprovação explícita em
+qualquer modo.
+
+**Terminal interativo.** `chat/terminal.c` desenha o histórico acima e, nas
+três últimas linhas, a linha de status (fase atual — consultando modelo,
+validando plano, executando leitura, gerando resposta final —, indicador de
+atividade, tempo decorrido), um separador e uma única linha de entrada. O
+que está sendo digitado nunca é sobrescrito por saída; a pergunta enviada
+vira uma linha do histórico e a entrada volta vazia. Edição: setas,
+Home/End, Delete, Ctrl-A/E/B/F/K/U/W/L, histórico com ↑/↓ (só em memória),
+colagem (quebras de linha coladas viram espaço). Ctrl-C cancela o que
+estiver em andamento (inclusive a consulta ao modelo); duas vezes em 2 s
+encerra. A linha de status mostra só estados operacionais — nunca
+raciocínio do modelo.
+
 Comandos dentro da sessão (`/help` para a lista completa): `/status`,
 `/modelo`, `/backend mock|ollama`, `/arquivos listar`, `/arquivo adicionar
 CAMINHO`, `/arquivo remover ÍNDICE`, `/plano`, `/simular`, `/aprovar`,
-`/rejeitar`, `/cancelar`, `/limpar`, `/sair`. Qualquer outra linha é
+`/rejeitar`, `/cancelar`, `/autopilot read-only|manual`, `/dados` (JSON
+bruto do último resultado), `/limpar`, `/sair`. Qualquer outra linha é
 enviada ao modelo como pergunta — exceto quando um plano está pendente,
 caso em que a linha é lida como `[s/N]` (padrão: **rejeitar**).
 

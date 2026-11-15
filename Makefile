@@ -178,7 +178,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-modelo-comum.o $(B)/sessiond-modelo-mock.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
                   $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
-                  $(B)/sessiond-prompt.o
+                  $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -201,7 +201,7 @@ $(B)/sessiond-executor-real.o: sessiond/executor_real.c sessiond/executor.h sess
 $(B)/sessiond-executor-comum.o: sessiond/executor_comum.c sessiond/executor.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/executor.h sessiond/modelo.h sessiond/prompt.h gui/protocolo.h | $(B)
+$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/executor.h sessiond/modelo.h sessiond/prompt.h sessiond/roteador.h sessiond/apresentacao.h gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-modelo-comum.o: sessiond/modelo_comum.c sessiond/modelo.h | $(B)
@@ -225,6 +225,23 @@ $(B)/sessiond-cliente-llama-cpp.o: ollama/cliente_llama_cpp.c ollama/cliente_lla
 $(B)/sessiond-prompt.o: sessiond/prompt.c sessiond/prompt.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
+$(B)/sessiond-roteador.o: sessiond/roteador.c sessiond/roteador.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-apresentacao.o: sessiond/apresentacao.c sessiond/apresentacao.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+# Testes unitários do roteador de intenção e da apresentação/fundamentação:
+# código puro, sem daemon, sem modelo, sem rede.
+$(B)/teste-roteador.o: testes/unit/teste_roteador.c sessiond/roteador.h sessiond/apresentacao.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-roteador: $(B)/teste-roteador.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o
+	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
+
+teste-roteador: $(B)/teste-roteador
+	$(B)/teste-roteador
+
 $(B)/sessiond-pic-texto.o: runtime/texto.c runtime/lia.h | $(B)
 	$(CC) $(SESSIOND_PIC_CFLAGS) -c $< -o $@
 
@@ -238,7 +255,7 @@ $(B)/sessiond-pic-ferramentas.o: cli/ferramentas.c runtime/lia.h cli/cli.h | $(B
 	$(CC) $(SESSIOND_PIC_CFLAGS) -c $< -o $@
 
 $(B)/lia-sessiond: $(SESSIOND_OBJS)
-	$(CC) $^ $(SESSIOND_LIBS) -o $@
+	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
 
 sessiond: $(B)/lia-sessiond
 
@@ -248,7 +265,7 @@ teste-sessiond: sessiond
 integration: sessiond gui
 	sh testes/integration/teste_integracao.sh
 
-teste-modelo: sessiond
+teste-modelo: sessiond teste-roteador
 	sh testes/integration/teste_modelo.sh
 
 $(B)/teste-cliente-ollama.o: testes/integration/teste_cliente_ollama.c sessiond/modelo.h ollama/cliente_ollama.h | $(B)
@@ -277,28 +294,26 @@ teste-llama-cpp: $(B)/teste-cliente-llama-cpp
 # compilados para "make sessiond" (mesmo probe de disponibilidade que o
 # daemon usaria, nunca a aprovação/execução em si). PODE enviar 'aprovar'
 # (desliga modo_leitura explicitamente) — é o próprio ponto desta CLI,
-# diferente de lia-gui. Edição de linha real (setas, histórico, Ctrl-A/E/
-# K/W, copiar/colar) via libedit — BSD, não GNU readline (GPL): a licença
-# do projeto Lia ainda está em aberto (PLANO.md §8), e libedit evita
-# prender o binário inteiro a GPL caso ele venha a ser distribuído.
-CHAT_PKGS   := libedit
-CHAT_CFLAGS := $(shell pkg-config --cflags $(CHAT_PKGS))
-CHAT_LIBS   := $(shell pkg-config --libs $(CHAT_PKGS))
+# diferente de lia-gui. O terminal interativo (região viva: status + linha de
+# entrada, editor de linha próprio) é chat/terminal.c — sem libedit/readline.
+$(B)/chat-terminal.o: chat/terminal.c chat/terminal.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/chat-lia-chat.o: chat/lia-chat.c gui/protocolo.h sessiond/modelo.h sessiond/prompt.h | $(B)
-	$(CC) $(SESSIOND_CFLAGS) $(CHAT_CFLAGS) -c $< -o $@
+$(B)/chat-lia-chat.o: chat/lia-chat.c chat/terminal.h gui/protocolo.h sessiond/modelo.h sessiond/prompt.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/lia-chat: $(B)/chat-lia-chat.o $(B)/sessiond-protocolo.o $(B)/sessiond-modelo-mock.o \
+$(B)/lia-chat: $(B)/chat-lia-chat.o $(B)/chat-terminal.o $(B)/sessiond-protocolo.o $(B)/sessiond-modelo-mock.o \
                $(B)/sessiond-modelo-ollama.o $(B)/sessiond-modelo-comum.o $(B)/sessiond-cliente-ollama.o \
                $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o
-	$(CC) $^ $(SESSIOND_LIBS) $(CHAT_LIBS) -o $@
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
 
 chat: $(B)/lia-chat
 
 teste-chat: chat sessiond
 	sh testes/integration/teste_chat.sh
+	python3 -I testes/integration/teste_chat_pty.py
 
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp chat teste-chat chat-run
+.PHONY: teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp chat teste-chat chat-run

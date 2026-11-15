@@ -34,6 +34,13 @@ typedef struct {
     char *justificativa;        /* por que o modelo sugere isso, ou NULL */
     char *erro_codigo;          /* se !sucesso */
     char *erro_mensagem;
+    /* TRUE quando o texto do modelo era, inteiro, um objeto JSON no formato
+     * estruturado pedido (ver modelo_preencher_proposta_estruturada) —
+     * FALSE quando caiu no caminho antigo de "JSON embutido em texto livre"
+     * ou quando não havia estrutura nenhuma. Só informativo: a validação
+     * (sessiond/roteador.h) é a mesma nos dois casos. */
+    gboolean estruturada;
+    char *tipo;                 /* "proposta" | "resposta" | "esclarecimento" (só quando estruturada), ou NULL */
 } ModeloResposta;
 
 void modelo_resposta_liberar(ModeloResposta *r);
@@ -49,6 +56,29 @@ typedef void (*ModeloConcluidoCb)(gpointer ctx, const ModeloResposta *r);
  * conta própria com isso (ver comentário no topo deste arquivo). */
 void modelo_preencher_proposta_de_texto(ModeloResposta *r, const char *texto_completo);
 
+/* Caminho preferido: 'texto_completo' é, inteiro, um objeto JSON
+ *   {"tipo":"proposta|resposta|esclarecimento","ferramenta":"<nome>|nenhuma",
+ *    "parametros":{...},"justificativa":"...","resposta":"..."}
+ * (é o que o backend pede ao modelo quando ModeloOpcoes.esquema_json não é
+ * NULL — saída restrita por esquema, não texto livre). Preenche os campos
+ * e marca r->estruturada. Se o texto NÃO for um objeto JSON com esse
+ * formato, recai em modelo_preencher_proposta_de_texto (compatibilidade
+ * com backends/modelos sem saída estruturada) e r->estruturada fica FALSE.
+ * Nunca fabrica nada: campo ausente fica NULL. */
+void modelo_preencher_proposta_estruturada(ModeloResposta *r, const char *texto_completo);
+
+/* Como a pergunta deve ser feita. Decidido por sessiond.c (que conhece o
+ * manifesto), nunca pelo conteúdo do prompt. */
+typedef struct {
+    /* Esquema JSON (texto) que a resposta deve obedecer, ou NULL para
+     * texto livre (usado no resumo final). Backends que suportam saída
+     * estruturada (Ollama "format", llama-server "json_schema") repassam;
+     * os demais ignoram. */
+    const char *esquema_json;
+    int max_tokens;      /* limite de tokens gerados; <= 0 usa o padrão do backend */
+    gboolean resumo;     /* TRUE: é o pedido de resumo final de um resultado já executado — nunca propõe ferramenta */
+} ModeloOpcoes;
+
 typedef struct ModeloBackend ModeloBackend;
 struct ModeloBackend {
     const char *nome_backend; /* "mock" ou "ollama" */
@@ -57,7 +87,8 @@ struct ModeloBackend {
      * confiança delimitadas — este módulo não interpreta nada nele, só
      * entrega ao backend. concluido_cb é chamada exatamente uma vez. */
     void (*perguntar)(const ModeloBackend *self, const char *pergunta_id,
-                       const char *prompt_montado, ModeloConcluidoCb concluido_cb, gpointer ctx);
+                       const char *prompt_montado, const ModeloOpcoes *opcoes,
+                       ModeloConcluidoCb concluido_cb, gpointer ctx);
 
     /* Cancelamento cooperativo; sem efeito se pergunta_id já terminou. */
     void (*cancelar)(const ModeloBackend *self, const char *pergunta_id);

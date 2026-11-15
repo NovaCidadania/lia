@@ -21,6 +21,7 @@ typedef struct {
     char *pergunta_id;
     ModeloConcluidoCb concluido_cb;
     gpointer ctx;
+    gboolean resumo; /* pedido de resumo final: a resposta é só texto, nunca uma proposta */
     LlamaCppRequisicao *req;
 } TarefaLlamaCpp;
 
@@ -46,7 +47,15 @@ static void ao_concluir_llama_cpp(gpointer ctx, LlamaCppErro erro, const char *t
 
     if (erro == LLAMACPP_OK) {
         r.sucesso = TRUE;
-        modelo_preencher_proposta_de_texto(&r, texto_completo);
+        if (t->resumo) {
+            /* resumo final: texto e nada mais — mesmo que o modelo escreva
+             * algo com cara de proposta, NUNCA é interpretado como uma
+             * (evita encadear ações sem um novo pedido da pessoa). */
+            r.resposta_texto = g_strdup(texto_completo ? texto_completo : "");
+            g_strstrip(r.resposta_texto);
+        } else {
+            modelo_preencher_proposta_estruturada(&r, texto_completo);
+        }
     } else {
         r.sucesso = FALSE;
         r.erro_codigo = g_strdup(
@@ -68,7 +77,8 @@ static void ao_concluir_llama_cpp(gpointer ctx, LlamaCppErro erro, const char *t
 }
 
 static void llama_cpp_perguntar(const ModeloBackend *self, const char *pergunta_id,
-                                 const char *prompt_montado, ModeloConcluidoCb concluido_cb, gpointer ctx)
+                                 const char *prompt_montado, const ModeloOpcoes *opcoes,
+                              ModeloConcluidoCb concluido_cb, gpointer ctx)
 {
     (void)self;
     if (!g_em_andamento)
@@ -79,7 +89,9 @@ static void llama_cpp_perguntar(const ModeloBackend *self, const char *pergunta_
     t->concluido_cb = concluido_cb;
     t->ctx = ctx;
     g_hash_table_insert(g_em_andamento, t->pergunta_id, t);
-    t->req = llama_cpp_gerar(obter_config(), prompt_montado, ao_concluir_llama_cpp, t);
+    t->resumo = opcoes && opcoes->resumo;
+    t->req = llama_cpp_gerar_opcoes(obter_config(), prompt_montado, opcoes ? opcoes->esquema_json : NULL,
+                                  opcoes ? opcoes->max_tokens : 0, ao_concluir_llama_cpp, t);
 }
 
 static void llama_cpp_cancelar_pergunta(const ModeloBackend *self, const char *pergunta_id)

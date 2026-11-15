@@ -125,8 +125,47 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
         char *argv[] = { (char *)"recursos", (char *)"--json" };
         rc = cmd_system(2, argv);
     } else if (strcmp(m->base.nome, "sistema.dispositivos") == 0) {
-        char *argv[] = { (char *)"dispositivos", (char *)"--json" };
-        rc = cmd_system(2, argv);
+        const char *classe = campo_str(parametros, "classe");
+        char *argv[4];
+        int n = 0;
+        argv[n++] = (char *)"dispositivos";
+        argv[n++] = (char *)"--json";
+        if (classe) {
+            argv[n++] = (char *)"--classe";
+            argv[n++] = (char *)classe;
+        }
+        rc = cmd_system(n, argv);
+        if (rc == 2) {
+            /* classe fora do enum — o manifesto já barra antes; segunda
+             * confirmação defensiva, nunca reporta sucesso com saída vazia. */
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("parametro_invalido");
+            r->erro_mensagem = g_strdup("classe de dispositivo inválida");
+            return;
+        }
+    } else if (strcmp(m->base.nome, "sistema.processos_top_memoria") == 0) {
+        gint64 limite = 10;
+        if (parametros && json_object_has_member(parametros, "limite")) {
+            JsonNode *n = json_object_get_member(parametros, "limite");
+            if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_INT64)
+                limite = json_node_get_int(n);
+        }
+        if (limite < 1 || limite > 100) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("parametro_invalido");
+            r->erro_mensagem = g_strdup("limite fora da faixa permitida");
+            return;
+        }
+        char limite_s[16];
+        g_snprintf(limite_s, sizeof limite_s, "%" G_GINT64_FORMAT, limite);
+        char *argv[] = { (char *)"processos_top_memoria", (char *)"--json", (char *)"--limite", limite_s };
+        rc = cmd_system(4, argv);
+        if (rc == 1) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("recurso_indisponivel");
+            r->erro_mensagem = lia_err.n > 0 ? g_strndup(lia_err.p, lia_err.n) : g_strdup("/proc indisponível");
+            return;
+        }
     } else if (strcmp(m->base.nome, "sistema.processos_top_cpu") == 0) {
         gint64 limite = 10, intervalo_ms = 200;
         if (parametros && json_object_has_member(parametros, "limite")) {

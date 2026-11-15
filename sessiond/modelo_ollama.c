@@ -23,6 +23,7 @@ typedef struct {
     char *pergunta_id;
     ModeloConcluidoCb concluido_cb;
     gpointer ctx;
+    gboolean resumo; /* pedido de resumo final: a resposta é só texto, nunca uma proposta */
     OllamaRequisicao *req;
 } TarefaOllama;
 
@@ -49,7 +50,15 @@ static void ao_concluir_ollama(gpointer ctx, OllamaErro erro, const char *texto_
 
     if (erro == OLLAMA_OK) {
         r.sucesso = TRUE;
-        modelo_preencher_proposta_de_texto(&r, texto_completo);
+        if (t->resumo) {
+            /* resumo final: texto e nada mais — mesmo que o modelo escreva
+             * algo com cara de proposta, NUNCA é interpretado como uma
+             * (evita encadear ações sem um novo pedido da pessoa). */
+            r.resposta_texto = g_strdup(texto_completo ? texto_completo : "");
+            g_strstrip(r.resposta_texto);
+        } else {
+            modelo_preencher_proposta_estruturada(&r, texto_completo);
+        }
     } else {
         r.sucesso = FALSE;
         r.erro_codigo = g_strdup(
@@ -71,7 +80,8 @@ static void ao_concluir_ollama(gpointer ctx, OllamaErro erro, const char *texto_
 }
 
 static void ollama_perguntar(const ModeloBackend *self, const char *pergunta_id,
-                              const char *prompt_montado, ModeloConcluidoCb concluido_cb, gpointer ctx)
+                              const char *prompt_montado, const ModeloOpcoes *opcoes,
+                              ModeloConcluidoCb concluido_cb, gpointer ctx)
 {
     (void)self;
     if (!g_em_andamento)
@@ -82,7 +92,9 @@ static void ollama_perguntar(const ModeloBackend *self, const char *pergunta_id,
     t->concluido_cb = concluido_cb;
     t->ctx = ctx;
     g_hash_table_insert(g_em_andamento, t->pergunta_id, t);
-    t->req = ollama_gerar(obter_config(), prompt_montado, ao_concluir_ollama, t);
+    t->resumo = opcoes && opcoes->resumo;
+    t->req = ollama_gerar_opcoes(obter_config(), prompt_montado, opcoes ? opcoes->esquema_json : NULL,
+                                  opcoes ? opcoes->max_tokens : 0, ao_concluir_ollama, t);
 }
 
 static void ollama_cancelar_pergunta(const ModeloBackend *self, const char *pergunta_id)

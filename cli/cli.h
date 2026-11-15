@@ -87,4 +87,25 @@ size_t lia_proc_calcular_cpu(const LiaProcAmostra *antes, size_t n_antes,
                               u64 elapsed_ms, u64 ncpus,
                               LiaProcCpu *out, size_t max);
 
+/* sistema.c — sistema.processos_top_memoria: mesma separação coleta/cálculo
+ * de processos_top_cpu, mesma 'raiz' injetável. Lê <raiz>/<pid>/status
+ * (Name, State, VmRSS) — nunca cmdline/environ. Entradas sem VmRSS
+ * (threads de kernel, zumbis) não entram em 'out': são só contadas em
+ * *sem_rss. Retorna a quantidade escrita (até 'max'), ou -1 se 'raiz' não
+ * pôde ser aberta como diretório. */
+typedef struct {
+    u32 pid;
+    char nome[LIA_PROC_NOME_MAX];
+    char estado;
+    u64 rss_kb;          /* VmRSS, em kB, como o kernel reporta */
+    u64 mem_centesimos;  /* rss_kb / MemTotal * 100, em centésimos de % — preenchido por lia_proc_ordenar_memoria */
+} LiaProcMem;
+
+long lia_proc_coletar_memoria(const char *raiz, LiaProcMem *out, size_t max, u64 *sem_rss);
+
+/* Pura: calcula mem_centesimos de cada entrada contra 'mem_total_kb' (0 =>
+ * todos ficam 0, nunca divide por zero) e ordena por rss_kb decrescente
+ * (empate: pid crescente). */
+void lia_proc_ordenar_memoria(LiaProcMem *v, size_t n, u64 mem_total_kb);
+
 #endif

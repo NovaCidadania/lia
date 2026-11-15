@@ -404,6 +404,93 @@ env -i "$LIA" system processos_top_cpu --json --limite 1 --intervalo-ms 100 >/de
     && ok "processos_top_cpu: funciona sem nenhuma variável de ambiente (nem HOME)" \
     || ko "processos_top_cpu depende do ambiente"
 
+# ---------- lia system processos_top_memoria (somente leitura; fixtures determinísticas em testes/nucleo/) ----------
+"$LIA" system processos_top_memoria --limite 0 >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_memoria: --limite 0 -> exit 2" || ko "processos_top_memoria: --limite 0"
+"$LIA" system processos_top_memoria --limite 101 >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_memoria: --limite 101 -> exit 2" || ko "processos_top_memoria: --limite 101"
+"$LIA" system processos_top_memoria --limite abc >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_memoria: --limite não numérico -> exit 2" || ko "processos_top_memoria: --limite não numérico"
+"$LIA" system processos_top_memoria --ordenar-por cpu >/dev/null 2>&1; [ $? -eq 2 ] && ok "processos_top_memoria: --ordenar-por cpu -> exit 2" || ko "processos_top_memoria: --ordenar-por cpu"
+"$LIA" system processos_top_memoria --raiz-proc /caminho/que/nao/existe >/dev/null 2>&1
+[ $? -eq 1 ] && ok "processos_top_memoria: raiz /proc inexistente -> exit 1 (erro estruturado)" || ko "processos_top_memoria: raiz inexistente"
+
+# fixture de /proc montada à mão: resultado exato conhecido de antemão
+FX="$T/proc_mem_fx"; /usr/bin/mkdir -p "$FX/10" "$FX/20" "$FX/30" "$FX/2"
+printf 'MemTotal:       1000000 kB\nMemFree: 1 kB\n' > "$FX/meminfo"
+printf 'Name:\tgrande\nState:\tS (sleeping)\nVmRSS:\t  250000 kB\n' > "$FX/10/status"
+printf 'Name:\tpequeno\nState:\tR (running)\nVmRSS:\t   10000 kB\n' > "$FX/20/status"
+printf 'Name:\tmedio\nState:\tS (sleeping)\nVmRSS:\t  125000 kB\n' > "$FX/30/status"
+printf 'Name:\tkworker\nState:\tI (idle)\n' > "$FX/2/status"
+printf 'SENHA=nao-pode-aparecer' > "$FX/10/environ"; printf 'grande --token=nao-pode-aparecer' > "$FX/10/cmdline"
+"$LIA" system processos_top_memoria --json --limite 2 --raiz-proc "$FX" > "$T/mem_fx.json"
+python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["ordenar_por"] == "memoria" and d["limite"] == 2
+assert d["considerados"] == 3 and d["sem_memoria_de_usuario"] == 1 and d["memoria_total_kb"] == 1000000
+assert d["processos"] == [
+    {"pid": 10, "nome": "grande", "estado": "S", "rss_kb": 250000, "mem_pct_centesimos": 2500},
+    {"pid": 30, "nome": "medio", "estado": "S", "rss_kb": 125000, "mem_pct_centesimos": 1250},
+], d["processos"]
+' "$T/mem_fx.json" && ok "processos_top_memoria (fixture): JSON exato, ordenado por RSS, limite respeitado, kthread fora" \
+    || ko "processos_top_memoria (fixture): JSON inesperado"
+/usr/bin/grep -q 'nao-pode-aparecer' "$T/mem_fx.json" && ko "processos_top_memoria vazou environ/cmdline" \
+    || ok "processos_top_memoria (fixture): environ/cmdline nunca aparecem na saída"
+
+# máquina real: compara com uma leitura INDEPENDENTE de /proc (python, statm*pagesize) — nunca com a própria Lia
+"$LIA" system processos_top_memoria --json --limite 100 > "$T/mem_real.json"
+python3 -I -c '
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+procs = d["processos"]
+assert 0 < len(procs) <= 100
+total = int(next(l for l in open("/proc/meminfo") if l.startswith("MemTotal:")).split()[1])
+assert d["memoria_total_kb"] == total
+ant = None
+for p in procs:
+    for c in ("pid", "nome", "estado", "rss_kb", "mem_pct_centesimos"):
+        assert c in p, c
+    assert all(isinstance(p[c], int) for c in ("pid", "rss_kb", "mem_pct_centesimos"))
+    assert p["mem_pct_centesimos"] == (p["rss_kb"] * 10000 + total // 2) // total
+    if ant is not None:
+        assert p["rss_kb"] <= ant, "não está ordenado decrescente"
+    ant = p["rss_kb"]
+# referência independente: /proc/<pid>/statm (resident, em páginas) * tamanho de página
+pg = os.sysconf("SC_PAGE_SIZE") // 1024
+ok = 0; vistos = 0
+for p in procs[:10]:
+    try:
+        rss_ref = int(open("/proc/%d/statm" % p["pid"]).read().split()[1]) * pg
+        nome_ref = open("/proc/%d/comm" % p["pid"]).read().strip()
+    except OSError:
+        continue  # processo terminou entre as duas leituras
+    vistos += 1
+    if nome_ref == p["nome"] and abs(rss_ref - p["rss_kb"]) <= max(65536, p["rss_kb"] // 4):
+        ok += 1
+assert vistos >= 3 and ok >= vistos - 1, (vistos, ok)
+' "$T/mem_real.json" && ok "processos_top_memoria (máquina real): formato estável e RSS/nome batem com /proc/<pid>/statm e comm lidos à parte" \
+    || ko "processos_top_memoria (máquina real): divergência da referência independente"
+
+"$LIA" system processos_top_memoria --limite 3 > "$T/mem_top.txt"
+head -1 "$T/mem_top.txt" | /usr/bin/grep -qE 'PID.*NOME.*EST.*RSS.*MEM%' && ok "processos_top_memoria: cabeçalho do texto humano presente" || ko "processos_top_memoria: cabeçalho ausente"
+env -i "$LIA" system processos_top_memoria --json --limite 1 >/dev/null 2>&1 \
+    && ok "processos_top_memoria: funciona sem nenhuma variável de ambiente" || ko "processos_top_memoria depende do ambiente"
+
+# ---------- recursos: carga média; dispositivos: filtro de classe ----------
+"$LIA" system recursos --json > "$T/rec.json"
+python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+c = d["carga_media_centesimos"]
+ref = open("/proc/loadavg").read().split()[:3]
+assert all(isinstance(c[k], int) for k in ("1min", "5min", "15min"))
+assert abs(c["15min"] - round(float(ref[2]) * 100)) <= 5, (c, ref)
+assert isinstance(d["uptime_segundos"], int) and abs(d["uptime_segundos"] - float(open("/proc/uptime").read().split()[0])) < 5
+' "$T/rec.json" && ok "system recursos --json: carga média (centésimos, inteiro) e uptime batem com /proc/loadavg e /proc/uptime" \
+    || ko "system recursos --json: carga média/uptime divergentes"
+n_rede_ref=$(/usr/bin/ls /sys/class/net | /usr/bin/wc -l)
+n_rede_lia=$("$LIA" system dispositivos --json --classe rede | python3 -I -c "import json,sys; d=json.load(sys.stdin); assert all(x['classe']=='rede' for x in d); print(len(d))")
+[ "$n_rede_ref" = "$n_rede_lia" ] && ok "system dispositivos --classe rede: só interfaces de rede, mesma contagem de /sys/class/net" || ko "dispositivos --classe rede ($n_rede_lia != $n_rede_ref)"
+"$LIA" system dispositivos --classe bogus >/dev/null 2>&1; [ $? -eq 2 ] && ok "system dispositivos --classe inválida: exit 2" || ko "dispositivos --classe inválida"
+
 # nenhum comando somente leitura chama fork/execve (sem shell, sem processo filho, sem privilégio)
 if command -v nm >/dev/null; then
     nm -u "$RAIZ/build/sistema.o" 2>/dev/null | grep -qE 'lia_fork|lia_execve' \

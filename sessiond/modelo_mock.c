@@ -33,9 +33,34 @@ static gboolean contem_ci(const char *texto, const char *alvo)
 }
 
 static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
-                            const char *prompt_montado_completo, ModeloConcluidoCb concluido_cb, gpointer ctx)
+                            const char *prompt_montado_completo, const ModeloOpcoes *opcoes,
+                            ModeloConcluidoCb concluido_cb, gpointer ctx)
 {
     (void)self; (void)pergunta_id;
+    if (opcoes && opcoes->resumo) {
+        /* pedido de resumo final (sessiond.c, disparar_resumo_modelo):
+         * nunca propõe outra ferramenta. MOCK_RESUMO_INVENTADO no pedido
+         * original força, de propósito, um resumo com um número que a
+         * ferramenta não devolveu — testa a checagem de fundamentação. */
+        ModeloResposta rr = { 0 };
+        rr.sucesso = TRUE;
+        if (opcoes->esquema_json) {
+            /* seleção extrativa: devolve {"linhas":[...]}; MOCK_SELECAO_INVALIDA
+             * força índices fora da faixa (o daemon precisa ignorá-los). */
+            rr.resposta_texto = g_strdup(strstr(prompt_montado_completo, "MOCK_SELECAO_INVALIDA")
+                ? "{\"linhas\":[999,-3]}" : "{\"linhas\":[1]}");
+            concluido_cb(ctx, &rr);
+            modelo_resposta_liberar(&rr);
+            return;
+        }
+        rr.resposta_texto = g_strdup(strstr(prompt_montado_completo, "MOCK_RESUMO_INVENTADO")
+            ? "(mock) o processo fantasma usa 98765 MiB."
+            : strstr(prompt_montado_completo, "MOCK_RESUMO_RECUSA") ? "(mock) Não posso fornecer essa informação."
+            : "(mock) resultado recebido e resumido.");
+        concluido_cb(ctx, &rr);
+        modelo_resposta_liberar(&rr);
+        return;
+    }
     ModeloResposta r = { 0 };
     r.sucesso = TRUE;
 
@@ -65,6 +90,11 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
          * nunca propõe outra ferramenta nesta etapa (evita encadeamento
          * automático de ações sem nova aprovação humana). */
         r.resposta_texto = g_strdup("(mock) resultado recebido e resumido.");
+    } else if (strstr(prompt_montado, "MOCK_PARAMS_INVALIDOS")) {
+        r.ferramenta_proposta = g_strdup("tools.list");
+        r.parametros_json = g_strdup("{\"estado\":\"ESTADO_QUE_NAO_EXISTE\"}");
+        r.justificativa = g_strdup("parâmetros inválidos forçados por marcador de teste");
+        r.resposta_texto = g_strdup("(mock) proposta com parâmetros inválidos.");
     } else if (contem_ci(prompt_montado, "processo") || contem_ci(prompt_montado, "cpu")) {
         r.ferramenta_proposta = g_strdup("sistema.processos_top_cpu");
         r.parametros_json = g_strdup("{\"limite\":10}");

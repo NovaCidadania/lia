@@ -9,6 +9,9 @@ produção. Modos controlados por variável de ambiente OLLAMA_FAKE_MODO:
   http_erro        -- responde 500
   lento            -- atrasa cada linha (para testar timeout de inatividade)
   ferramenta       -- resposta final inclui um bloco JSON sugerindo uma ferramenta
+  estruturado      -- resposta é, inteira, o objeto JSON do formato estruturado; só
+                      responde assim se a requisição trouxe "format" (esquema) com
+                      a ferramenta no enum — senão devolve texto dizendo o que faltou
   chunk_sem_crlf   -- chunk sem o CRLF correto depois dos dados (framing quebrado)
   chunk_extensao   -- tamanho do chunk com uma extensão (";ext=1") não suportada
   cabecalho_gigante -- cabeçalho único acima do limite de 8 KiB do cliente
@@ -30,7 +33,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         tam = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(tam)
+        corpo = self.rfile.read(tam)
+        try:
+            pedido = json.loads(corpo)
+        except ValueError:
+            pedido = {}
 
         if MODO == "http_erro":
             self.send_response(500)
@@ -82,6 +89,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 {"response": "mundo", "done": False},
                 {"response": "", "done": True},
             ]
+
+        if MODO == "estruturado":
+            fmt = pedido.get("format")
+            nomes = []
+            if isinstance(fmt, dict):
+                nomes = fmt.get("properties", {}).get("ferramenta", {}).get("enum", [])
+            prompt = pedido.get("prompt", "")
+            if "DADOS REAIS DEVOLVIDOS" in prompt:
+                # pedido de resumo: texto livre, e SEM "format" (senão o fake denuncia)
+                texto = "resumo sem format ok" if fmt is None else "ERRO: resumo veio com format"
+            elif "mock.leitura" in nomes and pedido.get("options", {}).get("num_predict", 0) > 0:
+                texto = json.dumps({"tipo": "proposta", "ferramenta": "mock.leitura", "parametros": {},
+                                    "justificativa": "teste", "resposta": "vou ler"})
+            else:
+                texto = "ERRO: requisicao sem format/enum de ferramentas/num_predict"
+            meio = len(texto) // 2
+            linhas = [{"response": texto[:meio], "done": False}, {"response": texto[meio:], "done": False},
+                      {"response": "", "done": True}]
 
         for i, obj in enumerate(linhas):
             if MODO == "truncado" and i == len(linhas) - 1:

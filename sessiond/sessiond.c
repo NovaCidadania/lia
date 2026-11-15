@@ -43,6 +43,8 @@
 #include "executor.h"
 #include "modelo.h"
 #include "prompt.h"
+#include "roteador.h"
+#include "apresentacao.h"
 
 #define LIA_SESSIOND_LINHA_MAX 65536
 #define LIA_SESSIOND_CHUNK 4096
@@ -83,6 +85,16 @@ typedef struct {
     gboolean origem_modelo;       /* 'solicitar'.dados.origem_modelo — liga ao pergunta_id_origem */
     char *pergunta_id_origem;     /* pergunta_id da 'proposta' que originou este solicitar, se houver */
     char *pergunta_pendente_id;   /* pergunta_id de um 'perguntar' ainda sem 'proposta' de resposta */
+    char *pergunta_modelo_id;     /* id da requisição ao modelo em andamento para essa pergunta (muda na nova tentativa) — só para cancelar */
+
+    /* ---- fluxo agente (docs/protocolo.md §10): a última pergunta
+     * respondida com uma proposta fica guardada para o resumo final citar
+     * o pedido original; resumo_pendente_id é a requisição de resumo em
+     * andamento (para cancelar / descartar uma resposta atrasada). */
+    char *ultima_pergunta_id;
+    char *ultima_pergunta_texto;
+    char *resumo_pendente_id;
+    gint64 exec_inicio_us;        /* g_get_monotonic_time() de quando a execução atual foi despachada */
 } Cliente;
 
 struct Daemon {
@@ -97,11 +109,19 @@ struct Daemon {
 
 static void desconectar_cliente(Cliente *c, const char *motivo);
 static void comecar_leitura(Cliente *c);
-static void disparar_resumo_modelo(Cliente *c, const char *ferramenta,
-                                    const char *pergunta_id_origem, const char *resultado_texto);
+static void disparar_resumo_modelo(Cliente *c, const char *ferramenta, const char *pergunta_id_origem,
+                                    const char *apresentacao, const char *dados_json, gboolean truncado);
+static void enviar_resposta_final(Cliente *c, const char *pergunta_id, const char *texto, const char *origem,
+                                   gboolean fundamentada, const char *aviso, gint64 tempo_modelo_ms);
 static Daemon *g_daemon_para_auditoria; /* único daemon neste processo */
 static const Executor *g_executor;
 static const ModeloBackend *g_modelo;
+/* LIA_SESSIOND_ROTEAMENTO: "direto" (padrão) — intenção de ALTA confiança
+ * vira proposta na hora, pela rota determinística, sem consultar o modelo
+ * para escolher a ferramenta (o modelo só escreve a resposta final);
+ * "modelo" — o modelo sempre propõe e o roteador valida/corrige. A
+ * validação independente é a mesma nos dois: só muda quem fala primeiro. */
+static gboolean g_rota_direta = TRUE;
 
 /* ---------------------------------------------------------------- utils */
 
@@ -156,6 +176,10 @@ static void cliente_unref(Cliente *c)
     g_free(c->justificativa_pendente);
     g_free(c->pergunta_id_origem);
     g_free(c->pergunta_pendente_id);
+    g_free(c->pergunta_modelo_id);
+    g_free(c->ultima_pergunta_id);
+    g_free(c->ultima_pergunta_texto);
+    g_free(c->resumo_pendente_id);
     g_object_unref(c->conexao);
     g_free(c);
 }
@@ -309,7 +333,11 @@ static void enviar_saida(Cliente *c, const char *trecho)
     escrever_linha(c, linha);
 }
 
-static void enviar_resultado(Cliente *c, const char *estado, int codigo_saida, const char *dados_json)
+/* 'apresentacao' (opcional): texto legível derivado SÓ de dados_json por
+ * sessiond/apresentacao.c — é o que um cliente mostra à pessoa como "o
+ * dado real"; o JSON bruto continua em 'dados', intacto. */
+static void enviar_resultado_ex(Cliente *c, const char *estado, int codigo_saida, const char *dados_json,
+                                 const char *apresentacao)
 {
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
@@ -320,6 +348,14 @@ static void enviar_resultado(Cliente *c, const char *estado, int codigo_saida, c
     json_builder_set_member_name(b, "codigo_saida");
     json_builder_add_int_value(b, codigo_saida);
     embutir_json_bruto(b, "dados", dados_json);
+    if (apresentacao) {
+        json_builder_set_member_name(b, "apresentacao");
+        json_builder_add_string_value(b, apresentacao);
+    }
+    if (c->exec_inicio_us) {
+        json_builder_set_member_name(b, "tempo_execucao_ms");
+        json_builder_add_int_value(b, (g_get_monotonic_time() - c->exec_inicio_us) / 1000);
+    }
     json_builder_end_object(b);
 
     char *id = lia_novo_id("msg");
@@ -327,6 +363,11 @@ static void enviar_resultado(Cliente *c, const char *estado, int codigo_saida, c
     g_free(id);
     g_object_unref(b);
     escrever_linha(c, linha);
+}
+
+static void enviar_resultado(Cliente *c, const char *estado, int codigo_saida, const char *dados_json)
+{
+    enviar_resultado_ex(c, estado, codigo_saida, dados_json, NULL);
 }
 
 static void enviar_auditoria(Cliente *c, const char *resultado_resumo)
@@ -418,6 +459,7 @@ static void resetar_para_conectado(Cliente *c)
     g_free(c->justificativa_pendente); c->justificativa_pendente = NULL;
     g_free(c->pergunta_id_origem); c->pergunta_id_origem = NULL;
     c->origem_modelo = FALSE;
+    c->exec_inicio_us = 0;
 }
 
 /* Cancelamento de um PLANO (ainda não há execução — docs/protocolo.md: só
@@ -481,19 +523,17 @@ static void ao_concluido_executor(gpointer ctx, const ExecutorResultado *r)
 
     if (exec_ctx_ainda_valido(e)) {
         gboolean foi_cancelado = r->erro_codigo && strcmp(r->erro_codigo, "cancelado") == 0;
-        gboolean pedir_resumo = FALSE;
-        char *resumo_texto = NULL;
+        gboolean pedir_resumo = FALSE, truncado = FALSE;
+        char *apresentacao = NULL, *falha_texto = NULL;
+        gint64 exec_ms = c->exec_inicio_us ? (g_get_monotonic_time() - c->exec_inicio_us) / 1000 : 0;
 
         if (r->sucesso) {
             const char *estado = r->codigo_saida == 0 ? "sucesso" : "falha";
-            enviar_resultado(c, estado, r->codigo_saida, r->dados_json);
+            apresentacao = apresentacao_renderizar(c->ferramenta_pendente, r->dados_json, &truncado);
+            enviar_resultado_ex(c, estado, r->codigo_saida, r->dados_json, apresentacao);
             if (!c->fechado) enviar_auditoria(c, estado);
             if (!c->fechado) registrar_auditoria_disco(g_daemon_para_auditoria, c, estado);
-            if (c->origem_modelo) {
-                pedir_resumo = TRUE;
-                resumo_texto = g_strdup_printf("estado=%s codigo_saida=%d dados=%s",
-                    estado, r->codigo_saida, r->dados_json ? r->dados_json : "{}");
-            }
+            pedir_resumo = c->origem_modelo;
         } else if (foi_cancelado) {
             enviar_resultado(c, "cancelado", r->codigo_saida, NULL);
             if (!c->fechado) enviar_auditoria(c, "cancelado");
@@ -503,21 +543,31 @@ static void ao_concluido_executor(gpointer ctx, const ExecutorResultado *r)
             if (!c->fechado) enviar_resultado(c, "falha", r->codigo_saida, NULL);
             if (!c->fechado) enviar_auditoria(c, "falha");
             if (!c->fechado) registrar_auditoria_disco(g_daemon_para_auditoria, c, "falha");
-            if (c->origem_modelo) {
-                pedir_resumo = TRUE;
-                resumo_texto = g_strdup_printf("falha: %s (%s)",
-                    r->erro_mensagem ? r->erro_mensagem : "?", r->erro_codigo ? r->erro_codigo : "?");
-            }
+            if (c->origem_modelo)
+                falha_texto = g_strdup_printf("A ferramenta '%s' falhou (%s: %s). Nenhum dado foi coletado, então não há o que resumir.",
+                    c->ferramenta_pendente ? c->ferramenta_pendente : "?",
+                    r->erro_codigo ? r->erro_codigo : "erro", r->erro_mensagem ? r->erro_mensagem : "sem detalhe");
         }
+        g_print("lia-sessiond: execução de %s concluída em %" G_GINT64_FORMAT " ms (%s)\n",
+                c->ferramenta_pendente ? c->ferramenta_pendente : "?", exec_ms,
+                r->sucesso ? "sucesso" : (foi_cancelado ? "cancelada" : "falha"));
 
-        char *ferramenta_para_resumo = pedir_resumo ? g_strdup(c->ferramenta_pendente) : NULL;
-        char *pergunta_id_para_resumo = pedir_resumo ? g_strdup(c->pergunta_id_origem) : NULL;
+        char *ferramenta_para_resumo = g_strdup(c->ferramenta_pendente);
+        char *pergunta_id_para_resumo = g_strdup(c->pergunta_id_origem);
+        char *dados_para_resumo = pedir_resumo ? g_strdup(r->dados_json ? r->dados_json : "{}") : NULL;
         resetar_para_conectado(c);
-        if (pedir_resumo && !c->fechado)
-            disparar_resumo_modelo(c, ferramenta_para_resumo, pergunta_id_para_resumo, resumo_texto);
+        if (!c->fechado && pedir_resumo)
+            disparar_resumo_modelo(c, ferramenta_para_resumo, pergunta_id_para_resumo, apresentacao, dados_para_resumo, truncado);
+        else if (!c->fechado && falha_texto && pergunta_id_para_resumo)
+            /* execução pedida pelo fluxo agente falhou: fecha o turno com
+             * uma resposta final determinística — nunca deixa o cliente
+             * esperando um resumo que não virá, nunca inventa conteúdo. */
+            enviar_resposta_final(c, pergunta_id_para_resumo, falha_texto, "deterministica", TRUE, NULL, 0);
         g_free(ferramenta_para_resumo);
         g_free(pergunta_id_para_resumo);
-        g_free(resumo_texto);
+        g_free(dados_para_resumo);
+        g_free(apresentacao);
+        g_free(falha_texto);
     }
     /* se não é mais válido (timeout já resolveu, ou cliente caiu e a
      * conexão já foi inteiramente limpa), só solta os recursos — sem
@@ -546,7 +596,19 @@ static gboolean ao_timeout_execucao(gpointer ctx)
         if (!c->fechado) enviar_auditoria(c, "limite_excedido");
         if (!c->fechado) registrar_auditoria_disco(g_daemon_para_auditoria, c, "limite_excedido");
         c->timeout_execucao_id = 0; /* este próprio timer: evita resetar_para_conectado removê-lo de novo */
+        char *pergunta_id_origem = c->origem_modelo ? g_strdup(c->pergunta_id_origem) : NULL;
+        char *ferramenta = g_strdup(c->ferramenta_pendente);
         resetar_para_conectado(c);
+        if (!c->fechado && pergunta_id_origem) {
+            /* fluxo agente: o turno sempre fecha com uma 'resposta' — aqui,
+             * determinística, dizendo que não há dado nenhum para resumir */
+            char *txt = g_strdup_printf("A ferramenta '%s' excedeu o tempo máximo de execução e foi interrompida. Nenhum dado foi coletado.",
+                                         ferramenta ? ferramenta : "?");
+            enviar_resposta_final(c, pergunta_id_origem, txt, "deterministica", TRUE, NULL, 0);
+            g_free(txt);
+        }
+        g_free(pergunta_id_origem);
+        g_free(ferramenta);
         if (!c->fechado)
             g_executor->cancelar(g_executor, e->execucao_id);
     }
@@ -558,6 +620,7 @@ static void despachar_execucao(Cliente *c, const ExecutorManifesto *mf)
     g_free(c->execucao_id_atual);
     c->execucao_id_atual = lia_novo_id("exec");
     c->estado = ESTADO_EXECUTANDO;
+    c->exec_inicio_us = g_get_monotonic_time();
 
     JsonObject *params = c->parametros_pendentes ? json_node_get_object(c->parametros_pendentes) : NULL;
 
@@ -581,96 +644,33 @@ static void despachar_execucao(Cliente *c, const ExecutorManifesto *mf)
 typedef struct {
     Cliente *c;
     char *pergunta_id;
-    char *mensagem_original; /* pedido crua da pessoa, NULL quando não se aplica (ver disparar_resumo_modelo) —
-                               * só para classificar_ferramenta_esperada(); nunca reenviada a lugar nenhum. */
+    char *mensagem_original; /* pedido cru da pessoa — só para o roteador classificar; nunca reenviado a lugar nenhum */
+    char *prompt_original;   /* prompt da 1ª tentativa — base da única nova tentativa com correção */
+    char *esquema_json;      /* esquema da saída estruturada pedida ao modelo */
+    int tentativa;           /* 1 ou 2 */
+    gint64 inicio_us;
 } PerguntaCtx;
-
-static PerguntaCtx *pergunta_ctx_novo(Cliente *c, const char *pergunta_id, const char *mensagem_original)
-{
-    PerguntaCtx *pc = g_new(PerguntaCtx, 1);
-    pc->c = cliente_ref(c);
-    pc->pergunta_id = g_strdup(pergunta_id);
-    pc->mensagem_original = mensagem_original ? g_strdup(mensagem_original) : NULL;
-    return pc;
-}
 
 static void pergunta_ctx_liberar(PerguntaCtx *pc)
 {
     cliente_unref(pc->c);
     g_free(pc->pergunta_id);
     g_free(pc->mensagem_original);
+    g_free(pc->prompt_original);
+    g_free(pc->esquema_json);
     g_free(pc);
 }
 
-/* ---- validação independente da proposta do modelo (docs/manifesto.md) ---
- * O modelo (llama3.2:3b local, pequeno) já demonstrou na prática confundir
- * sistema.dispositivos com sistema.processos_top_cpu para um pedido
- * claramente sobre processos/CPU. Esta é uma segunda camada,
- * DETERMINÍSTICA, independente do texto que o modelo gerou: só corrige a
- * ferramenta proposta quando o pedido da pessoa bate com um padrão de
- * ALTA confiança para uma ferramenta REAL diferente da proposta — nunca
- * inventa uma ferramenta fora da lista, nunca decide nada por ambiguidade
- * (sem palavra-chave clara, a proposta do modelo é respeitada como está).
- * Não cobre "processos por memória" de propósito: não existe, nesta
- * etapa, nenhuma ferramenta real que ordene por memória — forçar
- * sistema.processos_top_cpu nesse caso devolveria dados de CPU
- * apresentados como se fossem de memória, exatamente o tipo de invenção
- * que esta validação existe para evitar (ver docs/manifesto.md, limitação
- * registrada). */
-static gboolean contem_ci_sd(const char *texto, const char *alvo)
-{
-    if (!texto || !alvo) return FALSE;
-    char *t = g_utf8_strdown(texto, -1);
-    gboolean achou = strstr(t, alvo) != NULL;
-    g_free(t);
-    return achou;
-}
-
-static const char *classificar_ferramenta_esperada(const char *pedido)
-{
-    if (!pedido) return NULL;
-    static const char *const KW_PROCESSOS_CPU[] = {
-        "consomem cpu", "consome cpu", "uso de cpu", "usam cpu", "usa cpu",
-        "top cpu", "mais cpu", "cpu agora", NULL
-    };
-    static const char *const KW_DISPOSITIVOS[] = {
-        "rede", "interface", " pci", "bloco", "block", "disco", "dispositivo", "hardware", NULL
-    };
-    static const char *const KW_DIAGNOSTICAR[] = {
-        "modelo da cpu", "núcleos", "nucleos", "kernel", "distribuição", "distribuicao", NULL
-    };
-    static const char *const KW_RECURSOS[] = {
-        "swap", "memória ram", "memoria ram", "de ram", "uptime", "carga média", "carga media", "load average", NULL
-    };
-    for (int i = 0; KW_PROCESSOS_CPU[i]; i++) if (contem_ci_sd(pedido, KW_PROCESSOS_CPU[i])) return "sistema.processos_top_cpu";
-    for (int i = 0; KW_DISPOSITIVOS[i]; i++) if (contem_ci_sd(pedido, KW_DISPOSITIVOS[i])) return "sistema.dispositivos";
-    for (int i = 0; KW_DIAGNOSTICAR[i]; i++) if (contem_ci_sd(pedido, KW_DIAGNOSTICAR[i])) return "sistema.diagnosticar";
-    for (int i = 0; KW_RECURSOS[i]; i++) if (contem_ci_sd(pedido, KW_RECURSOS[i])) return "sistema.recursos";
-    return NULL;
-}
-
-/* Pedidos de alta confiança para os quais NENHUMA ferramenta real desta
- * etapa é correta — ao contrário de classificar_ferramenta_esperada()
- * (que corrige para a ferramenta certa), aqui a única correção segura é
- * remover a proposta por completo. "processos por memória" é o caso
- * conhecido: só existe ordenação por CPU (sistema.processos_top_cpu,
- * ordenar_por aceita só "cpu" — ver docs/manifesto.md, limitação
- * registrada); se o modelo propuser essa ferramenta mesmo assim, rodar
- * e depois descrever os números de CPU como se fossem de memória seria
- * exatamente a invenção de dado que esta validação existe para evitar. */
-static gboolean pedido_sem_ferramenta_disponivel(const char *pedido)
-{
-    if (!pedido) return FALSE;
-    static const char *const KW_SEM_FERRAMENTA_MEMORIA[] = {
-        "mais memória", "mais memoria", "usando memória", "usando memoria",
-        "usam memória", "usam memoria", "consomem memória", "consomem memoria",
-        "consome memória", "consome memoria", "uso de memória", "uso de memoria", NULL
-    };
-    for (int i = 0; KW_SEM_FERRAMENTA_MEMORIA[i]; i++)
-        if (contem_ci_sd(pedido, KW_SEM_FERRAMENTA_MEMORIA[i]))
-            return TRUE;
-    return FALSE;
-}
+/* Tokens gerados: a proposta estruturada é um objeto JSON pequeno; o
+ * resumo, até 3 frases. Medido nesta máquina (llama3.2:3b, CPU): ~9
+ * tokens/s — cada 100 tokens a menos são ~11 s a menos de espera. */
+#define LIA_MODELO_TOKENS_PROPOSTA 160
+#define LIA_MODELO_TOKENS_RESUMO   120
+/* linhas do texto renderizado que vão para o prompt de resumo: o modelo
+ * só precisa do topo para responder em duas frases (cada linha a mais é
+ * tempo de avaliação de prompt); a pessoa vê a tabela inteira, e a
+ * checagem de fundamentação usa os dados inteiros. */
+#define LIA_RESUMO_LINHAS_PARA_O_MODELO 20
 
 /* Lista as ferramentas do backend ATIVO (real ou mock) para a seção
  * "ferramentas disponíveis" do prompt — nunca hardcoded, para nunca
@@ -682,42 +682,237 @@ static char *construir_manifesto_texto(void)
     for (int i = 0; nomes[i]; i++) {
         const ExecutorManifesto *mf = g_executor->buscar_manifesto(nomes[i]);
         if (!mf) continue;
-        g_string_append_printf(out, "- %s (risco: %s): %s\n", mf->nome, mf->risco, mf->efeitos);
+        g_string_append_printf(out, "- %s: %s%s\n", mf->nome, mf->uso ? mf->uso : mf->efeitos,
+                               mf->requer_aprovacao ? " [exige aprovação de uma pessoa]" : "");
     }
     return g_string_free(out, FALSE);
 }
 
-static void enviar_proposta(Cliente *c, const char *em_resposta_a, const char *pergunta_id, const ModeloResposta *r)
+/* Esquema JSON da resposta estruturada pedida ao modelo. "ferramenta" é um
+ * enum com os nomes do manifesto ATIVO + "nenhuma": com saída restrita por
+ * esquema, o modelo nem consegue escrever um nome fora da lista (e mesmo
+ * assim o roteador valida de novo, de forma independente). */
+static char *construir_esquema_proposta(void)
 {
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "type"); json_builder_add_string_value(b, "object");
+    json_builder_set_member_name(b, "properties");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "tipo");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "type"); json_builder_add_string_value(b, "string");
+    json_builder_set_member_name(b, "enum");
+    json_builder_begin_array(b);
+    json_builder_add_string_value(b, "proposta");
+    json_builder_add_string_value(b, "resposta");
+    json_builder_add_string_value(b, "esclarecimento");
+    json_builder_end_array(b);
+    json_builder_end_object(b);
+    json_builder_set_member_name(b, "ferramenta");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "type"); json_builder_add_string_value(b, "string");
+    json_builder_set_member_name(b, "enum");
+    json_builder_begin_array(b);
+    const char * const *nomes = g_executor->listar_nomes(g_executor);
+    for (int i = 0; nomes[i]; i++)
+        json_builder_add_string_value(b, nomes[i]);
+    json_builder_add_string_value(b, "nenhuma");
+    json_builder_end_array(b);
+    json_builder_end_object(b);
+    json_builder_set_member_name(b, "parametros");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "type"); json_builder_add_string_value(b, "object");
+    json_builder_end_object(b);
+    json_builder_set_member_name(b, "justificativa");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "type"); json_builder_add_string_value(b, "string");
+    json_builder_end_object(b);
+    json_builder_set_member_name(b, "resposta");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "type"); json_builder_add_string_value(b, "string");
+    json_builder_end_object(b);
+    json_builder_end_object(b);
+    json_builder_set_member_name(b, "required");
+    json_builder_begin_array(b);
+    json_builder_add_string_value(b, "tipo");
+    json_builder_add_string_value(b, "ferramenta");
+    json_builder_add_string_value(b, "parametros");
+    json_builder_add_string_value(b, "justificativa");
+    json_builder_add_string_value(b, "resposta");
+    json_builder_end_array(b);
+    json_builder_end_object(b);
+    JsonNode *raiz = json_builder_get_root(b);
+    JsonGenerator *gen = json_generator_new();
+    json_generator_set_root(gen, raiz);
+    char *texto = json_generator_to_data(gen, NULL);
+    g_object_unref(gen);
+    json_node_unref(raiz);
+    g_object_unref(b);
+    return texto;
+}
+
+/* ---- ponte roteador <-> manifesto do executor ativo ---- */
+
+/* mesma política de capacidades de tratar_solicitar: uma ferramenta que o
+ * 'solicitar' recusaria por capacidade nem conta como existente aqui. */
+static gboolean capacidades_permitidas(const ExecutorManifesto *mf)
+{
+    if (!g_executor->restringe_a_leitura)
+        return TRUE;
+    for (int i = 0; mf->capacidades[i]; i++)
+        if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0)
+            return FALSE;
+    return TRUE;
+}
+
+static gboolean rot_existe(const char *ferramenta, gpointer dados)
+{
+    (void)dados;
+    const ExecutorManifesto *mf = g_executor->buscar_manifesto(ferramenta);
+    return mf != NULL && capacidades_permitidas(mf);
+}
+
+static char *rot_validar(const char *ferramenta, const char *parametros_json, gpointer dados)
+{
+    (void)dados;
+    const ExecutorManifesto *mf = g_executor->buscar_manifesto(ferramenta);
+    if (!mf)
+        return g_strdup("ferramenta desconhecida");
+    JsonParser *p = json_parser_new();
+    if (!json_parser_load_from_data(p, parametros_json ? parametros_json : "{}", -1, NULL) ||
+        !json_parser_get_root(p) || JSON_NODE_TYPE(json_parser_get_root(p)) != JSON_NODE_OBJECT) {
+        g_object_unref(p);
+        return g_strdup("parâmetros não são um objeto JSON");
+    }
+    char *erro = g_executor->validar_parametros(mf, json_node_get_object(json_parser_get_root(p)));
+    g_object_unref(p);
+    return erro;
+}
+
+static const RoteadorManifesto ROT_MANIFESTO = { rot_existe, rot_validar, NULL };
+
+/* Política do piloto automático, calculada pelo DAEMON (o cliente só
+ * obedece — lia-chat nunca decide sozinho que algo é "seguro"): só
+ * ferramenta declarada puramente de leitura, risco "nenhum", sem
+ * exigência de aprovação e só com capacidades de leitura. Qualquer coisa
+ * que grave, persista inventário, execute binários, toque hardware ou
+ * peça privilégio fica FALSE e continua parando em confirmação. */
+static gboolean execucao_automatica_permitida(const ExecutorManifesto *mf)
+{
+    if (!mf || !mf->somente_leitura || mf->requer_aprovacao || strcmp(mf->risco, "nenhum") != 0)
+        return FALSE;
+    for (int i = 0; mf->capacidades[i]; i++)
+        if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0)
+            return FALSE;
+    return TRUE;
+}
+
+static const char *veredito_texto(RoteadorVeredito v)
+{
+    switch (v) {
+    case ROTEADOR_ACEITA: return "aceita";
+    case ROTEADOR_CORRIGIDA: return "corrigida";
+    case ROTEADOR_SEM_FERRAMENTA: return "sem_ferramenta";
+    case ROTEADOR_ESCLARECER: return "esclarecer";
+    case ROTEADOR_REPETIR: return "repetir";
+    case ROTEADOR_REJEITADA: return "rejeitada";
+    }
+    return "?";
+}
+
+/* 'proposta' depois da validação independente. Campos separados, nunca
+ * misturados (docs/protocolo.md §10): texto do modelo (resposta_texto),
+ * intenção classificada, o que a validação fez, e a proposta final — que
+ * é a ÚNICA coisa que um cliente pode transformar em 'solicitar'. */
+static void enviar_proposta(Cliente *c, const char *pergunta_id, const ModeloResposta *r,
+                             const Rota *rota, const RoteadorDecisao *d, gint64 tempo_ms, int tentativas)
+{
+    const ExecutorManifesto *mf = d->ferramenta ? g_executor->buscar_manifesto(d->ferramenta) : NULL;
+    gboolean substituir_texto = d->veredito == ROTEADOR_SEM_FERRAMENTA || d->veredito == ROTEADOR_ESCLARECER ||
+                                d->veredito == ROTEADOR_REJEITADA;
+    const char *tipo = d->ferramenta ? "proposta" : (d->veredito == ROTEADOR_ESCLARECER ? "esclarecimento" : "resposta");
+
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "pergunta_id");
     json_builder_add_string_value(b, pergunta_id);
+    json_builder_set_member_name(b, "tipo_resposta");
+    json_builder_add_string_value(b, tipo);
     json_builder_set_member_name(b, "resposta_texto");
-    json_builder_add_string_value(b, r->resposta_texto ? r->resposta_texto : "");
+    /* quando a validação removeu/recusou a proposta, o texto do modelo
+     * (que falava de uma ferramenta que não vai rodar) é trocado pela
+     * mensagem do validador — nunca uma promessa que não será cumprida. */
+    json_builder_add_string_value(b, substituir_texto ? (d->mensagem ? d->mensagem : "")
+                                                       : (r->resposta_texto ? r->resposta_texto : ""));
     json_builder_set_member_name(b, "ferramenta_proposta");
-    if (r->ferramenta_proposta) {
+    if (d->ferramenta) {
         json_builder_begin_object(b);
         json_builder_set_member_name(b, "ferramenta");
-        json_builder_add_string_value(b, r->ferramenta_proposta);
-        embutir_json_bruto(b, "parametros", r->parametros_json);
+        json_builder_add_string_value(b, d->ferramenta);
+        embutir_json_bruto(b, "parametros", d->parametros_json);
         json_builder_set_member_name(b, "justificativa");
-        if (r->justificativa) json_builder_add_string_value(b, r->justificativa);
+        if (d->veredito == ROTEADOR_CORRIGIDA || tentativas == 0) json_builder_add_string_value(b, d->motivo);
+        else if (r->justificativa) json_builder_add_string_value(b, r->justificativa);
         else json_builder_add_null_value(b);
         json_builder_end_object(b);
     } else {
         json_builder_add_null_value(b);
     }
+    json_builder_set_member_name(b, "intencao");
+    if (rota->intencao) {
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "id");
+        json_builder_add_string_value(b, rota->intencao);
+        json_builder_set_member_name(b, "descricao");
+        json_builder_add_string_value(b, rota->descricao ? rota->descricao : "");
+        json_builder_set_member_name(b, "confianca");
+        json_builder_add_string_value(b, rota->confianca == ROTA_CONFIANCA_ALTA ? "alta" :
+                                         rota->confianca == ROTA_CONFIANCA_MEDIA ? "media" : "nenhuma");
+        json_builder_end_object(b);
+    } else {
+        json_builder_add_null_value(b);
+    }
+    json_builder_set_member_name(b, "validacao");
+    json_builder_begin_object(b);
+    /* tentativas == 0: o modelo não foi consultado (rota direta) */
+    json_builder_set_member_name(b, "origem");
+    json_builder_add_string_value(b, tentativas == 0 ? "roteador" : (d->veredito == ROTEADOR_ACEITA ? "modelo" : "modelo+roteador"));
+    json_builder_set_member_name(b, "veredito");
+    json_builder_add_string_value(b, tentativas == 0 && d->ferramenta ? "rota_direta" : veredito_texto(d->veredito));
+    json_builder_set_member_name(b, "motivo");
+    json_builder_add_string_value(b, d->motivo ? d->motivo : "");
+    json_builder_set_member_name(b, "ferramenta_do_modelo");
+    if (r->ferramenta_proposta) json_builder_add_string_value(b, r->ferramenta_proposta);
+    else json_builder_add_null_value(b);
+    json_builder_set_member_name(b, "saida_estruturada");
+    json_builder_add_boolean_value(b, r->estruturada);
+    json_builder_set_member_name(b, "tentativas");
+    json_builder_add_int_value(b, tentativas);
+    if (mf) {
+        json_builder_set_member_name(b, "risco");
+        json_builder_add_string_value(b, mf->risco);
+        json_builder_set_member_name(b, "requer_aprovacao");
+        json_builder_add_boolean_value(b, mf->requer_aprovacao);
+        json_builder_set_member_name(b, "somente_leitura");
+        json_builder_add_boolean_value(b, mf->somente_leitura);
+    }
+    json_builder_set_member_name(b, "execucao_automatica_permitida");
+    json_builder_add_boolean_value(b, execucao_automatica_permitida(mf));
+    json_builder_end_object(b);
+    json_builder_set_member_name(b, "tempo_modelo_ms");
+    json_builder_add_int_value(b, tempo_ms);
     json_builder_end_object(b);
 
     char *id = lia_novo_id("msg");
-    char *linha = lia_msg_montar(LIA_MSG_PROPOSTA, id, em_resposta_a, b);
+    char *linha = lia_msg_montar(LIA_MSG_PROPOSTA, id, NULL, b);
     g_free(id);
     g_object_unref(b);
     escrever_linha(c, linha);
 }
 
-static void enviar_resposta_resumo(Cliente *c, const char *pergunta_id, const char *texto)
+static void enviar_resposta_final(Cliente *c, const char *pergunta_id, const char *texto, const char *origem,
+                                   gboolean fundamentada, const char *aviso, gint64 tempo_modelo_ms)
 {
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
@@ -725,6 +920,18 @@ static void enviar_resposta_resumo(Cliente *c, const char *pergunta_id, const ch
     json_builder_add_string_value(b, pergunta_id);
     json_builder_set_member_name(b, "resposta_texto");
     json_builder_add_string_value(b, texto ? texto : "");
+    /* "modelo": texto do modelo, conferido contra os dados reais;
+     * "deterministica": escrito pelo daemon a partir dos dados (o resumo
+     * do modelo falhou, foi cancelado ou citou valor sem origem). */
+    json_builder_set_member_name(b, "origem");
+    json_builder_add_string_value(b, origem);
+    json_builder_set_member_name(b, "fundamentada");
+    json_builder_add_boolean_value(b, fundamentada);
+    json_builder_set_member_name(b, "aviso");
+    if (aviso) json_builder_add_string_value(b, aviso);
+    else json_builder_add_null_value(b);
+    json_builder_set_member_name(b, "tempo_modelo_ms");
+    json_builder_add_int_value(b, tempo_modelo_ms);
     json_builder_end_object(b);
 
     char *id = lia_novo_id("msg");
@@ -734,104 +941,280 @@ static void enviar_resposta_resumo(Cliente *c, const char *pergunta_id, const ch
     escrever_linha(c, linha);
 }
 
+static void perguntar_ao_modelo(PerguntaCtx *pc, const char *prompt);
+
 static void ao_concluido_pergunta(gpointer ctx, const ModeloResposta *r)
 {
     PerguntaCtx *pc = ctx;
     Cliente *c = pc->c;
     gboolean ainda_valido = !c->fechado && c->pergunta_pendente_id &&
                              strcmp(pc->pergunta_id, c->pergunta_pendente_id) == 0;
-    if (ainda_valido) {
-        if (r->sucesso && r->ferramenta_proposta && pedido_sem_ferramenta_disponivel(pc->mensagem_original)) {
-            /* Veto, não correção: para este padrão de pedido não existe
-             * NENHUMA ferramenta certa (ver comentário em
-             * pedido_sem_ferramenta_disponivel) — deixar executar
-             * qualquer proposta aqui (mesmo a mais "parecida") e depois
-             * resumir o resultado como se respondesse à pergunta
-             * original seria inventar que a ferramenta devolveu um dado
-             * que ela não devolve. resposta_texto do modelo continua
-             * indo como está (pode já avisar corretamente que não há
-             * ferramenta); só a proposta estruturada é removida. */
-            ModeloResposta sem_proposta = *r;
-            sem_proposta.ferramenta_proposta = NULL;
-            sem_proposta.parametros_json = NULL;
-            sem_proposta.justificativa = NULL;
-            enviar_proposta(c, NULL, pc->pergunta_id, &sem_proposta);
-        } else if (r->sucesso) {
-            const char *esperado = classificar_ferramenta_esperada(pc->mensagem_original);
-            if (esperado && g_executor->buscar_manifesto(esperado) &&
-                (!r->ferramenta_proposta || strcmp(esperado, r->ferramenta_proposta) != 0)) {
-                /* validação independente corrigiu a ferramenta — nunca
-                 * muda resposta_texto (o que o modelo disse em texto
-                 * continua indo como está; só a proposta estruturada,
-                 * que é o que de fato pode ser executado, é corrigida). */
-                char *justificativa_corrigida = r->ferramenta_proposta
-                    ? g_strdup_printf(
-                        "corrigido por validação independente do pedido (sem depender do modelo): "
-                        "o pedido bate com um padrão de alta confiança para '%s'; o modelo tinha proposto '%s'",
-                        esperado, r->ferramenta_proposta)
-                    : g_strdup_printf(
-                        "corrigido por validação independente do pedido (sem depender do modelo): "
-                        "o pedido bate com um padrão de alta confiança para '%s'; o modelo não propôs nenhuma",
-                        esperado);
-                ModeloResposta corrigida = *r;
-                corrigida.ferramenta_proposta = (char *)esperado;
-                corrigida.parametros_json = (char *)"{}";
-                corrigida.justificativa = justificativa_corrigida;
-                enviar_proposta(c, NULL, pc->pergunta_id, &corrigida);
-                g_free(justificativa_corrigida);
-            } else {
-                enviar_proposta(c, NULL, pc->pergunta_id, r);
-            }
-        } else {
-            enviar_erro(c, NULL, r->erro_codigo ? r->erro_codigo : "modelo_resposta_invalida", r->erro_mensagem);
-        }
-        g_free(c->pergunta_pendente_id);
-        c->pergunta_pendente_id = NULL;
+    if (!ainda_valido) { /* cancelada, ou a conexão caiu: nada a enviar */
+        pergunta_ctx_liberar(pc);
+        return;
     }
+    gint64 tempo_ms = (g_get_monotonic_time() - pc->inicio_us) / 1000;
+
+    if (!r->sucesso) {
+        g_print("lia-sessiond: pergunta %s: modelo falhou em %" G_GINT64_FORMAT " ms (%s)\n",
+                pc->pergunta_id, tempo_ms, r->erro_codigo ? r->erro_codigo : "?");
+        enviar_erro(c, NULL, r->erro_codigo ? r->erro_codigo : "modelo_resposta_invalida", r->erro_mensagem);
+    } else {
+        /* pedido -> intenção classificada -> ferramenta candidata ->
+         * validação independente. Só o que sair daqui pode virar plano. */
+        Rota rota;
+        roteador_classificar(pc->mensagem_original, &rota);
+        RoteadorDecisao d;
+        roteador_decidir(&rota, pc->mensagem_original, r->ferramenta_proposta, r->parametros_json,
+                          &ROT_MANIFESTO, pc->tentativa == 1, &d);
+        /* resposta vazia (nem texto, nem ferramenta) também é inválida */
+        gboolean vazia = d.veredito == ROTEADOR_ACEITA && !d.ferramenta && (!r->resposta_texto || !*r->resposta_texto);
+        if (vazia) {
+            d.veredito = pc->tentativa == 1 ? ROTEADOR_REPETIR : ROTEADOR_REJEITADA;
+            g_free(d.motivo);
+            d.motivo = g_strdup("o modelo devolveu uma resposta vazia (sem texto e sem ferramenta)");
+            if (d.veredito == ROTEADOR_REJEITADA)
+                d.mensagem = g_strdup("O modelo não devolveu uma resposta válida (duas tentativas). Nada foi executado.");
+        }
+
+        if (d.veredito == ROTEADOR_REPETIR) {
+            /* correção limitada: UMA nova tentativa, com o motivo da
+             * rejeição; nada é executado nem proposto enquanto isso. */
+            g_print("lia-sessiond: pergunta %s: resposta do modelo inválida em %" G_GINT64_FORMAT " ms (%s) — nova tentativa\n",
+                    pc->pergunta_id, tempo_ms, d.motivo);
+            char *prompt2 = prompt_acrescentar_correcao(pc->prompt_original, d.motivo);
+            roteador_decisao_liberar(&d);
+            pc->tentativa = 2;
+            perguntar_ao_modelo(pc, prompt2);
+            g_free(prompt2);
+            return; /* pc segue vivo para a 2ª resposta */
+        }
+
+        g_print("lia-sessiond: pergunta %s: proposta em %" G_GINT64_FORMAT " ms (tentativas=%d, intenção=%s, veredito=%s, ferramenta=%s, modelo propôs=%s)\n",
+                pc->pergunta_id, tempo_ms, pc->tentativa, rota.intencao ? rota.intencao : "-",
+                veredito_texto(d.veredito), d.ferramenta ? d.ferramenta : "-",
+                r->ferramenta_proposta ? r->ferramenta_proposta : "-");
+        /* guarda o pedido para o resumo final poder citá-lo */
+        g_free(c->ultima_pergunta_id);
+        c->ultima_pergunta_id = g_strdup(pc->pergunta_id);
+        g_free(c->ultima_pergunta_texto);
+        c->ultima_pergunta_texto = g_strdup(pc->mensagem_original);
+        enviar_proposta(c, pc->pergunta_id, r, &rota, &d, tempo_ms, pc->tentativa);
+        roteador_decisao_liberar(&d);
+    }
+    g_free(c->pergunta_pendente_id);
+    c->pergunta_pendente_id = NULL;
+    g_free(c->pergunta_modelo_id);
+    c->pergunta_modelo_id = NULL;
     pergunta_ctx_liberar(pc);
+}
+
+static void perguntar_ao_modelo(PerguntaCtx *pc, const char *prompt)
+{
+    /* id próprio por tentativa: os backends tiram a requisição da tabela
+     * deles DEPOIS de chamar o callback — reutilizar o mesmo id numa nova
+     * tentativa disparada de dentro do callback apagaria a nova entrada. */
+    g_free(pc->c->pergunta_modelo_id);
+    pc->c->pergunta_modelo_id = g_strdup_printf("%s-t%d", pc->pergunta_id, pc->tentativa);
+    ModeloOpcoes op = { .esquema_json = pc->esquema_json, .max_tokens = LIA_MODELO_TOKENS_PROPOSTA, .resumo = FALSE };
+    char *id = g_strdup(pc->c->pergunta_modelo_id); /* o callback pode ser síncrono e liberar pergunta_modelo_id */
+    g_modelo->perguntar(g_modelo, id, prompt, &op, ao_concluido_pergunta, pc);
+    g_free(id);
+}
+
+/* ---- resumo final ---- */
+
+typedef struct {
+    Cliente *c;
+    char *pergunta_id;   /* da pergunta ORIGINAL — é o que o cliente usa para correlacionar */
+    char *modelo_id;
+    char *ferramenta;
+    char *apresentacao;
+    char *dados_json;
+    char *pedido;
+    gboolean truncado;
+    gboolean extrativa; /* o modelo foi consultado só para escolher linhas (RESPOSTA_EXTRATIVA) */
+    gint64 inicio_us;
+} ResumoCtx;
+
+static void resumo_ctx_liberar(ResumoCtx *rc)
+{
+    cliente_unref(rc->c);
+    g_free(rc->pergunta_id);
+    g_free(rc->modelo_id);
+    g_free(rc->ferramenta);
+    g_free(rc->apresentacao);
+    g_free(rc->dados_json);
+    g_free(rc->pedido);
+    g_free(rc);
 }
 
 static void ao_concluido_resumo(gpointer ctx, const ModeloResposta *r)
 {
-    PerguntaCtx *pc = ctx;
-    Cliente *c = pc->c;
-    if (!c->fechado) {
-        if (r->sucesso)
-            enviar_resposta_resumo(c, pc->pergunta_id, r->resposta_texto);
-        else
-            enviar_erro(c, NULL, r->erro_codigo ? r->erro_codigo : "modelo_resposta_invalida", r->erro_mensagem);
+    ResumoCtx *rc = ctx;
+    Cliente *c = rc->c;
+    gboolean ainda_valido = !c->fechado && c->resumo_pendente_id && strcmp(c->resumo_pendente_id, rc->modelo_id) == 0;
+    if (ainda_valido) {
+        g_free(c->resumo_pendente_id);
+        c->resumo_pendente_id = NULL;
+        gint64 tempo_ms = (g_get_monotonic_time() - rc->inicio_us) / 1000;
+        const char *aviso_truncado = rc->truncado
+            ? "a saída da ferramenta passou do limite e foi truncada: a lista acima está incompleta" : NULL;
+        char *suspeito = NULL, *fora_de_ordem = NULL;
+        const char *evidencias[] = { rc->apresentacao, rc->dados_json, rc->pedido, NULL };
+        if (rc->extrativa) {
+            /* O modelo só escolheu linhas ({"linhas":[...]}); o texto vem
+             * inteiro dos dados reais. Resposta do modelo ausente, inválida
+             * ou com índices fora da faixa não quebra nada: sobram as
+             * linhas que casam com o que foi perguntado (ou todas). */
+            int escolhidas[32], n = 0, validas = 0;
+            if (r->sucesso && r->resposta_texto) {
+                JsonParser *p = json_parser_new();
+                if (json_parser_load_from_data(p, r->resposta_texto, -1, NULL) && json_parser_get_root(p) &&
+                    JSON_NODE_TYPE(json_parser_get_root(p)) == JSON_NODE_OBJECT) {
+                    JsonObject *o = json_node_get_object(json_parser_get_root(p));
+                    JsonNode *nl = json_object_has_member(o, "linhas") ? json_object_get_member(o, "linhas") : NULL;
+                    if (nl && JSON_NODE_TYPE(nl) == JSON_NODE_ARRAY) {
+                        JsonArray *arr = json_node_get_array(nl);
+                        for (guint i = 0; i < json_array_get_length(arr) && n < 32; i++) {
+                            JsonNode *el = json_array_get_element(arr, i);
+                            if (JSON_NODE_TYPE(el) == JSON_NODE_VALUE && json_node_get_value_type(el) == G_TYPE_INT64)
+                                escolhidas[n++] = (int)CLAMP(json_node_get_int(el), -1, 100000);
+                        }
+                    }
+                }
+                g_object_unref(p);
+            }
+            char *texto = apresentacao_resposta_extrativa(rc->apresentacao, rc->pedido, escolhidas, n, &validas);
+            char *aviso = NULL;
+            if (!r->sucesso)
+                aviso = g_strdup_printf("o modelo não respondeu à seleção de linhas (%s) — usadas as linhas que casam com a pergunta",
+                                         r->erro_codigo ? r->erro_codigo : "erro");
+            else if (validas == 0)
+                aviso = g_strdup("a seleção de linhas do modelo veio vazia ou inválida — usadas as linhas que casam com a pergunta");
+            g_print("lia-sessiond: pergunta %s: resposta extrativa em %" G_GINT64_FORMAT " ms (%d linha(s) válida(s) escolhida(s) pelo modelo)\n",
+                    rc->pergunta_id, tempo_ms, validas);
+            enviar_resposta_final(c, rc->pergunta_id, texto, validas > 0 ? "modelo_extrativa" : "deterministica", TRUE,
+                                   aviso ? aviso : aviso_truncado, tempo_ms);
+            g_free(texto);
+            g_free(aviso);
+        } else if (r->sucesso && r->resposta_texto && *r->resposta_texto &&
+            !apresentacao_resumo_e_recusa(r->resposta_texto) &&
+            apresentacao_resumo_fundamentado(r->resposta_texto, evidencias, &suspeito) &&
+            apresentacao_resumo_respeita_ranking(r->resposta_texto, rc->ferramenta, rc->dados_json, &fora_de_ordem)) {
+            g_print("lia-sessiond: pergunta %s: resumo do modelo em %" G_GINT64_FORMAT " ms (fundamentado nos dados)\n",
+                    rc->pergunta_id, tempo_ms);
+            enviar_resposta_final(c, rc->pergunta_id, r->resposta_texto, "modelo", TRUE, aviso_truncado, tempo_ms);
+        } else {
+            /* O resumo do modelo não é usado: ou não veio, ou cita um
+             * número que a ferramenta não devolveu. A resposta final passa
+             * a ser determinística — os dados reais já foram entregues em
+             * 'resultado' — e diz por quê. Nunca um valor inventado. */
+            char *aviso;
+            if (!r->sucesso)
+                aviso = g_strdup_printf("o modelo não gerou o resumo (%s: %s)%s%s",
+                    r->erro_codigo ? r->erro_codigo : "erro", r->erro_mensagem ? r->erro_mensagem : "sem detalhe",
+                    aviso_truncado ? "; " : "", aviso_truncado ? aviso_truncado : "");
+            else if (suspeito)
+                aviso = g_strdup_printf("o resumo do modelo foi descartado: citava o número \"%s\", que não está nos dados coletados%s%s",
+                    suspeito, aviso_truncado ? "; " : "", aviso_truncado ? aviso_truncado : "");
+            else if (fora_de_ordem)
+                aviso = g_strdup_printf("o resumo do modelo foi descartado: %s%s%s",
+                    fora_de_ordem, aviso_truncado ? "; " : "", aviso_truncado ? aviso_truncado : "");
+            else if (r->resposta_texto && *r->resposta_texto)
+                aviso = g_strdup_printf("o resumo do modelo foi descartado: negava ter os dados que a ferramenta devolveu%s%s",
+                    aviso_truncado ? "; " : "", aviso_truncado ? aviso_truncado : "");
+            else
+                aviso = g_strdup_printf("o modelo devolveu um resumo vazio%s%s",
+                    aviso_truncado ? "; " : "", aviso_truncado ? aviso_truncado : "");
+            char *texto = apresentacao_frase(rc->ferramenta, rc->dados_json);
+            g_print("lia-sessiond: pergunta %s: resumo determinístico após %" G_GINT64_FORMAT " ms (%s)\n",
+                    rc->pergunta_id, tempo_ms, !r->sucesso ? "modelo falhou" :
+                    (suspeito ? "resumo citava número sem origem — descartado" : (fora_de_ordem ? "resumo pulava colocados do ranking — descartado" : "resumo vazio")));
+            enviar_resposta_final(c, rc->pergunta_id, texto, "deterministica", TRUE, aviso, tempo_ms);
+            g_free(texto);
+            g_free(aviso);
+        }
+        g_free(suspeito);
+        g_free(fora_de_ordem);
     }
-    pergunta_ctx_liberar(pc);
+    resumo_ctx_liberar(rc);
 }
 
-/* Disparado depois que um 'resultado' de uma execução com origem_modelo
- * chega — pede ao modelo um resumo em texto; NUNCA propõe/aprova/executa
- * nada (mock_perguntar/ollama nem têm como: a função delas é só devolver
- * texto). Falha de forma segura (sem resumo, sem quebrar o resto) se o
- * modelo não estiver disponível ou o prompt não puder ser montado. */
-static void disparar_resumo_modelo(Cliente *c, const char *ferramenta,
-                                    const char *pergunta_id_origem, const char *resultado_texto)
+/* Disparado depois que o 'resultado' de uma execução com origem_modelo foi
+ * enviado: pede ao modelo SOMENTE um resumo dos dados reais (prompt
+ * próprio, curto — sessiond/prompt.c, prompt_montar_resumo). O modelo
+ * nunca propõe/aprova/executa nada aqui (ModeloOpcoes.resumo). O turno
+ * SEMPRE termina com uma 'resposta': a do modelo, se fundamentada; senão
+ * a determinística (ver ao_concluido_resumo). */
+static void disparar_resumo_modelo(Cliente *c, const char *ferramenta, const char *pergunta_id_origem,
+                                    const char *apresentacao, const char *dados_json, gboolean truncado)
 {
-    if (!g_modelo || !pergunta_id_origem)
+    if (!pergunta_id_origem)
         return;
-    char *manifesto_texto = construir_manifesto_texto();
-    char *pedido = g_strdup_printf(
-        "A ferramenta '%s' que você sugeriu foi aprovada e executada. Resultado: %s\n"
-        "Resuma isso em poucas frases para a pessoa; não sugira outra ferramenta agora.",
-        ferramenta ? ferramenta : "?", resultado_texto ? resultado_texto : "(sem detalhes)");
-    char *prompt_final = NULL;
-    PromptErro pe = prompt_montar(manifesto_texto, pedido, NULL, &prompt_final);
-    g_free(manifesto_texto);
-    g_free(pedido);
-    if (pe != PROMPT_OK) {
-        g_free(prompt_final);
+    RespostaModo modo = apresentacao_modo_resposta(ferramenta);
+    if (modo == RESPOSTA_DETERMINISTICA || !g_modelo) {
+        /* ranking/lista: a resposta sai dos próprios dados, na hora, sem
+         * consultar modelo nenhum — não há o que um modelo acrescentar a
+         * "quem é o primeiro e quanto usa" além de risco de erro. */
+        char *texto = apresentacao_frase(ferramenta, dados_json);
+        g_print("lia-sessiond: pergunta %s: resposta determinística (ferramenta de ranking/lista; modelo não consultado)\n", pergunta_id_origem);
+        enviar_resposta_final(c, pergunta_id_origem, texto, "deterministica", TRUE,
+                               truncado ? "a saída da ferramenta passou do limite e foi truncada: a lista acima está incompleta" : NULL, 0);
+        g_free(texto);
+        return;
+    }
+    ResumoCtx *rc = g_new0(ResumoCtx, 1);
+    rc->c = cliente_ref(c);
+    rc->pergunta_id = g_strdup(pergunta_id_origem);
+    rc->modelo_id = g_strdup_printf("%s-resumo", pergunta_id_origem);
+    rc->ferramenta = g_strdup(ferramenta);
+    rc->apresentacao = g_strdup(apresentacao ? apresentacao : "");
+    rc->dados_json = g_strdup(dados_json ? dados_json : "{}");
+    /* o pedido original só é citado se for mesmo o desta pergunta */
+    rc->pedido = g_strdup(c->ultima_pergunta_id && strcmp(c->ultima_pergunta_id, pergunta_id_origem) == 0 &&
+                           c->ultima_pergunta_texto ? c->ultima_pergunta_texto : "");
+    rc->truncado = truncado;
+    rc->extrativa = modo == RESPOSTA_EXTRATIVA;
+    rc->inicio_us = g_get_monotonic_time();
+
+    if (rc->extrativa) {
+        char *numeradas = apresentacao_numerar_linhas(rc->apresentacao, NULL);
+        char *prompt_sel = prompt_montar_selecao(rc->pedido, numeradas);
+        g_free(numeradas);
+        g_free(c->resumo_pendente_id);
+        c->resumo_pendente_id = g_strdup(rc->modelo_id);
+        ModeloOpcoes ops = {
+            .esquema_json = "{\"type\":\"object\",\"properties\":{\"linhas\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}},\"required\":[\"linhas\"]}",
+            .max_tokens = 40, .resumo = TRUE };
+        char *ids = g_strdup(rc->modelo_id);
+        g_modelo->perguntar(g_modelo, ids, prompt_sel, &ops, ao_concluido_resumo, rc);
+        g_free(ids);
+        g_free(prompt_sel);
         return;
     }
 
-    char *pergunta_id_nova = lia_novo_id("perg");
-    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id_origem, NULL); /* referencia a pergunta ORIGINAL, para o cliente correlacionar; sem classificação aqui — isto é um resumo, não uma nova seleção de ferramenta */
-    g_modelo->perguntar(g_modelo, pergunta_id_nova, prompt_final, ao_concluido_resumo, pc);
-    g_free(pergunta_id_nova);
+    /* versão enxuta dos dados para o prompt (ver LIA_RESUMO_LINHAS_PARA_O_MODELO) */
+    GString *enxuto = g_string_new(NULL);
+    int linhas = 0, restantes = 0;
+    for (const char *p = rc->apresentacao; *p;) {
+        const char *nl = strchr(p, '\n');
+        gsize tam = nl ? (gsize)(nl - p) + 1 : strlen(p);
+        if (linhas < LIA_RESUMO_LINHAS_PARA_O_MODELO) g_string_append_len(enxuto, p, (gssize)tam);
+        else restantes++;
+        linhas++;
+        p += tam;
+    }
+    if (restantes)
+        g_string_append_printf(enxuto, "[... mais %d linhas foram mostradas à pessoa e não estão aqui; não fale delas]\n", restantes);
+    char *prompt_final = prompt_montar_resumo(rc->pedido, ferramenta, enxuto->str);
+    g_string_free(enxuto, TRUE);
+    g_free(c->resumo_pendente_id);
+    c->resumo_pendente_id = g_strdup(rc->modelo_id);
+    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = LIA_MODELO_TOKENS_RESUMO, .resumo = TRUE };
+    char *id = g_strdup(rc->modelo_id);
+    g_modelo->perguntar(g_modelo, id, prompt_final, &op, ao_concluido_resumo, rc);
+    g_free(id);
     g_free(prompt_final);
 }
 
@@ -876,12 +1259,53 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
         return;
     }
 
+    /* Rota direta: pedido -> intenção de alta confiança -> ferramenta. O
+     * modelo local leva dezenas de segundos só para escolher uma ferramenta
+     * que a classificação determinística já conhece (medido: 41 s) — e,
+     * quando erra, é ela mesma que corrige. Aqui a proposta sai na hora,
+     * pela MESMA função de decisão do caminho com modelo (roteador_decidir
+     * com "modelo não propôs nada"); nada muda no que pode ou não executar. */
+    if (g_rota_direta) {
+        Rota rota;
+        roteador_classificar(mensagem, &rota);
+        gboolean direta = rota.intencao && rota.confianca == ROTA_CONFIANCA_ALTA &&
+            (rota.sem_ferramenta || (rota.ferramenta && !rota.esclarecer && rot_existe(rota.ferramenta, NULL)));
+        if (direta) {
+            RoteadorDecisao d;
+            roteador_decidir(&rota, mensagem, NULL, NULL, &ROT_MANIFESTO, FALSE, &d);
+            if (d.ferramenta) {
+                g_free(d.motivo);
+                d.motivo = g_strdup_printf("rota direta: intenção '%s' (confiança alta) -> '%s'; o modelo não foi consultado para escolher a ferramenta",
+                                            rota.intencao, d.ferramenta);
+            }
+            char *pid = lia_novo_id("perg");
+            g_print("lia-sessiond: pergunta %s: rota direta (intenção=%s, ferramenta=%s) — modelo não consultado para a proposta\n",
+                    pid, rota.intencao, d.ferramenta ? d.ferramenta : "-");
+            g_free(c->ultima_pergunta_id);
+            c->ultima_pergunta_id = g_strdup(pid);
+            g_free(c->ultima_pergunta_texto);
+            c->ultima_pergunta_texto = g_strdup(mensagem);
+            ModeloResposta vazio = { 0 };
+            vazio.sucesso = TRUE;
+            enviar_proposta(c, pid, &vazio, &rota, &d, 0, 0);
+            roteador_decisao_liberar(&d);
+            g_free(pid);
+            g_free(prompt_final);
+            return;
+        }
+    }
+
     char *pergunta_id = lia_novo_id("perg");
     c->pergunta_pendente_id = g_strdup(pergunta_id);
-    PerguntaCtx *pc = pergunta_ctx_novo(c, pergunta_id, mensagem);
-    g_modelo->perguntar(g_modelo, pergunta_id, prompt_final, ao_concluido_pergunta, pc);
-    g_free(pergunta_id);
-    g_free(prompt_final);
+    PerguntaCtx *pc = g_new0(PerguntaCtx, 1);
+    pc->c = cliente_ref(c);
+    pc->pergunta_id = pergunta_id;
+    pc->mensagem_original = g_strdup(mensagem);
+    pc->prompt_original = prompt_final;
+    pc->esquema_json = construir_esquema_proposta();
+    pc->tentativa = 1;
+    pc->inicio_us = g_get_monotonic_time();
+    perguntar_ao_modelo(pc, pc->prompt_original);
 }
 
 static void tratar_solicitar(Cliente *c, const LiaMsg *m)
@@ -1005,6 +1429,39 @@ static void tratar_cancelar(Cliente *c, const LiaMsg *m)
 {
     const char *exec_id_pedido = campo_string(m->dados, "execucao_id");
 
+    /* Cancelar a conversa com o modelo (docs/protocolo.md §10): pedido
+     * explícito ({"pergunta": true}) ou, sem nenhum plano/execução em
+     * andamento, um 'cancelar' simples enquanto o modelo ainda trabalha.
+     * A pendência é limpa ANTES de pedir o cancelamento ao backend: o
+     * callback dele pode vir de forma síncrona, e precisa já encontrar a
+     * pergunta como "não mais válida" para não enviar nada em duplicidade. */
+    gboolean quer_pergunta = m->dados && json_object_has_member(m->dados, "pergunta") &&
+        JSON_NODE_TYPE(json_object_get_member(m->dados, "pergunta")) == JSON_NODE_VALUE &&
+        json_node_get_value_type(json_object_get_member(m->dados, "pergunta")) == G_TYPE_BOOLEAN &&
+        json_object_get_boolean_member(m->dados, "pergunta");
+    if (quer_pergunta || (c->estado == ESTADO_CONECTADO && (c->pergunta_pendente_id || c->resumo_pendente_id))) {
+        if (c->pergunta_pendente_id) {
+            char *modelo_id = c->pergunta_modelo_id;
+            c->pergunta_modelo_id = NULL;
+            g_free(c->pergunta_pendente_id);
+            c->pergunta_pendente_id = NULL;
+            enviar_erro(c, m->id, "cancelado", "pergunta ao modelo cancelada a pedido do cliente");
+            g_print("lia-sessiond: pergunta ao modelo cancelada pelo cliente\n");
+            if (modelo_id) g_modelo->cancelar(g_modelo, modelo_id);
+            g_free(modelo_id);
+        } else if (c->resumo_pendente_id) {
+            char *modelo_id = c->resumo_pendente_id;
+            c->resumo_pendente_id = NULL;
+            enviar_erro(c, m->id, "cancelado", "resumo final cancelado a pedido do cliente (os dados já entregues continuam válidos)");
+            g_print("lia-sessiond: resumo final cancelado pelo cliente\n");
+            g_modelo->cancelar(g_modelo, modelo_id);
+            g_free(modelo_id);
+        } else {
+            enviar_erro(c, m->id, "estado_invalido", "nenhuma pergunta ao modelo em andamento para cancelar");
+        }
+        return;
+    }
+
     if (c->estado == ESTADO_AGUARDANDO_APROVACAO) {
         if (exec_id_pedido && *exec_id_pedido) {
             enviar_erro(c, m->id, "estado_invalido",
@@ -1094,6 +1551,21 @@ static void desconectar_cliente(Cliente *c, const char *motivo)
         return;
     c->fechado = TRUE;
     g_print("lia-sessiond: cliente desconectado (%s)\n", motivo ? motivo : "?");
+    /* ninguém mais vai ler a resposta: não deixa o modelo gerando à toa
+     * (encerrar o cliente no meio do streaming). c->fechado já é TRUE, então
+     * qualquer callback que venha daqui não envia nada. */
+    if (g_modelo && c->pergunta_modelo_id) {
+        char *id = c->pergunta_modelo_id;
+        c->pergunta_modelo_id = NULL;
+        g_modelo->cancelar(g_modelo, id);
+        g_free(id);
+    }
+    if (g_modelo && c->resumo_pendente_id) {
+        char *id = c->resumo_pendente_id;
+        c->resumo_pendente_id = NULL;
+        g_modelo->cancelar(g_modelo, id);
+        g_free(id);
+    }
     g_io_stream_close(G_IO_STREAM(c->conexao), NULL, NULL);
     c->daemon->clientes = g_list_remove(c->daemon->clientes, c);
     cliente_unref(c); /* solta a referência que a lista do daemon mantinha */
@@ -1289,7 +1761,7 @@ static void escolher_executor(void)
         g_print("lia-sessiond: executor = mock (LIA_SESSIOND_EXECUTOR=mock) — NUNCA o padrão em produção\n");
     } else {
         g_executor = executor_real_obter();
-        g_print("lia-sessiond: executor = real (sete ferramentas de leitura + duas de persistência explícita, docs/manifesto.md)\n");
+        g_print("lia-sessiond: executor = real (oito ferramentas de leitura + duas de persistência explícita, docs/manifesto.md)\n");
     }
 }
 
@@ -1360,6 +1832,18 @@ int main(int argc, char **argv)
 
     escolher_executor();
     escolher_modelo();
+    const char *rot = g_getenv("LIA_SESSIOND_ROTEAMENTO");
+    if (!rot || !*rot || strcmp(rot, "direto") == 0) {
+        g_rota_direta = TRUE;
+    } else if (strcmp(rot, "modelo") == 0) {
+        g_rota_direta = FALSE;
+    } else {
+        g_printerr("lia-sessiond: LIA_SESSIOND_ROTEAMENTO='%s' desconhecido — use 'direto' ou 'modelo'\n", rot);
+        return 1;
+    }
+    g_print("lia-sessiond: roteamento = %s\n", g_rota_direta
+        ? "direto (intenção de alta confiança escolhe a ferramenta sem consultar o modelo; LIA_SESSIOND_ROTEAMENTO=modelo desliga)"
+        : "modelo (o modelo sempre propõe; o roteador valida e corrige)");
 
     Daemon d = { 0 };
     const char *home = g_get_home_dir();

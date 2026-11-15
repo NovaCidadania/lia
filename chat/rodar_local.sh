@@ -7,9 +7,9 @@
 #   TEST_HOME padrão: /tmp/lia-chat-teste (reaproveitado entre execuções,
 #   para manter o estado de ~/.lia de teste entre uma sessão e outra —
 #   apague o diretório manualmente se quiser começar do zero).
-#   executor padrão: "real" (as seis ferramentas de leitura de verdade —
-#   tools.discover/list/probe, sistema.diagnosticar/recursos/dispositivos
-#   — mesmo padrão de produção).
+#   executor padrão: "real" (as oito ferramentas de leitura de verdade —
+#   tools.discover/list/probe, sistema.diagnosticar/recursos/dispositivos/
+#   processos_top_cpu/processos_top_memoria — mesmo padrão de produção).
 #   modelo: se omitido, é AUTO-DETECTADO (ver abaixo) — nunca assume
 #   silenciosamente que Ollama/llama.cpp estão rodando; se nenhum dos
 #   dois for encontrado, cai para mock e explica por quê.
@@ -26,6 +26,12 @@
 #   - se nenhum dos dois estiver alcançável, procura arquivos .gguf em
 #     ~/models (só para avisar e sugerir o comando de iniciar o
 #     llama-server, nunca para rodar nada automaticamente).
+#
+# Piloto automático (padrão): perguntas de leitura seguem sozinhas até a
+# resposta final com dados reais; escrita/admin continuam pedindo
+# aprovação. LIA_CHAT_AUTOPILOT=manual volta a exigir /plano para tudo;
+# LIA_SESSIOND_ROTEAMENTO=modelo faz o modelo sempre escolher a ferramenta
+# (mais lento; o roteador valida e corrige do mesmo jeito).
 #
 # Dentro do lia-chat: /help, /status, /modelo, MOCK_PROPOR:<ferramenta>
 # (só faz sentido com modelo=mock), /plano, /aprovar, /rejeitar,

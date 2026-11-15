@@ -461,6 +461,22 @@ static void ao_conectar(GObject *origem, GAsyncResult *res, gpointer dados)
     json_builder_add_string_value(b, prompt_guardado ? prompt_guardado : "");
     json_builder_set_member_name(b, "stream");
     json_builder_add_boolean_value(b, TRUE);
+    const char *esquema = g_object_get_data(G_OBJECT(req->cliente_socket), "lia-esquema");
+    if (esquema) {
+        JsonParser *pf = json_parser_new();
+        if (json_parser_load_from_data(pf, esquema, -1, NULL) && json_parser_get_root(pf)) {
+            json_builder_set_member_name(b, "json_schema");
+            json_builder_add_value(b, json_node_copy(json_parser_get_root(pf)));
+        }
+        g_object_unref(pf);
+    }
+    int n_predict = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(req->cliente_socket), "lia-n-predict"));
+    if (n_predict > 0) {
+        json_builder_set_member_name(b, "n_predict");
+        json_builder_add_int_value(b, n_predict);
+    }
+    json_builder_set_member_name(b, "temperature");
+    json_builder_add_int_value(b, 0);
     json_builder_end_object(b);
     JsonNode *raiz = json_builder_get_root(b);
     JsonGenerator *gen = json_generator_new();
@@ -508,6 +524,13 @@ static gboolean ao_idle_endpoint_invalido(gpointer dados)
 LlamaCppRequisicao *llama_cpp_gerar(LlamaCppConfig *cfg, const char *prompt,
                                      LlamaCppConcluidoCb concluido_cb, gpointer ctx)
 {
+    return llama_cpp_gerar_opcoes(cfg, prompt, NULL, 0, concluido_cb, ctx);
+}
+
+LlamaCppRequisicao *llama_cpp_gerar_opcoes(LlamaCppConfig *cfg, const char *prompt,
+                                            const char *esquema_json, int n_predict,
+                                            LlamaCppConcluidoCb concluido_cb, gpointer ctx)
+{
     LlamaCppRequisicao *req = g_new0(LlamaCppRequisicao, 1);
     req->cfg = cfg;
     req->concluido_cb = concluido_cb;
@@ -528,6 +551,9 @@ LlamaCppRequisicao *llama_cpp_gerar(LlamaCppConfig *cfg, const char *prompt,
     req->cliente_socket = g_socket_client_new();
     g_socket_client_set_timeout(req->cliente_socket, (guint)((cfg->timeout_ms + 999) / 1000));
     g_object_set_data_full(G_OBJECT(req->cliente_socket), "lia-prompt", g_strdup(prompt), g_free);
+    if (esquema_json)
+        g_object_set_data_full(G_OBJECT(req->cliente_socket), "lia-esquema", g_strdup(esquema_json), g_free);
+    g_object_set_data(G_OBJECT(req->cliente_socket), "lia-n-predict", GINT_TO_POINTER(n_predict));
     req->fase = FASE_CONECTANDO;
 
     g_socket_client_connect_to_host_async(req->cliente_socket, cfg->host, (guint16)cfg->porta,

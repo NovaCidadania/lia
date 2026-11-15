@@ -127,7 +127,7 @@ Os comandos já implementados (`lia tools discover`, `lia tools list [--json]`, 
 
 O executor é plugável (`sessiond/executor.h`) e dois backends existem:
 
-- **`real`** (`sessiond/executor_real.c`/`sessiond/manifesto_real.c`, padrão em produção) — chama `cli/sistema.c` e `cli/ferramentas.c` de verdade, com nove ferramentas: sete somente leitura (`tools.discover`, `tools.list`, `tools.probe`, `sistema.diagnosticar`, `sistema.recursos`, `sistema.dispositivos`, `sistema.processos_top_cpu` — `risco: nenhum`, `requer_aprovacao: false`, nenhuma delas chega ao estado "aguardando aprovação", nenhuma grava nada) mais duas ações explícitas de persistência (`tools.discover.persistir`, `tools.probe.persistir` — `risco: baixo`, sempre com aprovação, gravam `~/.lia/maquina/inventario/ferramentas.lia` e `~/.lia/humano/diagnosticos/ferramentas.md`; `tools.discover`/`tools.probe` chamam `cli/ferramentas.c` com `--sem-salvar`, nunca gravam por si só — correção de uma classificação incorreta encontrada em auditoria pós-commit `e366f2b`, ver `docs/manifesto.md` §6.1). A única execução de processo externo em todo o backend é `tools.probe`/`tools.probe.persistir` com `--safe`, pelo catálogo fixo já existente em `cli/ferramentas.c` (sandboxed, com timeout, sem shell) — exceção escopada e documentada em `docs/THREAT-MODEL.md` §5.1; mesmo essas ferramentas rejeitam `{"safe": false}` com `parametro_invalido`, porque "probe sem --safe" não existe nesta etapa. `modo: "executar"` e `modo: "simular"` em `solicitar` são tratados da mesma forma: todas as nove ferramentas sempre leem/gravam de verdade (sem efeito a simular).
+- **`real`** (`sessiond/executor_real.c`/`sessiond/manifesto_real.c`, padrão em produção) — chama `cli/sistema.c` e `cli/ferramentas.c` de verdade, com dez ferramentas: oito somente leitura (`tools.discover`, `tools.list`, `tools.probe`, `sistema.diagnosticar`, `sistema.recursos`, `sistema.dispositivos`, `sistema.processos_top_cpu`, `sistema.processos_top_memoria` — `risco: nenhum`, `requer_aprovacao: false`, nenhuma delas chega ao estado "aguardando aprovação", nenhuma grava nada) mais duas ações explícitas de persistência (`tools.discover.persistir`, `tools.probe.persistir` — `risco: baixo`, sempre com aprovação, gravam `~/.lia/maquina/inventario/ferramentas.lia` e `~/.lia/humano/diagnosticos/ferramentas.md`; `tools.discover`/`tools.probe` chamam `cli/ferramentas.c` com `--sem-salvar`, nunca gravam por si só — correção de uma classificação incorreta encontrada em auditoria pós-commit `e366f2b`, ver `docs/manifesto.md` §6.1). A única execução de processo externo em todo o backend é `tools.probe`/`tools.probe.persistir` com `--safe`, pelo catálogo fixo já existente em `cli/ferramentas.c` (sandboxed, com timeout, sem shell) — exceção escopada e documentada em `docs/THREAT-MODEL.md` §5.1; mesmo essas ferramentas rejeitam `{"safe": false}` com `parametro_invalido`, porque "probe sem --safe" não existe nesta etapa. `modo: "executar"` e `modo: "simular"` em `solicitar` são tratados da mesma forma: todas as nove ferramentas sempre leem/gravam de verdade (sem efeito a simular).
 - **`mock`** (`sessiond/executor_mock.c`/`sessiond/manifesto_mock.c`, só via `LIA_SESSIOND_EXECUTOR=mock`) — tabela fixa e fictícia (`mock.leitura`, `mock.escrita` risco médio, `mock.admin` risco admin) só para testar a máquina de estados inteira (plano → aprovação → progresso/saída → resultado → auditoria, replay, cancelamento) sem nenhum efeito real em nenhum caso — nem `mock.admin` jamais chama `sudo`/`pkexec`. **Nunca é o executor padrão em produção** (`sessiond.c`, `escolher_executor`).
 
 Validação de parâmetros (`validar_parametros`) e a política "só capacidades de leitura" (`Executor.restringe_a_leitura`, verificada em `tratar_solicitar` antes de qualquer execução) são do daemon, nunca da GUI — a GUI só reflete o que o daemon decidiu.
@@ -164,3 +164,44 @@ cliente                     daemon                      modelo
 `escolher_modelo` (`sessiond.c`) seleciona o backend via `LIA_SESSIOND_MODELO`: **`mock` é o padrão** (determinístico, sem rede — ao contrário do executor, onde o padrão é o `real`, porque aqui `ollama` exige um servidor Ollama de verdade rodando em `127.0.0.1:11434` por padrão). `LIA_SESSIOND_MODELO=ollama` ativa o backend real; `LIA_OLLAMA_HOST`/`LIA_OLLAMA_PORTA`/`LIA_OLLAMA_MODELO`/`LIA_OLLAMA_TIMEOUT_MS` configuram a conexão.
 
 Cliente de referência: `lia-chat` (`chat/lia-chat.c`, `make chat`) — primeiro cliente de chat de terminal deste fluxo, documentado em `docs/LIA-CLI.md` §"`lia-chat`". Implementa exatamente o fluxo acima (`perguntar`→`proposta`→`solicitar`→`plano`→`aprovar`→`resultado`→`resposta`), com aprovação explícita (padrão: rejeitar) e anexação de arquivo (`/arquivo adicionar`, sempre marcado não confiável).
+
+## 10. Fluxo agente: da pergunta à resposta final fundamentada
+
+A seção 9 descreve o que o modelo **não** pode fazer. Esta descreve o caminho completo de uma pergunta de leitura, que não para em "ferramenta sugerida":
+
+```
+pergunta → intenção → proposta validada → plano → execução → resultado real → resposta final
+```
+
+Cada etapa é uma mensagem (ou um campo) separada — texto do modelo, intenção, proposta, plano, resultado da ferramenta e resposta final nunca se misturam:
+
+| Etapa | Mensagem | O que traz |
+|---|---|---|
+| intenção + proposta | `proposta` | `resposta_texto` (texto do modelo, ou a mensagem do validador quando a proposta foi removida), `tipo_resposta` (`proposta`/`resposta`/`esclarecimento`), `intencao` (`id`, `descricao`, `confianca`), `ferramenta_proposta` (a **única** coisa que um cliente pode encaminhar como `solicitar`; `null` quando rejeitada) e `validacao` |
+| validação | `proposta.dados.validacao` | `origem` (`roteador`, `modelo`, `modelo+roteador`), `veredito` (`rota_direta`, `aceita`, `corrigida`, `sem_ferramenta`, `esclarecer`, `rejeitada`), `motivo`, `ferramenta_do_modelo`, `saida_estruturada`, `tentativas`, `risco`, `requer_aprovacao`, `somente_leitura`, `execucao_automatica_permitida` |
+| plano | `plano` | igual à seção 4 — o daemon valida de novo manifesto, capacidades e parâmetros |
+| resultado | `resultado` | `dados` (JSON bruto da ferramenta, intacto), `apresentacao` (texto legível derivado **só** desse JSON por `sessiond/apresentacao.c`) e `tempo_execucao_ms` |
+| resposta final | `resposta` | `resposta_texto`, `origem` (`deterministica`, `modelo_extrativa`, `modelo`), `fundamentada`, `aviso`, `tempo_modelo_ms` |
+
+**Resposta estruturada do modelo.** Quando o backend suporta (Ollama `format`, llama-server `json_schema`), o daemon pede a saída restrita a um esquema JSON — `{"tipo","ferramenta","parametros","justificativa","resposta"}`, com `ferramenta` como enum dos nomes do manifesto ativo mais `"nenhuma"` — em vez de procurar JSON no meio de texto livre (`modelo_preencher_proposta_estruturada`; o caminho antigo de JSON embutido continua só como compatibilidade). Resposta inválida: nada é executado; há **uma** nova tentativa com o motivo da rejeição; se falhar, a proposta sai sem ferramenta com uma mensagem clara. Nenhuma heurística fabrica parâmetros.
+
+**Piloto automático — só leitura.** `validacao.execucao_automatica_permitida` é calculado pelo **daemon**: verdadeiro apenas para ferramenta declarada `somente_leitura`, com `risco: nenhum`, sem `requer_aprovacao` e só com capacidades de leitura. O cliente só obedece:
+
+- `LIA_CHAT_AUTOPILOT=read-only` (padrão do `lia-chat`): proposta com `execucao_automatica_permitida` é encaminhada como `solicitar` sem perguntar — o mesmo `solicitar` de `/plano`; quem valida e executa continua sendo o daemon, pelo executor real. O cliente nunca chama executor nenhum.
+- `LIA_CHAT_AUTOPILOT=manual`: toda ferramenta espera `/plano`.
+- qualquer outro valor: `lia-chat` recusa iniciar (código 2). Não existe valor que libere escrita, administração ou hardware.
+- Ferramentas que gravam (`tools.*.persistir`), que executam binários (`tools.probe`), administrativas ou de hardware **nunca** seguem sozinhas; se solicitadas, o `plano` para em `aguardando_aprovacao` como sempre. O modelo nunca aprova nada.
+
+**Resposta final.** Depois do `resultado` de uma execução com `origem_modelo`, o daemon sempre fecha o turno com uma `resposta`. Como ela é produzida depende da ferramenta (`apresentacao_modo_resposta`):
+
+- **determinística** (rankings e listas: `sistema.processos_top_cpu`, `sistema.processos_top_memoria`, `sistema.dispositivos`): frase montada pelo daemon a partir do JSON; o modelo não é consultado.
+- **extrativa** (`sistema.recursos`, `sistema.diagnosticar`): o modelo recebe as linhas numeradas e devolve só `{"linhas":[...]}`; o texto final é a cópia das linhas escolhidas, unidas às que casam com o que foi perguntado. O modelo não escreve nenhum valor. Seleção ausente/ inválida: ficam as linhas que casam com a pergunta (ou todas), com `aviso`.
+- **resumo conferido** (demais ferramentas): texto livre do modelo, aceito só se todo número citado existir nos dados, se não negar os dados e se respeitar a ordem do ranking; senão, resposta determinística com `aviso` dizendo o motivo.
+
+O resumo livre foi restringido assim porque, em teste real com um modelo local de 3B, resumos que passavam na checagem numérica ainda afirmavam coisas falsas ("todos os dispositivos PCI são Intel"; RAM total citada como "disponível").
+
+Execução que falha ou estoura o tempo também termina com `resposta` determinística dizendo que nenhum dado foi coletado.
+
+**Cancelar a conversa com o modelo.** `cancelar` com `dados: {"pergunta": true}` (ou um `cancelar` simples sem plano/execução em andamento) interrompe a geração em curso — a da proposta ou a da resposta final — e é confirmado com um `erro` de código `cancelado`. Nenhuma `proposta`/`resposta` atrasada chega depois. Se o cliente desconecta no meio, o daemon cancela a geração sozinho.
+
+**Tempos.** `proposta.tempo_modelo_ms`, `resultado.tempo_execucao_ms` e `resposta.tempo_modelo_ms` são medidos pelo daemon e também registrados no log dele, por etapa; `lia-chat` mostra os três ao concluir o turno.
