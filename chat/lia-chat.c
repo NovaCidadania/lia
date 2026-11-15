@@ -83,6 +83,10 @@ typedef struct {
     char *ferramenta;
     char *parametros_json; /* já serializado — reenviado como está em 'solicitar' */
     char *justificativa;
+    /* proposta de TAREFA (plano de vários passos já validado pelo daemon):
+     * o 'solicitar' leva só plano_id + hash — nunca o conteúdo do plano */
+    char *plano_id;
+    char *plano_hash;
 } PropostaPendente;
 
 static void proposta_pendente_liberar(PropostaPendente *p)
@@ -92,6 +96,8 @@ static void proposta_pendente_liberar(PropostaPendente *p)
     g_free(p->ferramenta);
     g_free(p->parametros_json);
     g_free(p->justificativa);
+    g_free(p->plano_id);
+    g_free(p->plano_hash);
     g_free(p);
 }
 
@@ -148,7 +154,20 @@ typedef struct {
     gint64 turno_inicio_us;        /* pergunta enviada */
     gint64 t_proposta_ms, t_execucao_ms, t_resposta_ms; /* tempos informados pelo daemon; -1 = etapa não ocorreu */
     char *ultimo_dados_json;       /* JSON bruto do último resultado (/dados) */
+    char *plano_hash_pendente;     /* hash do plano apresentado: vai junto no 'aprovar' */
+
+    /* ---- tarefa de vários passos em andamento (Agent Runtime v2) ---- */
+    gboolean tarefa_ativa;
+    char *tarefa_objetivo;
+    int tarefa_n;                  /* passos no plano (cresce em replanejamento) */
+    char *tarefa_ferramenta[16];
+    char *tarefa_estado[16];       /* "aguardando", "executando", "sucesso", "falha"... */
+    gint64 tarefa_ms[16];
+    gboolean tarefa_replano[16];
+    char *tarefa_fase;             /* última fase informada pelo daemon */
 } LiaChat;
+
+#define TAREFA_MAX_PASSOS_UI 16
 
 typedef enum {
     FASE_OCIOSO = 0,
@@ -236,8 +255,23 @@ static void definir_fase(LiaChat *c, Fase f)
     case FASE_CONSULTANDO_MODELO: txt = g_strdup("consultando modelo"); break;
     case FASE_VALIDANDO_PLANO: txt = g_strdup_printf("validando plano%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
     case FASE_AGUARDANDO_APROVACAO: txt = g_strdup_printf("aguardando aprovação%s%s — responda s ou n", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
-    case FASE_EXECUTANDO: txt = g_strdup_printf("executando leitura%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
-    case FASE_GERANDO_RESPOSTA: txt = g_strdup("gerando resposta final"); break;
+    case FASE_EXECUTANDO:
+        if (c->tarefa_ativa) {
+            int feitos = 0;
+            const char *atual = NULL;
+            for (int i = 0; i < c->tarefa_n; i++) {
+                if (!strcmp(c->tarefa_estado[i], "executando")) { if (!atual) atual = c->tarefa_ferramenta[i]; }
+                else if (strcmp(c->tarefa_estado[i], "aguardando")) feitos++;
+            }
+            const char *fase = c->tarefa_fase ? c->tarefa_fase : "executando";
+            if (!strcmp(fase, "verificando")) txt = g_strdup_printf("verificando critérios · %d/%d passos", feitos, c->tarefa_n);
+            else if (!strcmp(fase, "replanejando")) txt = g_strdup_printf("replanejando · %d/%d passos", feitos, c->tarefa_n);
+            else txt = g_strdup_printf("coletando dados · %d/%d passos%s%s", feitos, c->tarefa_n, atual ? " · " : "", atual ? atual : "");
+        } else {
+            txt = g_strdup_printf("executando leitura%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : "");
+        }
+        break;
+    case FASE_GERANDO_RESPOSTA: txt = g_strdup(c->tarefa_objetivo ? "finalizando · comparando evidências" : "gerando resposta final"); break;
     default:
         txt = g_strdup_printf("conectado · pronto · %s · /help",
                               c->autopilot ? "leituras seguras automáticas" : "modo manual (toda ferramenta pede /plano)");
@@ -247,6 +281,93 @@ static void definir_fase(LiaChat *c, Fase f)
     term_definir_status(c->term, txt, ativo, continua);
     term_definir_prompt(c->term, f == FASE_AGUARDANDO_APROVACAO ? "aprovar? [s/N] " : "lia> ");
     g_free(txt);
+}
+
+static void ms_legivel(char *dst, gsize cap, gint64 ms);
+static const char *campo_str(JsonObject *obj, const char *chave);
+static gboolean campo_bool(JsonObject *obj, const char *chave, gboolean padrao);
+static char *json_para_texto(JsonNode *n);
+static JsonObject *campo_obj(JsonObject *obj, const char *chave);
+static gint64 campo_int(JsonObject *obj, const char *chave, gint64 padrao);
+static char *lista_str_para_texto(JsonObject *obj, const char *chave);
+
+static void tarefa_ui_limpar(LiaChat *c)
+{
+    for (int i = 0; i < TAREFA_MAX_PASSOS_UI; i++) {
+        g_clear_pointer(&c->tarefa_ferramenta[i], g_free);
+        g_clear_pointer(&c->tarefa_estado[i], g_free);
+        c->tarefa_ms[i] = 0;
+        c->tarefa_replano[i] = FALSE;
+    }
+    c->tarefa_n = 0;
+    c->tarefa_ativa = FALSE;
+    g_clear_pointer(&c->tarefa_fase, g_free);
+    if (c->term) term_definir_painel(c->term, NULL);
+}
+
+/* carrega a lista de passos a partir do array "passos" de um plano */
+static void tarefa_ui_carregar(LiaChat *c, JsonObject *plano)
+{
+    if (!plano || !json_object_has_member(plano, "passos")) return;
+    JsonNode *n = json_object_get_member(plano, "passos");
+    if (JSON_NODE_TYPE(n) != JSON_NODE_ARRAY) return;
+    JsonArray *arr = json_node_get_array(n);
+    int total = (int)MIN(json_array_get_length(arr), (guint)TAREFA_MAX_PASSOS_UI);
+    for (int i = 0; i < total; i++) {
+        JsonNode *el = json_array_get_element(arr, (guint)i);
+        if (JSON_NODE_TYPE(el) != JSON_NODE_OBJECT) continue;
+        JsonObject *o = json_node_get_object(el);
+        char *params = json_object_has_member(o, "parametros") ? json_para_texto(json_object_get_member(o, "parametros")) : g_strdup("{}");
+        const char *f = campo_str(o, "ferramenta");
+        g_free(c->tarefa_ferramenta[i]);
+        c->tarefa_ferramenta[i] = strcmp(params, "{}") ? g_strdup_printf("%s %s", f ? f : "?", params) : g_strdup(f ? f : "?");
+        g_free(params);
+        if (campo_str(o, "estado") || !c->tarefa_estado[i]) {
+            g_free(c->tarefa_estado[i]);
+            c->tarefa_estado[i] = g_strdup(campo_str(o, "estado") ? campo_str(o, "estado") : "aguardando");
+        }
+        c->tarefa_replano[i] = campo_bool(o, "de_replanejamento", FALSE);
+        if (json_object_has_member(o, "tempo_execucao_ms")) c->tarefa_ms[i] = campo_int(o, "tempo_execucao_ms", 0);
+    }
+    c->tarefa_n = total;
+    const char *obj = campo_str(plano, "objetivo");
+    if (obj) { g_free(c->tarefa_objetivo); c->tarefa_objetivo = sanear(obj); }
+}
+
+/* "  [2/4] sistema.processos_top_cpu ........ executando" */
+static void tarefa_ui_linha(LiaChat *c, GString *out, int i, gboolean cor)
+{
+    const char *e = c->tarefa_estado[i] ? c->tarefa_estado[i] : "aguardando";
+    char *nome = g_strdup_printf("[%d/%d] %s%s ", i + 1, c->tarefa_n, c->tarefa_ferramenta[i] ? c->tarefa_ferramenta[i] : "?",
+                                 c->tarefa_replano[i] ? " (replanejamento)" : "");
+    glong larg = g_utf8_strlen(nome, -1);
+    const char *rotulo = !strcmp(e, "sucesso") ? "concluído" : e;
+    Estilo est = !strcmp(e, "sucesso") ? EST_OK : !strcmp(e, "executando") ? EST_FORTE :
+                 (!strcmp(e, "falha") || !strcmp(e, "cancelado")) ? EST_ERRO : EST_FRACO;
+    g_string_append_printf(out, "  %s", nome);
+    for (glong k = larg; k < 58; k++) g_string_append_c(out, '.');
+    g_string_append_printf(out, " %s%s%s", cor ? sgr(c, est) : "", rotulo, cor ? sgr0(c) : "");
+    if (c->tarefa_ms[i] > 0 || !strcmp(e, "sucesso")) {
+        char t[32];
+        ms_legivel(t, sizeof t, c->tarefa_ms[i]);
+        g_string_append_printf(out, " (%s)", t);
+    }
+    g_free(nome);
+}
+
+/* painel vivo da tarefa (acima da linha de status): objetivo + passos */
+static void tarefa_ui_painel(LiaChat *c)
+{
+    if (!c->term) return;
+    if (!c->tarefa_ativa) { term_definir_painel(c->term, NULL); return; }
+    GString *p = g_string_new(NULL);
+    g_string_append_printf(p, "%sObjetivo:%s %s\n", sgr(c, EST_FORTE), sgr0(c), c->tarefa_objetivo ? c->tarefa_objetivo : "");
+    for (int i = 0; i < c->tarefa_n; i++) {
+        tarefa_ui_linha(c, p, i, TRUE);
+        g_string_append_c(p, '\n');
+    }
+    term_definir_painel(c->term, p->str);
+    g_string_free(p, TRUE);
 }
 
 static void ms_legivel(char *dst, gsize cap, gint64 ms)
@@ -278,6 +399,8 @@ static void encerrar_turno(LiaChat *c, gboolean concluido)
     c->turno_espera_resposta = FALSE;
     c->turno_inicio_us = 0;
     g_clear_pointer(&c->ferramenta_turno, g_free);
+    tarefa_ui_limpar(c);
+    g_clear_pointer(&c->tarefa_objetivo, g_free);
     definir_fase(c, FASE_OCIOSO);
 }
 
@@ -485,17 +608,27 @@ static void enviar_solicitar_da_proposta(LiaChat *c, const char *modo)
     PropostaPendente *p = c->proposta_pendente;
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
-    json_builder_set_member_name(b, "ferramenta");
-    json_builder_add_string_value(b, p->ferramenta);
-    json_builder_set_member_name(b, "parametros");
-    JsonParser *pp = json_parser_new();
-    if (p->parametros_json && json_parser_load_from_data(pp, p->parametros_json, -1, NULL))
-        json_builder_add_value(b, json_node_copy(json_parser_get_root(pp)));
-    else {
-        json_builder_begin_object(b);
-        json_builder_end_object(b);
+    if (p->plano_id) {
+        /* tarefa: só a referência ao plano validado e o hash dele — o
+         * conteúdo do plano fica no daemon e não é reenviado (não há como
+         * alterá-lo daqui) */
+        json_builder_set_member_name(b, "plano_id");
+        json_builder_add_string_value(b, p->plano_id);
+        json_builder_set_member_name(b, "hash");
+        json_builder_add_string_value(b, p->plano_hash ? p->plano_hash : "");
+    } else {
+        json_builder_set_member_name(b, "ferramenta");
+        json_builder_add_string_value(b, p->ferramenta);
+        json_builder_set_member_name(b, "parametros");
+        JsonParser *pp = json_parser_new();
+        if (p->parametros_json && json_parser_load_from_data(pp, p->parametros_json, -1, NULL))
+            json_builder_add_value(b, json_node_copy(json_parser_get_root(pp)));
+        else {
+            json_builder_begin_object(b);
+            json_builder_end_object(b);
+        }
+        g_object_unref(pp);
     }
-    g_object_unref(pp);
     json_builder_set_member_name(b, "modo");
     json_builder_add_string_value(b, modo);
     json_builder_set_member_name(b, "origem_modelo");
@@ -538,6 +671,10 @@ static void tratar_decisao_plano(LiaChat *c, gboolean aprovar)
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "plano_id");
     json_builder_add_string_value(b, c->plano_id_pendente); /* exatamente o id recebido — nunca reconstruído */
+    /* a decisão vale para ESTE plano: o hash que o daemon calculou do plano
+     * apresentado vai junto, sem alteração */
+    json_builder_set_member_name(b, "hash");
+    json_builder_add_string_value(b, c->plano_hash_pendente ? c->plano_hash_pendente : "");
     json_builder_set_member_name(b, "decisao");
     json_builder_add_string_value(b, aprovar ? "aprovar" : "rejeitar");
     json_builder_set_member_name(b, "escopo");
@@ -791,6 +928,7 @@ static void limpar_pendencias_de_execucao(LiaChat *c)
 {
     g_free(c->plano_id_pendente); c->plano_id_pendente = NULL;
     g_free(c->ferramenta_plano_pendente); c->ferramenta_plano_pendente = NULL;
+    g_free(c->plano_hash_pendente); c->plano_hash_pendente = NULL;
     if (c->plano_dados_pendente) { json_object_unref(c->plano_dados_pendente); c->plano_dados_pendente = NULL; }
     c->aguardando_decisao_plano = FALSE;
     g_free(c->execucao_id_pendente); c->execucao_id_pendente = NULL;
@@ -805,6 +943,43 @@ static void tratar_msg_plano(LiaChat *c, const LiaMsg *m)
     c->ferramenta_plano_pendente = g_strdup(ferramenta ? ferramenta : "");
     c->plano_dados_pendente = json_object_ref(m->dados);
     c->aguardando_decisao_plano = campo_bool(m->dados, "requer_aprovacao", TRUE);
+    c->plano_hash_pendente = g_strdup(campo_str(m->dados, "hash") ? campo_str(m->dados, "hash") : "");
+    if (campo_bool(m->dados, "tarefa", FALSE)) {
+        /* plano de vários passos: mostra objetivo, passos, risco e o hash
+         * ao qual a execução (e a aprovação, se houver) fica presa */
+        tarefa_ui_limpar(c);
+        tarefa_ui_carregar(c, m->dados);
+        c->tarefa_ativa = TRUE;
+        const char *exec = campo_str(m->dados, "execucao_id");
+        if (exec) { g_free(c->execucao_id_pendente); c->execucao_id_pendente = g_strdup(exec); }
+        const char *risco = campo_str(m->dados, "risco"), *hash = c->plano_hash_pendente;
+        gint64 orc_ms = campo_int(m->dados, "orcamento_tempo_ms", 0), orc_p = campo_int(m->dados, "orcamento_passos", 0);
+        if (c->term) {
+            saida_linha(c, "%sPlano da tarefa%s — %s", sgr(c, EST_FORTE), sgr0(c), c->tarefa_objetivo ? c->tarefa_objetivo : "");
+            saida_linha(c, "%s  %d passos · risco %s · %s · orçamento: %" G_GINT64_FORMAT " passos, %" G_GINT64_FORMAT " s · hash %.12s…%s",
+                        sgr(c, EST_FRACO), c->tarefa_n, risco ? risco : "?",
+                        c->aguardando_decisao_plano ? "EXIGE APROVAÇÃO" : "somente leitura, sem aprovação",
+                        orc_p, orc_ms / 1000, hash, sgr0(c));
+        } else {
+            saida_linha(c, "[tarefa] objetivo: %s", c->tarefa_objetivo ? c->tarefa_objetivo : "");
+            saida_linha(c, "[tarefa] plano: %d passos, risco=%s, requer_aprovacao=%s, hash=%s", c->tarefa_n, risco ? risco : "?",
+                        c->aguardando_decisao_plano ? "sim" : "nao", hash);
+            for (int i = 0; i < c->tarefa_n; i++)
+                saida_linha(c, "[tarefa]   [%d/%d] %s", i + 1, c->tarefa_n, c->tarefa_ferramenta[i]);
+        }
+        if (c->aguardando_decisao_plano) {
+            if (c->term) {
+                GString *l = g_string_new(NULL);
+                for (int i = 0; i < c->tarefa_n; i++) { tarefa_ui_linha(c, l, i, FALSE); g_string_append_c(l, '\n'); }
+                saida_linha(c, "%s", l->str);
+                g_string_free(l, TRUE);
+            }
+            saida_linha(c, "Aprovar este plano? [s/N] ");
+        }
+        tarefa_ui_painel(c);
+        definir_fase(c, c->aguardando_decisao_plano ? FASE_AGUARDANDO_APROVACAO : FASE_EXECUTANDO);
+        return;
+    }
     if (!c->ferramenta_turno && ferramenta) c->ferramenta_turno = g_strdup(ferramenta);
     if (c->term && !c->aguardando_decisao_plano) {
         /* leitura sem aprovação: uma linha basta (o plano completo continua
@@ -826,6 +1001,65 @@ static void tratar_msg_progresso_ou_saida(LiaChat *c, const LiaMsg *m, gboolean 
     const char *exec_id = campo_str(m->dados, "execucao_id");
     if (exec_id && !c->execucao_id_pendente)
         c->execucao_id_pendente = g_strdup(exec_id);
+    JsonObject *tar = progresso ? campo_obj(m->dados, "tarefa") : NULL;
+    if (tar) {
+        /* evento de uma TAREFA: fase atual e, quando houver, a observação de um passo */
+        const char *fase = campo_str(tar, "fase");
+        g_free(c->tarefa_fase);
+        c->tarefa_fase = g_strdup(fase ? fase : "executando");
+        c->tarefa_ativa = TRUE;
+        JsonObject *plano = campo_obj(tar, "plano");
+        if (plano) tarefa_ui_carregar(c, plano); /* replanejamento: o plano cresceu */
+        JsonObject *ps = campo_obj(tar, "passo");
+        char *msg = sanear(campo_str(m->dados, "mensagem"));
+        if (ps) {
+            int i = (int)campo_int(ps, "indice", 0) - 1;
+            const char *est = campo_str(ps, "estado");
+            if (i >= 0 && i < TAREFA_MAX_PASSOS_UI && est) {
+                if (i >= c->tarefa_n) c->tarefa_n = i + 1;
+                g_free(c->tarefa_estado[i]);
+                c->tarefa_estado[i] = g_strdup(est);
+                c->tarefa_ms[i] = campo_int(ps, "tempo_execucao_ms", 0);
+                if (!c->tarefa_ferramenta[i]) c->tarefa_ferramenta[i] = g_strdup(campo_str(ps, "ferramenta") ? campo_str(ps, "ferramenta") : "?");
+                gboolean final = strcmp(est, "executando") && strcmp(est, "aguardando");
+                if (final) {
+                    char *ev = lista_str_para_texto(ps, "evidencias");
+                    char *lim = lista_str_para_texto(ps, "limitacoes");
+                    char *erro = campo_str(ps, "erro") ? sanear(campo_str(ps, "erro")) : NULL;
+                    char *apres = campo_str(ps, "apresentacao") ? sanear(campo_str(ps, "apresentacao")) : NULL;
+                    if (apres) g_strchomp(apres);
+                    char t[32];
+                    ms_legivel(t, sizeof t, c->tarefa_ms[i]);
+                    gboolean ok = !strcmp(est, "sucesso");
+                    if (c->term) {
+                        saida_linha(c, "%s  %s [%d/%d] %s — %s em %s%s", sgr(c, ok ? EST_OK : EST_ERRO), ok ? "✓" : "✗", i + 1, c->tarefa_n,
+                                    c->tarefa_ferramenta[i], ok ? "dados reais recebidos" : est, t, sgr0(c));
+                        if (ok) saida_linha(c, "%s    evidências: %s%s", sgr(c, EST_FRACO), ev, sgr0(c));
+                        if (strcmp(lim, "(nenhuma)")) saida_linha(c, "%s    limitações: %s%s", sgr(c, EST_AVISO), lim, sgr0(c));
+                        if (erro) saida_linha(c, "%s    %s%s", sgr(c, EST_ERRO), erro, sgr0(c));
+                        if (apres && *apres) { saida_linha(c, ""); saida_linha(c, "%s", apres); saida_linha(c, ""); }
+                    } else {
+                        saida_linha(c, "[passo %d/%d] %s: %s (%s) evidências: %s%s%s", i + 1, c->tarefa_n, c->tarefa_ferramenta[i], est, t, ev,
+                                    erro ? " erro: " : "", erro ? erro : "");
+                        if (strcmp(lim, "(nenhuma)")) saida_linha(c, "[passo %d/%d] limitações: %s", i + 1, c->tarefa_n, lim);
+                        if (apres && *apres) saida_linha(c, "%s", apres);
+                    }
+                    g_free(ev); g_free(lim); g_free(erro); g_free(apres);
+                } else if (!c->term) {
+                    saida_linha(c, "[passo %d/%d] %s: iniciado", i + 1, c->tarefa_n, c->tarefa_ferramenta[i]);
+                }
+            }
+        } else if (fase && !strcmp(fase, "replanejando")) {
+            if (c->term) saida_linha(c, "%s  ↻ %s%s", sgr(c, EST_AVISO), msg, sgr0(c));
+            else saida_linha(c, "[tarefa] replanejando: %s", msg);
+        } else if (fase && !strcmp(fase, "verificando")) {
+            if (!c->term) saida_linha(c, "[tarefa] verificando: %s", msg);
+        }
+        g_free(msg);
+        tarefa_ui_painel(c);
+        definir_fase(c, FASE_EXECUTANDO);
+        return;
+    }
     if (progresso) {
         double fracao = 0;
         if (json_object_has_member(m->dados, "fracao")) {
@@ -853,6 +1087,53 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
         ? json_para_texto(json_object_get_member(m->dados, "dados")) : NULL;
     char *apres = apresentacao ? sanear(apresentacao) : NULL;
     if (apres) g_strchomp(apres);
+
+    if (campo_bool(m->dados, "tarefa", FALSE)) {
+        /* resultado da TAREFA inteira: os dados de cada passo já foram
+         * mostrados à medida que chegaram; aqui só o veredito do verificador */
+        JsonObject *d = campo_obj(m->dados, "dados");
+        tarefa_ui_carregar(c, campo_obj(d, "tarefa")); /* estado FINAL de cada passo, como o daemon registrou */
+        const char *veredito = campo_str(d, "veredito");
+        char *aus = lista_str_para_texto(d, "evidencias_ausentes");
+        char t[32];
+        ms_legivel(t, sizeof t, exec_ms < 0 ? 0 : exec_ms);
+        gboolean cancelada = estado && !strcmp(estado, "cancelado");
+        if (c->term) {
+            if (c->tarefa_n) {
+                GString *l = g_string_new(NULL);
+                for (int i = 0; i < c->tarefa_n; i++) { tarefa_ui_linha(c, l, i, TRUE); if (i + 1 < c->tarefa_n) g_string_append_c(l, '\n'); }
+                saida_linha(c, "%sPassos:%s", sgr(c, EST_FORTE), sgr0(c));
+                saida_linha(c, "%s", l->str);
+                g_string_free(l, TRUE);
+            }
+            if (cancelada)
+                saida_linha(c, "%s  ✗ tarefa cancelada: todos os passos em andamento foram interrompidos e os pendentes não rodaram%s", sgr(c, EST_AVISO), sgr0(c));
+            else if (sucesso)
+                saida_linha(c, "%s  ✓ verificação: todos os critérios têm evidência — coleta concluída em %s%s", sgr(c, EST_OK), t, sgr0(c));
+            else
+                saida_linha(c, "%s  ✗ verificação: %s — evidências ausentes: %s (coleta: %s)%s", sgr(c, EST_ERRO),
+                            veredito ? veredito : (estado ? estado : "?"), aus, t, sgr0(c));
+        } else {
+            saida_linha(c, "[resultado] estado=%s codigo_saida=%" G_GINT64_FORMAT " tarefa veredito=%s ausentes=%s tempo=%" G_GINT64_FORMAT "ms",
+                        estado ? estado : "?", codigo, veredito ? veredito : "-", aus, exec_ms);
+        }
+        g_free(aus);
+        g_free(apres);
+        limpar_pendencias_de_execucao(c);
+        tarefa_ui_limpar(c);
+        if (c->turno_espera_resposta && !cancelada) {
+            iniciar_progresso_pergunta(c);
+            definir_fase(c, FASE_GERANDO_RESPOSTA);
+        } else if (cancelada) {
+            encerrar_turno(c, FALSE);
+        } else {
+            /* plano enviado sem pergunta (ex.: --json ou outro cliente): o
+             * daemon ainda manda a 'resposta' com o relatório */
+            c->turno_espera_resposta = TRUE;
+            definir_fase(c, FASE_GERANDO_RESPOSTA);
+        }
+        return;
+    }
 
     if (c->term) {
         const char *ferr = c->ferramenta_turno ? c->ferramenta_turno : (c->ferramenta_plano_pendente ? c->ferramenta_plano_pendente : "?");
@@ -985,8 +1266,43 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
     const char *ferramenta = NULL;
     JsonObject *fp = campo_obj(m->dados, "ferramenta_proposta");
     if (fp) ferramenta = campo_str(fp, "ferramenta");
+    const char *compat = campo_str(validacao, "compatibilidade");
 
     if (c->proposta_pendente) { proposta_pendente_liberar(c->proposta_pendente); c->proposta_pendente = NULL; }
+    JsonObject *pp = campo_obj(m->dados, "plano_proposto");
+    if (pp) {
+        /* TAREFA: plano de vários passos já validado pelo daemon */
+        PropostaPendente *p = g_new0(PropostaPendente, 1);
+        p->pergunta_id = g_strdup(pergunta_id);
+        p->ferramenta = g_strdup("(tarefa de vários passos)");
+        p->parametros_json = g_strdup("{}");
+        p->plano_id = g_strdup(campo_str(pp, "plano_id"));
+        p->plano_hash = g_strdup(campo_str(pp, "hash"));
+        c->proposta_pendente = p;
+        tarefa_ui_limpar(c);
+        tarefa_ui_carregar(c, pp);
+        gboolean auto_tarefa = c->autopilot && auto_ok && !requer;
+        gboolean parcial = compat && !strcmp(compat, "parcial");
+        if (c->term) {
+            saida_linha(c, "%s  ✓ tarefa: %s (%d passos%s)%s", sgr(c, EST_FRACO), c->tarefa_objetivo ? c->tarefa_objetivo : "?", c->tarefa_n,
+                        parcial ? "; compatibilidade PARCIAL: os dados coletados não respondem à pergunta de fundo" : "", sgr0(c));
+            if (!auto_tarefa)
+                saida_linha(c, "%s  ⏸ a tarefa não roda sozinha (%s) — /plano para solicitar, ou faça outra pergunta%s", sgr(c, EST_AVISO),
+                            !c->autopilot ? "modo manual" : (requer ? "exige aprovação" : "não é leitura pura"), sgr0(c));
+        } else {
+            saida_linha(c, "[validação] tarefa=%s passos=%d compatibilidade=%s veredito=%s: %s", campo_str(pp, "intencao") ? campo_str(pp, "intencao") : "-",
+                        c->tarefa_n, compat ? compat : "-", veredito ? veredito : "?", motivo);
+            if (auto_tarefa)
+                saida_linha(c, "[local] tarefa de %d passos selecionada — somente leitura, validada pelo daemon, executando automaticamente (LIA_CHAT_AUTOPILOT=read-only)", c->tarefa_n);
+            else
+                saida_linha(c, "[local] tarefa sugerida: %d passos — use /plano para solicitar", c->tarefa_n);
+        }
+        g_free(texto);
+        g_free(motivo);
+        if (auto_tarefa) enviar_solicitar_da_proposta(c, "executar");
+        else { tarefa_ui_limpar(c); encerrar_turno(c, FALSE); }
+        return;
+    }
     if (ferramenta) {
         PropostaPendente *p = g_new0(PropostaPendente, 1);
         p->pergunta_id = g_strdup(pergunta_id);
@@ -1025,7 +1341,7 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
             }
         } else {
             if (veredito && strcmp(veredito, "aceita") != 0)
-                saida_linha(c, "%s  ✗ validação (%s): %s%s", sgr(c, EST_AVISO), veredito, motivo, sgr0(c));
+                saida_linha(c, "%s  ✗ validação (%s%s%s): %s%s", sgr(c, EST_AVISO), veredito, compat ? "; ferramenta " : "", compat ? compat : "", motivo, sgr0(c));
             saida_linha(c, "%sLia:%s %s", sgr(c, EST_FORTE), sgr0(c), texto);
         }
     } else {
@@ -1061,9 +1377,34 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
     c->t_resposta_ms = campo_int(m->dados, "tempo_modelo_ms", -1);
     parar_progresso_pergunta(c);
     gboolean extrativa = origem && !strcmp(origem, "modelo_extrativa");
+    if (c->term && strstr(texto, "\nEvidências")) {
+        /* relatório de tarefa: destaca o título de cada seção */
+        static const char *const SECOES[] = { "RESULTADO ", "Motivo:", "Dados ausentes:", "Conclusão:", "Evidências", "Limitações:",
+                                               "Ações realizadas", "Ações não realizadas:", "Próximo passo:", "Leitura do modelo", NULL };
+        char **linhas = g_strsplit(texto, "\n", -1);
+        GString *o = g_string_new(NULL);
+        for (int i = 0; linhas[i]; i++) {
+            const char *l = linhas[i];
+            gboolean titulo = FALSE;
+            for (int k = 0; SECOES[k] && !titulo; k++) {
+                if (!g_str_has_prefix(l, SECOES[k])) continue;
+                const char *dois = strchr(l, ':');
+                gsize corte = dois ? (gsize)(dois - l) + 1 : strlen(l);
+                g_string_append_printf(o, "%s%.*s%s%s", sgr(c, EST_FORTE), (int)corte, l, sgr0(c), l + corte);
+                titulo = TRUE;
+            }
+            if (!titulo) g_string_append(o, l);
+            if (linhas[i + 1]) g_string_append_c(o, '\n');
+        }
+        g_strfreev(linhas);
+        g_free(texto);
+        texto = g_string_free(o, FALSE);
+    }
     if (c->term) {
         saida_linha(c, "%sLia:%s %s", sgr(c, EST_FORTE), sgr0(c), texto);
-        if (deterministica)
+        if (origem && !strcmp(origem, "deterministica+modelo"))
+            saida_linha(c, "%s  · relatório montado pelo daemon com os dados reais; a \"leitura do modelo\" ao final foi conferida contra eles%s", sgr(c, EST_FRACO), sgr0(c));
+        else if (deterministica)
             saida_linha(c, "%s  · resposta montada pelo daemon só com os dados reais acima (sem texto livre do modelo)%s", sgr(c, EST_FRACO), sgr0(c));
         else if (extrativa)
             saida_linha(c, "%s  · o modelo escolheu quais linhas respondem; o texto foi copiado dos dados reais%s", sgr(c, EST_FRACO), sgr0(c));
@@ -1071,7 +1412,8 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
             saida_linha(c, "%s  · resumo do modelo, conferido contra os dados reais%s", sgr(c, EST_FRACO), sgr0(c));
         if (aviso) saida_linha(c, "%s  ! %s%s", sgr(c, EST_AVISO), aviso, sgr0(c));
     } else {
-        saida_linha(c, deterministica ? "[resposta, determinística] %s" : (extrativa ? "[resposta, extrativa] %s" : "[modelo, resumo] %s"), texto);
+        saida_linha(c, deterministica ? "[resposta, determinística] %s" : (extrativa ? "[resposta, extrativa] %s" :
+                    (origem && !strcmp(origem, "deterministica+modelo")) ? "[resposta, determinística+modelo] %s" : "[modelo, resumo] %s"), texto);
         if (aviso) saida_linha(c, "[aviso] %s", aviso);
     }
     g_free(texto);
@@ -1091,7 +1433,8 @@ static void processar_msg_recebida(LiaChat *c, const LiaMsg *m)
     case LIA_MSG_SAIDA: tratar_msg_progresso_ou_saida(c, m, FALSE); break;
     case LIA_MSG_RESULTADO: tratar_msg_resultado(c, m); break;
     case LIA_MSG_AUDITORIA:
-        if (c->term) saida_linha(c, "%s  · auditoria registrada%s", sgr(c, EST_FRACO), sgr0(c));
+        /* numa tarefa há um registro por passo: a linha do próprio passo já basta */
+        if (c->term) { if (!c->tarefa_ativa) saida_linha(c, "%s  · auditoria registrada%s", sgr(c, EST_FRACO), sgr0(c)); }
         else saida_linha(c, "[auditoria registrada]");
         break;
     case LIA_MSG_ERRO: tratar_msg_erro(c, m); break;
@@ -1567,6 +1910,10 @@ int main(int argc, char **argv)
     g_free(c.execucao_id_pendente);
     g_free(c.ultimo_id_enviado);
     g_free(c.ultimo_dados_json);
+    g_free(c.plano_hash_pendente);
+    g_free(c.tarefa_objetivo);
+    g_free(c.tarefa_fase);
+    for (int i = 0; i < TAREFA_MAX_PASSOS_UI; i++) { g_free(c.tarefa_ferramenta[i]); g_free(c.tarefa_estado[i]); }
     g_free(c.ferramenta_turno);
     g_free(c.socket_caminho);
     g_free(c.backend_assumido);

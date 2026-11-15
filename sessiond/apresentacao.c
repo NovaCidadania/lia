@@ -55,10 +55,18 @@ static void centesimos(GString *out, gint64 c)
 
 /* nome de processo/dispositivo vem do sistema (não confiável como texto):
  * nunca deixa caractere de controle chegar ao terminal ou ao prompt. */
+/* 'largura' > 0: célula de tabela — completa com espaços e, se o texto for
+ * maior, corta com "…" (o nome inteiro continua no JSON e na frase final);
+ * largura == 0: sem corte nem preenchimento. */
 static void anexar_seguro(GString *out, const char *s, gsize largura)
 {
     gsize n = 0;
     for (const char *p = s ? s : ""; *p; p = g_utf8_next_char(p), n++) {
+        if (largura > 0 && n == largura - 1 && g_utf8_strlen(s, -1) > (glong)largura) {
+            g_string_append(out, "…");
+            n++;
+            break;
+        }
         gunichar ch = g_utf8_get_char_validated(p, -1);
         if (ch == (gunichar)-1 || ch == (gunichar)-2) { g_string_append_c(out, '?'); break; }
         if (ch < 0x20 || ch == 0x7f) g_string_append_c(out, '?');

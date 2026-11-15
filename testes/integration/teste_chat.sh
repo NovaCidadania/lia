@@ -523,6 +523,52 @@ parar_fake_ollama
 unset AUTOPILOT_CHAT
 
 # ========================================================================
+# I — tarefas de vários passos (Agent Runtime v2, docs/protocolo.md §11)
+# ========================================================================
+AUTOPILOT_CHAT=read-only
+env HOME="$HOME_T" LIA_SESSIOND_EXECUTOR=real "$SESSIOND" > "$HOME_T/sessiond.log" 2>&1 &
+DAEMON_PID=$!
+i=0; while [ ! -S "$SOCK" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+
+echo "== I1. tarefa de leitura (executor real): plano -> passos -> verificação -> relatório, sem /plano =="
+abrir_chat
+enviar_chat "Compare os 5 processos que mais usam CPU e memória."
+aguardar "$HOME_T/chat.out" "[tarefa] objetivo: comparar os processos" && ok "I1: objetivo da tarefa exibido" || ko "I1: sem objetivo"
+aguardar "$HOME_T/chat.out" "tarefa de 2 passos selecionada" && ok "I1: tarefa somente leitura segue automaticamente" || ko "I1: não seguiu sozinha"
+aguardar "$HOME_T/chat.out" "[passo 2/2] sistema.processos_top_memoria" "80" && ok "I1: progresso por passo" || ko "I1: sem progresso por passo"
+aguardar "$HOME_T/chat.out" "tarefa veredito=sucesso" "80" && ok "I1: verificador: sucesso" || ko "I1: sem veredito"
+aguardar "$HOME_T/chat.out" "[resposta, determinística] Conclusão:" "80" && ok "I1: resposta final = relatório, começando pela conclusão" || ko "I1: sem relatório"
+aguardar "$HOME_T/chat.out" "[concluído] total=" && ok "I1: turno concluído" || ko "I1: turno não concluiu"
+grep -q "Ações não realizadas: nenhuma escrita" "$HOME_T/chat.out" && grep -q "Próximo passo:" "$HOME_T/chat.out" \
+    && ok "I1: relatório traz ações não realizadas e próximo passo" || ko "I1: seções ausentes"
+grep -qE '"limite":5' "$HOME_T/chat.out" && ok "I1: o limite dito pela pessoa (5) aparece nos passos" || ko "I1: limite ausente"
+enviar_chat "/sair"
+fechar_chat
+
+echo "== I2. pergunta de vírus: resposta direta, nada executado, sem tools.discover =="
+abrir_chat
+enviar_chat "me diga se tem virus instalado nessa maquina"
+aguardar "$HOME_T/chat.out" "Não há ferramenta de detecção de malware" && ok "I2: explica que não há ferramenta de detecção" || ko "I2: resposta incorreta"
+nao_aparece "$HOME_T/chat.out" "[resultado]" "8" && ok "I2: nada foi executado" || ko "I2: executou algo"
+grep -q "tools.discover" "$HOME_T/chat.out" && ko "I2: tools.discover apareceu numa pergunta de vírus" || ok "I2: tools.discover não aparece"
+enviar_chat "/sair"
+fechar_chat
+
+echo "== I3. modo manual: a tarefa espera /plano =="
+AUTOPILOT_CHAT=manual
+abrir_chat
+enviar_chat "Faça um relatório dos recursos atuais da máquina."
+aguardar "$HOME_T/chat.out" "tarefa sugerida: 2 passos" && ok "I3: em manual a tarefa fica como sugestão" || ko "I3: sem sugestão"
+nao_aparece "$HOME_T/chat.out" "[passo 1/2]" "8" && ok "I3: nenhum passo roda sem /plano" || ko "I3: rodou sem confirmação"
+enviar_chat "/plano"
+aguardar "$HOME_T/chat.out" "tarefa veredito=sucesso" "80" && ok "I3: /plano executa a tarefa" || ko "I3: /plano não executou"
+aguardar "$HOME_T/chat.out" "[concluído] total=" "80" || ko "I3: turno não concluiu"
+enviar_chat "/sair"
+fechar_chat
+parar_daemon
+unset AUTOPILOT_CHAT
+
+# ========================================================================
 # G — segurança/ausência de chamadas perigosas, isolamento
 # ========================================================================
 

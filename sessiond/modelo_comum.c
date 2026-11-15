@@ -13,6 +13,7 @@ void modelo_resposta_liberar(ModeloResposta *r)
     g_free(r->erro_codigo);
     g_free(r->erro_mensagem);
     g_free(r->tipo);
+    g_free(r->plano_json);
 }
 
 /* Procura o primeiro objeto JSON top-level em 'texto' (varredura simples
@@ -114,6 +115,13 @@ void modelo_preencher_proposta_estruturada(ModeloResposta *r, const char *texto_
     g_strstrip(r->resposta_texto);
     const char *tipo = membro_string(obj, "tipo");
     r->tipo = tipo ? g_strdup(tipo) : NULL;
+    if (json_object_has_member(obj, "passos") && JSON_NODE_TYPE(json_object_get_member(obj, "passos")) == JSON_NODE_ARRAY) {
+        /* plano de vários passos: repassa o objeto inteiro, sem interpretar */
+        JsonGenerator *gp = json_generator_new();
+        json_generator_set_root(gp, json_parser_get_root(p));
+        r->plano_json = json_generator_to_data(gp, NULL);
+        g_object_unref(gp);
+    }
     const char *ferramenta = membro_string(obj, "ferramenta");
     if (ferramenta && *ferramenta && strcmp(ferramenta, "nenhuma") != 0 && strcmp(ferramenta, "null") != 0) {
         r->ferramenta_proposta = g_strdup(ferramenta);

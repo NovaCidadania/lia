@@ -382,6 +382,7 @@ def main():
     marca = time.time()
     daemon_a = daemon_b = fake = None
     chats = []
+    chats_daemons = []
 
     def novo_chat(home, **kw):
         ch = ChatPty(home, **kw)
@@ -643,6 +644,96 @@ def main():
                            stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
         checar(r.returncode == 2, "P14: não existe valor de ambiente que libere ferramenta administrativa")
 
+        print("== P16. TAREFA de vários passos: plano, passos, verificação, relatório — tudo acima da entrada ==")
+        ch = novo_chat(home_a, linhas=60, cols=118)
+        ch.esperar(regiao_ok, 5)
+        PERG = "Analise por que o sistema pode estar lento agora."
+        ch.teclar(PERG + "\r")
+        fim = ch.esperar(lambda t: "concluído em" in t.tudo() and regiao_ok(t), 20)
+        checar(fim, "P16: a tarefa termina sozinha e a entrada volta vazia", ch.tela.despejo())
+        linhas = ch.tela.rolado + ch.tela.visivel()
+        tudo = "\n".join(linhas)
+
+        def pos(trecho, desde=0):
+            for i in range(desde, len(linhas)):
+                if trecho in linhas[i]:
+                    return i
+            return -1
+        checar(tudo.count(PERG) == 1, "P16: a pergunta aparece uma vez")
+        checar("Plano da tarefa" in tudo and "4 passos" in tudo and "somente leitura, sem aprovação" in tudo and re.search(r"hash [0-9a-f]{12}…", tudo),
+               "P16: plano mostrado com nº de passos, risco, orçamento e o hash a que a execução fica presa")
+        passos = [pos("[%d/4] %s" % (i, f)) for i, f in ((1, "sistema.recursos"), (2, "sistema.processos_top_cpu"), (3, "sistema.processos_top_memoria"), (4, "sistema.dispositivos"))]
+        checar(all(x >= 0 for x in passos) and tudo.count("dados reais recebidos") == 4 and tudo.count("evidências:") >= 4,
+               "P16: os quatro passos aparecem, cada um com dados reais e evidências", passos)
+        ordem = [pos("lia> " + PERG), pos("Plano da tarefa"), passos[0], pos("Passos:"), pos("verificação: todos os critérios têm evidência"),
+                 pos("Lia:"), pos("Evidências"), pos("Limitações:"), pos("Ações realizadas"), pos("Ações não realizadas"), pos("Próximo passo:"),
+                 pos("concluído em"), len(ch.tela.rolado) + regiao(ch.tela)[0]]
+        checar(all(x >= 0 for x in ordem) and ordem == sorted(ordem),
+               "P16: ordem na tela: pergunta < plano < passos < verificação < conclusão < evidências < limitações < ações < próximo passo < status/entrada", ordem)
+        checar("Conclusão:" in linhas[pos("Lia:")], "P16: a resposta final começa pela conclusão")
+        mem_total = int(next(l for l in open("/proc/meminfo") if l.startswith("MemTotal:")).split()[1]) // 1024
+        checar("de %d MiB" % mem_total in tudo, "P16: o relatório cita a RAM total real (%d MiB)" % mem_total)
+        s_, sep_, e_ = regiao(ch.tela)
+        checar("Objetivo:" not in ch.tela.linha(s_ - 1) and n_prompts(ch.tela.visivel()[max(0, s_):]) == 1, "P16: o painel da tarefa some ao concluir; resta só a região normal")
+        checar("auditoria registrada" not in tudo, "P16: sem ruído de auditoria por passo na tela")
+
+        print("== P17. pergunta de vírus: resposta direta, nada executado ==")
+        antes = ch.tela.tudo().count("dados reais recebidos")
+        ch.teclar("Existe vírus nesta máquina?\r")
+        okv = ch.esperar(lambda t: t.tudo().count("concluído em") >= 2 and regiao_ok(t), 10)
+        tudo = ch.tela.tudo()
+        checar(okv and "Não há ferramenta de detecção de malware" in tudo and "ferramenta inexistente" in tudo, "P17: diz que não há ferramenta de detecção (compatibilidade: inexistente)", ch.tela.despejo())
+        checar(tudo.count("dados reais recebidos") == antes and "tools.discover" not in tudo, "P17: nenhuma ferramenta foi executada; tools.discover não aparece")
+        ch.teclar("/sair\r")
+        ch.proc.wait(timeout=5)
+        ch.encerrar()
+
+        print("== P18. painel vivo da tarefa + cancelamento GLOBAL com Ctrl-C ==")
+        home_c = os.path.join(base, "c")
+        os.makedirs(home_c)
+        daemon_c = iniciar_daemon(home_c, {"LIA_SESSIOND_EXECUTOR": "mock"})
+        chats_daemons.append(daemon_c)
+        ch = novo_chat(home_c, linhas=40, cols=118)
+        ch.esperar(regiao_ok, 5)
+        ch.teclar('MOCK_PLANO:{"objetivo":"esperar muito","passos":[{"ferramenta":"mock.timeout","timeout_ms":20000},'
+                  '{"ferramenta":"mock.timeout","timeout_ms":20000},{"ferramenta":"mock.leitura","depende_de":["passo-1"]}]}\r')
+        vivo = ch.esperar(lambda t: "coletando dados" in t.linha(regiao(t)[0]), 8)
+        s_, sep_, e_ = regiao(ch.tela)
+        painel = [ch.tela.linha(i) for i in range(max(0, s_ - 4), s_)]
+        checar(vivo and painel[0].startswith("Objetivo: esperar muito") and "[1/3] mock.timeout" in painel[1] and "executando" in painel[1] and
+               "executando" in painel[2] and "[3/3] mock.leitura" in painel[3] and "aguardando" in painel[3],
+               "P18: painel da tarefa (objetivo + estado de cada passo) fica logo ACIMA da linha de status, atualizado ao vivo", "\n".join(painel))
+        checar("0/3 passos" in ch.tela.linha(s_) and "mock.timeout" in ch.tela.linha(s_) and "Ctrl-C cancela" in ch.tela.linha(s_),
+               "P18: status mostra a fase (coletando dados), progresso, ferramenta atual e como cancelar", ch.tela.linha(s_))
+        ch.teclar("rascunho")
+        checar(ch.tela.linha(regiao(ch.tela)[2]) == "lia> rascunho" and "Objetivo:" in ch.tela.linha(regiao(ch.tela)[0] - 4),
+               "P18: digitar durante a tarefa não bagunça o painel", ch.tela.despejo())
+        t0 = time.time()
+        ch.sinal(signal.SIGINT)
+        canc = ch.esperar(lambda t: "tarefa cancelada" in t.tudo() and "pronto" in t.linha(regiao(t)[0]), 5)
+        checar(canc and time.time() - t0 < 2.5, "P18: um Ctrl-C cancela a tarefa INTEIRA de imediato", ch.tela.despejo())
+        tudo = ch.tela.tudo()
+        checar(tudo.count("cancelado") >= 2 and "pulado" in tudo, "P18: os dois passos em execução aparecem como cancelados e o pendente como pulado")
+        s_, sep_, e_ = regiao(ch.tela)
+        checar(ch.tela.linha(e_) == "lia> rascunho" and not ch.tela.linha(s_ - 1).startswith("  ["), "P18: painel removido; o rascunho continua na entrada", ch.tela.despejo())
+        ch.bombear(1.0)
+        checar("dados reais recebidos" not in ch.tela.tudo() and ch.proc.poll() is None, "P18: nenhum passo continua depois do cancelamento; o chat segue vivo")
+
+        print("== P19. tarefa com passo de ESCRITA: nunca automática; aprovação explícita presa ao hash ==")
+        ch.teclar('\x15MOCK_PLANO:{"objetivo":"gravar algo","passos":[{"ferramenta":"mock.leitura"},{"ferramenta":"mock.escrita"}]}\r')
+        checar(ch.esperar_texto("a tarefa não roda sozinha (exige aprovação)", 8), "P19: tarefa com escrita não é auto-executada", ch.tela.despejo())
+        ch.bombear(0.8)
+        checar("[1/2] mock.leitura — dados reais" not in ch.tela.tudo(), "P19: nem o passo de leitura rodou antes da aprovação")
+        ch.teclar("/plano\r")
+        ap = ch.esperar(lambda t: t.linha(t.ultima_nao_vazia()).startswith("aprovar? [s/N]"), 8)
+        checar(ap and "EXIGE APROVAÇÃO" in ch.tela.tudo() and "risco medio" in ch.tela.tudo(), "P19: /plano mostra o plano (risco médio, EXIGE APROVAÇÃO) e pergunta", ch.tela.despejo())
+        ch.teclar("s\r")
+        fim = ch.esperar(lambda t: "verificação: todos os critérios têm evidência" in t.tudo() and "concluído em" in t.tudo().split("gravar algo")[-1] and regiao_ok(t), 12)
+        checar(fim and "[2/2] mock.escrita — dados reais recebidos" in ch.tela.tudo(), "P19: aprovada com 's', a tarefa executa os dois passos e conclui", ch.tela.despejo())
+        ch.teclar("/sair\r")
+        ch.proc.wait(timeout=5)
+        ch.encerrar()
+
         print("== P15. isolamento ==")
         alterado = False
         lia_real = os.path.join(home_real, ".lia")
@@ -661,11 +752,13 @@ def main():
         parar(daemon_a)
         parar(daemon_b)
         parar(fake)
+        for dd in chats_daemons:
+            parar(dd)
 
     restos = subprocess.run(["pgrep", "-f", base], capture_output=True, text=True).stdout.split()
     restos = [p for p in restos if p != str(os.getpid())]
     checar(not restos, "P15: nenhum processo residual referenciando o HOME temporário", "pids=%r" % restos)
-    socks = [os.path.join(h, ".lia", "run", "session.sock") for h in (home_a, home_b)]
+    socks = [os.path.join(h, ".lia", "run", "session.sock") for h in (home_a, home_b, os.path.join(base, "c"))]
     checar(not any(os.path.exists(x) for x in socks), "P15: sockets removidos ao encerrar os daemons")
     if not os.environ.get("LIA_DEBUG_MANTER"):
         subprocess.run(["rm", "-rf", base])

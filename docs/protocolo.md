@@ -205,3 +205,103 @@ Execução que falha ou estoura o tempo também termina com `resposta` determin�
 **Cancelar a conversa com o modelo.** `cancelar` com `dados: {"pergunta": true}` (ou um `cancelar` simples sem plano/execução em andamento) interrompe a geração em curso — a da proposta ou a da resposta final — e é confirmado com um `erro` de código `cancelado`. Nenhuma `proposta`/`resposta` atrasada chega depois. Se o cliente desconecta no meio, o daemon cancela a geração sozinho.
 
 **Tempos.** `proposta.tempo_modelo_ms`, `resultado.tempo_execucao_ms` e `resposta.tempo_modelo_ms` são medidos pelo daemon e também registrados no log dele, por etapa; `lia-chat` mostra os três ao concluir o turno.
+
+## 11. Agent Runtime v2: tarefas de vários passos
+
+A seção 10 cobre o turno de **uma** ferramenta. Uma tarefa como "descubra por que o computador está lento" precisa de várias leituras, comparadas entre si. O runtime de tarefas (`sessiond/agente.c`, parte pura; a máquina de execução fica em `sessiond/sessiond.c`) faz:
+
+```
+objetivo → plano estruturado → validação independente → execução de passos
+        → observação → verificação dos critérios → replanejamento limitado
+        → resposta final fundamentada
+```
+
+A autonomia vem do runtime (plano limitado, ferramentas tipadas, observação, verificação, replanejamento com orçamento, cancelamento, aprovação por capacidade), não de dar mais liberdade ao modelo.
+
+### 11.1 O plano
+
+```json
+{
+  "plano_id": "tarefa-…", "hash": "<sha-256 do plano validado>", "versao": 1,
+  "objetivo": "investigar por que o sistema pode estar lento agora",
+  "intencao": "investigar_lentidao", "compatibilidade": "compativel",
+  "passos": [
+    { "id": "passo-1", "ferramenta": "sistema.recursos", "parametros": {}, "depende_de": [],
+      "objetivo": "carga, memória e swap atuais",
+      "evidencia_esperada": ["carga_media", "memoria_disponivel", "swap", "cpu_nucleos"],
+      "timeout_ms": 5000, "permitir_falha": false, "somente_leitura": true }
+  ],
+  "criterios_sucesso": ["carga_media", "memoria_disponivel", "lista_processos_cpu", "…"],
+  "capacidades": ["leitura_arquivo", "processo"], "risco": "nenhum",
+  "requer_aprovacao": false, "somente_leitura": true,
+  "orcamento_passos": 8, "orcamento_tempo_ms": 60000
+}
+```
+
+**Validação integral, antes de qualquer passo** (`agente_plano_validar`): no máximo 8 passos; ids únicos; toda ferramenta existe no manifesto ativo e tem capacidade permitida; parâmetros válidos; dependências existem e não formam ciclo. Qualquer erro recusa o plano inteiro (`ferramenta_desconhecida`, `capacidade_negada`, `parametro_invalido`, `plano_invalido`) — nenhum passo roda. A validação também calcula o **risco agregado** (o maior entre os passos), a união das capacidades e `requer_aprovacao` (verdadeiro se qualquer passo exigir).
+
+**De onde vem um plano** — sempre validado do mesmo jeito:
+
+- planejador determinístico (`agente_planejar`), para intenções de tarefa reconhecidas: lentidão, comparação CPU × memória, relatório de recursos, consumo anormal, inventário de hardware, estado geral, evidências sobre malware;
+- modelo: se a resposta estruturada trouxer `passos`, o plano é validado; plano inválido não é consertado, é rejeitado (`validacao.veredito: "rejeitada"`);
+- cliente: `solicitar` com `dados.passos` (mesma forma acima).
+
+**Hash e imutabilidade.** O daemon guarda o plano validado e o envia numa `proposta` (`dados.plano_proposto`). Para executar, o cliente manda `solicitar {"plano_id", "hash"}` — só a referência: o conteúdo executado é o que está guardado no daemon, então nem o cliente nem o modelo conseguem alterá-lo depois de validado. Hash diferente → `plano_alterado`; plano substituído por uma proposta mais nova → `estado_invalido`. **A aprovação é vinculada ao hash**: `aprovar` precisa trazer `plano_id` **e** `hash` do plano apresentado (vale também para o plano de um passo da seção 4, cujo `plano` passou a trazer `hash`); sem hash ou com hash errado → `estado_invalido`.
+
+### 11.2 Máquina de execução
+
+Estados: `PLANO_RECEBIDO → VALIDANDO → AGUARDANDO_APROVACAO → EXECUTANDO → OBSERVANDO → VERIFICANDO → REPLANEJANDO → CONCLUIDO | FALHA | CANCELADO`.
+
+- Um passo começa quando todas as suas dependências terminaram com sucesso; se uma dependência falha, o dependente é marcado `pulado`.
+- **Paralelismo só para leitura pura**: passos de leitura sem dependência pendente são despachados juntos (no máximo 4 simultâneos). Um passo que não é leitura pura (escrita, administração, hardware) roda sozinho, nunca em paralelo com nada. As ferramentas `sistema.*` do executor real compartilham buffers estáticos de `cli/sistema.c`, então o executor real as serializa numa fila própria: são despachadas juntas, executadas uma a uma.
+- Timeout por passo (`timeout_ms`, padrão do manifesto) e timeout global (`orcamento_tempo_ms`, 60 s). Nenhum passo é despachado duas vezes.
+- Cada passo gera `progresso` de início e de fim e uma `auditoria` (mensagem e linha em `~/.lia/humano/auditoria/`, com `tarefa_passo=<id>`).
+
+Mensagens de uma tarefa:
+
+| Mensagem | Conteúdo |
+|---|---|
+| `plano` | o plano (campos acima) + `tarefa: true` + `execucao_id` da tarefa inteira |
+| `progresso` | `dados.tarefa`: `estado`, `fase` (`executando`, `observando`, `verificando`, `replanejando`), `passos_total`, `passos_concluidos`, `replanejamentos`, `tempo_decorrido_ms`; `passo` (índice, ferramenta, estado, `tempo_execucao_ms`, `evidencias`, `limitacoes`, `erro`, `apresentacao`); `plano` (só no replanejamento) |
+| `resultado` | `estado`: `sucesso`, `incompleto`, `falha` ou `cancelado`; `dados.tarefa` (plano com a observação de cada passo, inclusive o JSON bruto), `dados.veredito`, `dados.evidencias_ausentes`; `tarefa: true` |
+| `resposta` | o relatório final (11.5) |
+
+### 11.3 Observação e verificação
+
+A observação de um passo é o JSON bruto, o texto renderizado dele, as **evidências** que esse JSON sustenta e as limitações. `agente_extrair_evidencias` confere campos, tipos, limites e relações: lista de processos precisa ser uma lista não vazia de itens com `pid` inteiro e métrica inteira; memória disponível não pode passar da total; carga média ausente não vira evidência (vira limitação); lista com menos itens que o pedido é marcada como resultado parcial.
+
+O verificador (`agente_verificar`) compara `criterios_sucesso` com as evidências dos passos concluídos — nunca com um texto do modelo — e responde `SUCESSO`, `REPLANEJAR`, `INCOMPLETO` (há dados, falta evidência, não há mais como buscar) ou `FALHA` (nada foi coletado). Ausência de evidência nunca vira conclusão positiva.
+
+### 11.4 Replanejamento
+
+Só acontece quando falta evidência exigida (ferramenta falhou, dado parcial, dependência não satisfeita). Limites: **3 ciclos**, **8 passos** no total, **60 s** por tarefa.
+
+- Replanejador determinístico: para cada evidência ausente, acrescenta um passo de leitura pura de uma ferramenta que a fornece; a mesma ferramenta com os mesmos parâmetros roda no máximo duas vezes; esgotada uma ferramenta, tenta outra que forneça a mesma evidência.
+- Sem candidato determinístico, o modelo pode **sugerir** um passo, uma vez por tarefa. O prompt leva só nomes de evidências e de ferramentas — nunca o conteúdo devolvido pelas ferramentas, que não vira instrução. A sugestão passa pelo validador: precisa existir, ser leitura pura, ter parâmetros válidos e não estar repetida. Sugestão de escrita/administração/hardware é recusada e registrada como limitação.
+- Cada ciclo sobe `versao` e recalcula o `hash`. Como o replanejamento só acrescenta leitura pura, nunca muda o risco de um plano já aprovado.
+- Orçamento esgotado → `resultado` com estado `incompleto` e uma resposta que começa por `RESULTADO INCOMPLETO`, com motivo, dados coletados, dados ausentes e próximo passo sugerido.
+
+### 11.5 Resposta final
+
+Relatório determinístico (`agente_relatorio`), escrito só a partir das observações: **Conclusão**, **Evidências** (cada linha com a ferramenta de origem entre colchetes), **Limitações**, **Ações realizadas**, **Ações não realizadas**, **Próximo passo**. Os critérios numéricos usados na conclusão são ditos por extenso (carga por núcleo, percentual de memória disponível, swap em uso, um processo ocupando cerca de um núcleo, mais de 25 % da RAM).
+
+O relatório determinístico **é** a resposta (`resposta.origem: "deterministica"`), e sai assim que a coleta termina.
+
+A **leitura do modelo** — até duas frases relacionando as evidências, a partir do relatório entregue como dado delimitado — é opcional e **desligada por padrão**; `LIA_SESSIOND_LEITURA_DO_MODELO=sim` liga. Medido em dez tarefas reais com um modelo local de 3B: a coleta levava ~0,2 s e a leitura, 22 a 42 s; e, mesmo passando na conferência numérica, ela afirmava o que as medições não sustentam ("o sistema está sem problemas", "alta carga de CPU" para um processo com 0,63 %). Ligada, só é anexada (em seção própria, rotulada, `origem: "deterministica+modelo"`) se todo número citado existir nas evidências, se não negar os dados, se não fizer afirmação absoluta de segurança ou infecção e se não concluir que "está tudo bem"; caso contrário é descartada, com `aviso`.
+
+### 11.6 Pedidos sem ferramenta adequada
+
+`validacao.compatibilidade` distingue:
+
+| Valor | Significado |
+|---|---|
+| `compativel` | há ferramentas que respondem o pedido |
+| `parcial` | dá para coletar evidências, mas elas não respondem a pergunta de fundo |
+| `inexistente` | nenhuma ferramenta desta versão serve; nada é executado |
+| `esclarecer` | o pedido precisa ser esclarecido antes |
+
+"Existe vírus nesta máquina?" recebe `inexistente`: uma resposta direta dizendo que não há ferramenta de detecção de malware, que uma coleta de leitura é possível mas não prova nada, e que nada foi executado — nunca `tools.discover` apresentada como resposta de segurança. "Liste processos suspeitos" é `parcial`: a coleta roda, e o relatório diz que nenhum processo é classificado como vírus nem declarado seguro.
+
+### 11.7 Cancelamento global
+
+`cancelar` com o `execucao_id` da tarefa (ou sem id) interrompe todos os passos em execução, marca os pendentes como `pulado`, cancela qualquer consulta ao modelo e responde um único `resultado` com estado `cancelado`. Nada mais chega depois. Desconexão do cliente tem o mesmo efeito.

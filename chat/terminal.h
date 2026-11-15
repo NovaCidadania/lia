@@ -57,6 +57,13 @@ void term_definir_status(Term *t, const char *texto, gboolean ativo, gboolean co
 
 void term_definir_prompt(Term *t, const char *prompt);
 
+/* Painel da tarefa: linhas fixas desenhadas ACIMA da linha de status,
+ * dentro da região viva (ex.: objetivo e a lista de passos com o estado de
+ * cada um). Redesenhado no lugar a cada mudança; some com texto NULL/vazio.
+ * No máximo TERM_PAINEL_MAX linhas; cada uma é cortada na largura. */
+#define TERM_PAINEL_MAX 12
+void term_definir_painel(Term *t, const char *texto);
+
 /* Há bytes para ler em fd_entrada: lê tudo que estiver disponível e
  * processa (pode chamar o callback de linha zero ou mais vezes). Devolve
  * FALSE se não havia nada para ler — chamado com o fd "pronto", isso

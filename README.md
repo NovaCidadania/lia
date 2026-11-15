@@ -57,7 +57,7 @@ nunca enviado) — ele não corresponde a nenhum pedido estruturado do manifesto
 `sessiond/` implementa o outro lado do protocolo: um servidor de socket Unix
 e máquina de estados, com um executor plugável
 (`sessiond/executor.h`). **Padrão em produção: o executor real**
-(`sessiond/executor_real.c`/`sessiond/manifesto_real.c`), limitado às seis
+(`sessiond/executor_real.c`/`sessiond/manifesto_real.c`), limitado às oito
 ferramentas de leitura já existentes na CLI (`tools.discover/list/probe`,
 `sistema.diagnosticar/recursos/dispositivos`, nenhuma delas grava nada — ver
 [docs/manifesto.md](docs/manifesto.md) §3) mais duas ações explícitas de
@@ -135,6 +135,10 @@ interpreta a entrada como shell, nunca segue link simbólico ao anexar
 arquivo, nunca altera o `plano_id` recebido. Ver
 [docs/LIA-CLI.md](docs/LIA-CLI.md) para comandos, `--json`, código de
 saída e como testar com Ollama de verdade quando instalado.
+
+### Fluxo agente e tarefas de vários passos
+
+Com o piloto automático (padrão, `LIA_CHAT_AUTOPILOT=read-only`), uma pergunta de leitura segue sozinha até a resposta com dados reais — por exemplo "liste os processos que mais consomem memória". Pedidos compostos ("analise por que o sistema pode estar lento agora", "compare os 10 processos que mais usam CPU e memória", "faça um inventário de rede, PCI e dispositivos de bloco") viram um **plano de vários passos**: validado inteiro antes de executar, com leituras independentes em paralelo, verificação das evidências, replanejamento limitado (3 ciclos, 8 passos, 60 s) e um relatório final com Conclusão, Evidências, Limitações, Ações realizadas, Ações não realizadas e Próximo passo. Qualquer passo que grave, administre ou toque hardware exige aprovação explícita, presa ao hash do plano. Não há detecção de malware nesta versão, e a Lia diz isso em vez de improvisar. Detalhes: `docs/protocolo.md` §10–§11, `docs/THREAT-MODEL.md` §5.3–§5.4.
 
 ## Princípios
 

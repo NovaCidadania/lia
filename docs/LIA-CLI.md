@@ -345,6 +345,19 @@ outro valor faz o `lia-chat` recusar iniciar. Ferramentas que gravam,
 administram ou tocam hardware continuam parando em aprovação explícita em
 qualquer modo.
 
+**Tarefas de vários passos.** Pedidos como "analise por que o sistema pode
+estar lento", "compare os processos que mais usam CPU e memória", "faça um
+relatório dos recursos" ou "faça um inventário de rede, PCI e blocos" viram
+um plano de vários passos (`docs/protocolo.md` §11). O `lia-chat` mostra o
+plano (passos, risco, orçamento e o hash a que a execução fica presa), um
+painel vivo com o estado de cada passo acima da linha de status, os dados
+reais e as evidências de cada passo, o veredito do verificador e o relatório
+final (Conclusão, Evidências, Limitações, Ações realizadas, Ações não
+realizadas, Próximo passo). Plano só de leitura segue sozinho no piloto
+automático; plano com qualquer passo que exija aprovação para em
+`aprovar? [s/N]`. Ctrl-C cancela a tarefa inteira. Para "existe vírus nesta
+máquina?" a resposta é direta: não há ferramenta de detecção nesta versão.
+
 **Terminal interativo.** `chat/terminal.c` desenha o histórico acima e, nas
 três últimas linhas, a linha de status (fase atual — consultando modelo,
 validando plano, executando leitura, gerando resposta final —, indicador de

@@ -41,6 +41,10 @@ typedef struct {
      * (sessiond/roteador.h) é a mesma nos dois casos. */
     gboolean estruturada;
     char *tipo;                 /* "proposta" | "resposta" | "esclarecimento" (só quando estruturada), ou NULL */
+    /* plano de VÁRIOS passos sugerido pelo modelo: objeto JSON em texto
+     * ({"objetivo":"...","passos":[...]}), ou NULL. É só uma sugestão — a
+     * validação integral é de sessiond/agente.c (agente_plano_validar). */
+    char *plano_json;
 } ModeloResposta;
 
 void modelo_resposta_liberar(ModeloResposta *r);

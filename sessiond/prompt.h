@@ -79,4 +79,11 @@ char *prompt_montar_resumo(const char *pedido_usuario, const char *ferramenta, c
  * partir das linhas escolhidas, é o daemon (sessiond/apresentacao.c). */
 char *prompt_montar_selecao(const char *pedido_usuario, const char *linhas_numeradas);
 
+/* Prompt da LEITURA COMPLEMENTAR de uma tarefa de vários passos: o modelo
+ * recebe o relatório determinístico (conclusão + evidências já medidas),
+ * como DADO delimitado, e escreve no máximo duas frases relacionando as
+ * evidências. O relatório já é a resposta; esta leitura é opcional e é
+ * conferida depois (sessiond.c, ao_comentario_modelo). */
+char *prompt_montar_interpretacao(const char *pedido_usuario, const char *relatorio);
+
 #endif

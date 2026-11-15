@@ -178,7 +178,8 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-modelo-comum.o $(B)/sessiond-modelo-mock.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
                   $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
-                  $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o
+                  $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o \
+                  $(B)/sessiond-agente.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -201,7 +202,7 @@ $(B)/sessiond-executor-real.o: sessiond/executor_real.c sessiond/executor.h sess
 $(B)/sessiond-executor-comum.o: sessiond/executor_comum.c sessiond/executor.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/executor.h sessiond/modelo.h sessiond/prompt.h sessiond/roteador.h sessiond/apresentacao.h gui/protocolo.h | $(B)
+$(B)/sessiond-sessiond.o: sessiond/sessiond.c sessiond/executor.h sessiond/modelo.h sessiond/prompt.h sessiond/roteador.h sessiond/apresentacao.h sessiond/agente.h gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-modelo-comum.o: sessiond/modelo_comum.c sessiond/modelo.h | $(B)
@@ -230,6 +231,20 @@ $(B)/sessiond-roteador.o: sessiond/roteador.c sessiond/roteador.h | $(B)
 
 $(B)/sessiond-apresentacao.o: sessiond/apresentacao.c sessiond/apresentacao.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-agente.o: sessiond/agente.c sessiond/agente.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+# Testes unitários do Agent Runtime v2 (plano, validação, verificador,
+# replanejador, relatório): código puro, sem daemon nem modelo.
+$(B)/teste-agente.o: testes/unit/teste_agente.c sessiond/agente.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-agente: $(B)/teste-agente.o $(B)/sessiond-agente.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+teste-agente: $(B)/teste-agente
+	$(B)/teste-agente
 
 # Testes unitários do roteador de intenção e da apresentação/fundamentação:
 # código puro, sem daemon, sem modelo, sem rede.
@@ -265,8 +280,9 @@ teste-sessiond: sessiond
 integration: sessiond gui
 	sh testes/integration/teste_integracao.sh
 
-teste-modelo: sessiond teste-roteador
+teste-modelo: sessiond teste-roteador teste-agente
 	sh testes/integration/teste_modelo.sh
+	python3 -I testes/integration/teste_tarefa.py
 
 $(B)/teste-cliente-ollama.o: testes/integration/teste_cliente_ollama.c sessiond/modelo.h ollama/cliente_ollama.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -316,4 +332,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp chat teste-chat chat-run
+.PHONY: teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp chat teste-chat chat-run

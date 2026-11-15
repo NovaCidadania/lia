@@ -46,6 +46,11 @@ struct Term {
     int larg_status, larg_sep, larg_entrada; /* larguras (colunas) do que foi desenhado por último */
     int col_cursor;
 
+    char *painel[TERM_PAINEL_MAX];  /* linhas do painel da tarefa (acima do status) */
+    int n_painel;
+    int larg_painel[TERM_PAINEL_MAX]; /* larguras do que foi desenhado por último */
+    int n_painel_desenhado;
+
     char *status;
     gboolean ativo;
     gint64 ativo_desde_us;
@@ -209,12 +214,20 @@ static void compor_apagar(Term *t, GString *out)
     int acima = (t->larg_status > 0 ? (t->larg_status - 1) / cols : 0) + 1 +
                 (t->larg_sep > 0 ? (t->larg_sep - 1) / cols : 0) + 1 +
                 (t->col_cursor > 0 ? t->col_cursor / cols : 0);
+    for (int i = 0; i < t->n_painel_desenhado; i++)
+        acima += (t->larg_painel[i] > 0 ? (t->larg_painel[i] - 1) / cols : 0) + 1;
     g_string_append_printf(out, "\r\033[%dA\033[J", acima);
     t->desenhado = FALSE;
 }
 
 static void compor_desenhar(Term *t, GString *out)
 {
+    for (int i = 0; i < t->n_painel; i++) {
+        t->larg_painel[i] = anexar_cortado(out, t->painel[i], t->cols - 1);
+        if (t->cor) g_string_append(out, "\033[0m");
+        g_string_append(out, "\033[K\r\n");
+    }
+    t->n_painel_desenhado = t->n_painel;
     compor_status(t, out);
     g_string_append(out, "\033[K\r\n");
     int n = MIN(TERM_SEPARADOR_COLS, t->cols - 1);
@@ -307,6 +320,7 @@ void term_liberar(Term *t)
     g_string_free(out, TRUE);
     if (t->termios_salvo)
         tcsetattr(t->fd_in, TCSADRAIN, &t->termios_original);
+    for (int i = 0; i < t->n_painel; i++) g_free(t->painel[i]);
     g_free(t->prompt);
     g_free(t->status);
     g_free(t->rascunho);
@@ -354,6 +368,19 @@ void term_definir_status(Term *t, const char *texto, gboolean ativo, gboolean co
         t->timer_spinner = 0;
     }
     redesenhar_status(t);
+}
+
+void term_definir_painel(Term *t, const char *texto)
+{
+    for (int i = 0; i < t->n_painel; i++) g_clear_pointer(&t->painel[i], g_free);
+    t->n_painel = 0;
+    if (texto && *texto) {
+        char **linhas = g_strsplit(texto, "\n", -1);
+        for (int i = 0; linhas[i] && t->n_painel < TERM_PAINEL_MAX; i++)
+            if (*linhas[i]) t->painel[t->n_painel++] = g_strdup(linhas[i]);
+        g_strfreev(linhas);
+    }
+    redesenhar(t);
 }
 
 void term_definir_prompt(Term *t, const char *prompt)

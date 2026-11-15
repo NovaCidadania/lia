@@ -56,6 +56,8 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
         rr.resposta_texto = g_strdup(strstr(prompt_montado_completo, "MOCK_RESUMO_INVENTADO")
             ? "(mock) o processo fantasma usa 98765 MiB."
             : strstr(prompt_montado_completo, "MOCK_RESUMO_RECUSA") ? "(mock) Não posso fornecer essa informação."
+            : strstr(prompt_montado_completo, "MOCK_RESUMO_SEGURO") ? "(mock) O sistema está livre de vírus e seguro."
+            : strstr(prompt_montado_completo, "MOCK_RESUMO_POSITIVO") ? "(mock) O sistema está sem problemas e funcionando normalmente."
             : "(mock) resultado recebido e resumido.");
         concluido_cb(ctx, &rr);
         modelo_resposta_liberar(&rr);
@@ -76,8 +78,17 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
     char *pedido_isolado = g_strndup(inicio_pedido, tam_pedido);
     const char *prompt_montado = pedido_isolado;
 
+    const char *marcador_plano = strstr(prompt_montado, "MOCK_PLANO:");
     const char *marcador = strstr(prompt_montado, "MOCK_PROPOR:");
-    if (marcador) {
+    if (marcador_plano) {
+        /* "MOCK_PLANO:<json até o fim da linha>": o mock "propõe" esse plano
+         * de vários passos tal como veio — inclusive planos inválidos de
+         * propósito (ferramenta inventada, passo administrativo, ciclo). */
+        marcador_plano += strlen("MOCK_PLANO:");
+        const char *fim = strchr(marcador_plano, '\n');
+        r.plano_json = fim ? g_strndup(marcador_plano, (gsize)(fim - marcador_plano)) : g_strdup(marcador_plano);
+        r.resposta_texto = g_strdup("(mock) proponho um plano de vários passos.");
+    } else if (marcador) {
         marcador += strlen("MOCK_PROPOR:");
         const char *fim = marcador;
         while (*fim && *fim != '\n' && *fim != ' ' && *fim != '"') fim++;

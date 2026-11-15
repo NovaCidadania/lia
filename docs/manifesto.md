@@ -236,7 +236,29 @@ Esta validação é do executor, não do modelo: um modelo comprometido ou um ar
 
 Este documento descreve o **manifesto**: a declaração estática de uma ferramenta, carregada uma vez. Uma execução concreta gera, em cima dele, um **plano** (mensagem `plano` — `docs/protocolo.md` §3), com campos próprios dessa instância: `plano_id`, `versao_manifesto` (cópia do `versao` do manifesto no momento do plano, para detectar manifesto trocado entre o plano e a aprovação), `objetivo`/`justificativa` (opcionais, descrevem o "porquê" desta chamada específica), `passos` (lista — hoje sempre um único passo nesta etapa), e os campos do próprio manifesto (`capacidades`, `risco`, `efeitos`, `idempotente`, `timeout_padrao_ms`, `reversivel`, `requer_aprovacao`) ecoados para a pessoa decidir sem precisar confiar em memória.
 
-O modelo de linguagem (`docs/protocolo.md` §9, `docs/THREAT-MODEL.md` §5.2) pode sugerir um `objetivo`/`justificativa` e qual ferramenta/parâmetros usar — mas nunca gera um `plano` diretamente: a sugestão (`proposta`) só se torna um `plano` de verdade quando uma pessoa a reenvia como `solicitar`, passando pela mesma validação de manifesto/capacidade/parâmetro desta seção.
+O modelo de linguagem (`docs/protocolo.md` §9, `docs/THREAT-MODEL.md` §5.2) pode sugerir um `objetivo`/`justificativa` e qual ferramenta/parâmetros usar — mas nunca gera um `plano` diretamente: a sugestão (`proposta`) só se torna um `plano` de verdade quando é reenviada como `solicitar` (pela pessoa, ou pelo piloto automático quando o daemon a marcou como leitura pura), passando pela mesma validação de manifesto/capacidade/parâmetro desta seção. A mensagem `plano` traz um `hash`, e `aprovar` precisa citá-lo.
+
+## 6.0 Plano de vários passos (Agent Runtime v2)
+
+Uma tarefa composta gera um plano com até **8 passos** (`docs/protocolo.md` §11). Cada passo declara `id`, `ferramenta`, `parametros`, `depende_de`, `objetivo`, `evidencia_esperada`, `timeout_ms` e `permitir_falha`; o plano declara `objetivo`, `criterios_sucesso`, `orcamento_passos` (8) e `orcamento_tempo_ms` (60000). O que o manifesto de cada ferramenta determina no plano:
+
+- `risco` do plano = o maior `risco` entre os passos; `capacidades` = a união; `requer_aprovacao` = verdadeiro se **qualquer** passo exigir;
+- só passos de ferramenta `somente_leitura` rodam em paralelo; qualquer outro roda sozinho;
+- o replanejamento só pode acrescentar ferramentas `somente_leitura`;
+- o plano validado recebe um `hash` (SHA-256); execução e aprovação ficam presas a ele.
+
+**Evidências por ferramenta** (o que o verificador aceita, conferindo campos e tipos do JSON):
+
+| Ferramenta | Evidências |
+|---|---|
+| `sistema.recursos` | `memoria_total`, `memoria_disponivel`, `swap`, `uptime`, `carga_media`, `cpu_nucleos`, `cpu_modelo` |
+| `sistema.diagnosticar` | `distribuicao`, `kernel`, `cpu_modelo`, `cpu_nucleos`, `memoria_total`, `memoria_disponivel` |
+| `sistema.processos_top_cpu` | `lista_processos_cpu` |
+| `sistema.processos_top_memoria` | `lista_processos_memoria`, `memoria_total` |
+| `sistema.dispositivos` | `dispositivos_rede`, `dispositivos_bloco`, `dispositivos_pci` (só a classe pedida, quando há `classe`) |
+| demais | `resultado:<ferramenta>` |
+
+Não existe, nesta versão, nenhuma ferramenta de detecção de malware, de pacotes instalados, de arquivos alterados, de serviços ou de integridade. Pedidos que dependem delas recebem compatibilidade `inexistente` ou `parcial` — nunca uma ferramenta parecida no lugar.
 
 ## 6.1 Descoberta vs. persistência: `tools.discover`/`tools.probe` nunca gravam por si só
 

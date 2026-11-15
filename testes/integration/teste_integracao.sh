@@ -122,6 +122,8 @@ aguardar() { # arquivo padrao [tentativas]
 }
 
 extrair_plano_id() { grep -o '"plano_id":"[^"]*"' "$1" | head -1 | cut -d'"' -f4; }
+# a aprovação é vinculada ao hash do plano apresentado, não só ao plano_id
+extrair_hash() { grep -o '"hash":"[^"]*"' "$1" | head -1 | cut -d'"' -f4; }
 extrair_exec_id()  { grep -o '"execucao_id":"[^"]*"' "$1" | head -1 | cut -d'"' -f4; }
 
 # ========================================================================
@@ -154,7 +156,7 @@ aguardar "$HOME_T/a.out" '"tipo":"plano"' && ok "tools.discover.persistir: plano
 aguardar "$HOME_T/a.out" '"requer_aprovacao":true' && ok "tools.discover.persistir: requer aprovação" \
     || ko "tools.discover.persistir deveria exigir aprovação"
 PID_DISCOVER=$(extrair_plano_id "$HOME_T/a.out")
-enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rd2b","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_DISCOVER")"
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rd2b","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","hash":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_DISCOVER" "$(extrair_hash "$HOME_T/a.out")")"
 aguardar "$HOME_T/a.out" '"estado":"sucesso"' && ok "tools.discover.persistir: resultado sucesso" || ko "tools.discover.persistir falhou"
 fechar_a
 [ -f "$HOME_T/.lia/maquina/inventario/ferramentas.lia" ] && ok "tools.discover.persistir grava o inventário dentro do HOME temporário" \
@@ -186,7 +188,7 @@ enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"rp2","em_resposta_a":nu
 aguardar "$HOME_T/a.out" '"requer_aprovacao":true' && ok "tools.probe.persistir: requer aprovação" \
     || ko "tools.probe.persistir deveria exigir aprovação"
 PID_PROBE=$(extrair_plano_id "$HOME_T/a.out")
-enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rp2b","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_PROBE")"
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rp2b","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","hash":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_PROBE" "$(extrair_hash "$HOME_T/a.out")")"
 aguardar "$HOME_T/a.out" '"estado":"sucesso"' "100" && ok "tools.probe.persistir: resultado sucesso" || ko "tools.probe.persistir falhou"
 fechar_a
 
@@ -291,7 +293,7 @@ enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"f1","em_resposta_a":nul
 aguardar "$HOME_T/a.out" '"tipo":"plano"' && ok "plano emitido para ferramenta de risco médio" || ko "sem plano"
 aguardar "$HOME_T/a.out" '"requer_aprovacao":true' && ok "plano marca requer_aprovacao=true" || ko "requer_aprovacao incorreto"
 PID_PLANO=$(extrair_plano_id "$HOME_T/a.out")
-enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"f2","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_PLANO")"
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"f2","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","hash":"%s","decisao":"aprovar","escopo":"uma_vez"}}' "$PID_PLANO" "$(extrair_hash "$HOME_T/a.out")")"
 aguardar "$HOME_T/a.out" '"tipo":"progresso"' && ok "progresso emitido após aprovação" || ko "sem progresso"
 aguardar "$HOME_T/a.out" '"estado":"sucesso"' && ok "resultado sucesso após execução completar" || ko "sem resultado de sucesso"
 aguardar "$HOME_T/a.out" '"tipo":"auditoria"' && ok "auditoria emitida (fluxo com aprovação)" || ko "sem auditoria"
@@ -304,10 +306,10 @@ abrir_conexao a
 enviar_a '{"protocolo":"lia.v1","tipo":"solicitar","id":"rep1","em_resposta_a":null,"ts":"t","dados":{"ferramenta":"mock.escrita","parametros":{}}}'
 aguardar "$HOME_T/a.out" '"tipo":"plano"' || ko "replay: sem plano inicial"
 PID_PLANO_REP=$(extrair_plano_id "$HOME_T/a.out")
-enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rep2","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","decisao":"aprovar"}}' "$PID_PLANO_REP")"
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rep2","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","hash":"%s","decisao":"aprovar"}}' "$PID_PLANO_REP" "$(extrair_hash "$HOME_T/a.out")")"
 aguardar "$HOME_T/a.out" '"estado":"sucesso"' || ko "replay: primeira aprovação não completou"
 LINHAS_ANTES=$(wc -l < "$HOME_T/a.out")
-enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rep3","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","decisao":"aprovar"}}' "$PID_PLANO_REP")"
+enviar_a "$(printf '{"protocolo":"lia.v1","tipo":"aprovar","id":"rep3","em_resposta_a":null,"ts":"t","dados":{"plano_id":"%s","hash":"%s","decisao":"aprovar"}}' "$PID_PLANO_REP" "$(extrair_hash "$HOME_T/a.out")")"
 aguardar "$HOME_T/a.out" '"codigo":"estado_invalido"' "20" && ok "aprovação duplicada (replay do mesmo plano_id) -> estado_invalido" \
     || ko "replay de aprovação não foi rejeitado"
 fechar_a
