@@ -30,6 +30,11 @@ static const ParametroManifesto PARAM_WEB_PESQUISAR[] = {
     { .nome = NULL },
 };
 
+static const ParametroManifesto PARAM_WEB_ABRIR[] = {
+    { .nome = "url", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = NULL },
+};
+
 static const char *const ORDENAR_POR_VALORES[] = { "cpu", NULL };
 
 static const ParametroManifesto PARAM_PROCESSOS_TOP_CPU[] = {
@@ -213,6 +218,18 @@ static const ManifestoReal TABELA[] = {
             .uso = "pesquisar na internet e devolver títulos e URLs; a consulta sai da máquina e exige aprovação",
         },
         .parametros = PARAM_WEB_PESQUISAR,
+    },
+    {
+        .base = {
+            .nome = "web.abrir", .risco = "baixo", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = TRUE,
+            .reversivel = "nao_aplicavel", .capacidades = CAP_REDE,
+            .efeitos = "abre uma URL HTTPS pública, lê texto limitado e não executa JavaScript nem grava o conteúdo",
+            .timeout_padrao_ms = 20000,
+            .somente_leitura = FALSE,
+            .uso = "abrir uma fonte HTTPS pública indicada pela pessoa; redirecionamentos e redes privadas são recusados",
+        },
+        .parametros = PARAM_WEB_ABRIR,
     },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))

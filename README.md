@@ -62,8 +62,9 @@ locais de leitura (`tools.discover/list/probe`,
 [docs/manifesto.md](docs/manifesto.md) §3) mais duas ações explícitas de
 persistência (`tools.discover.persistir`/`tools.probe.persistir`, `risco:
 baixo`, sempre com aprovação — §6.1) e `web.pesquisar`, que acessa um buscador
-HTTPS externo e sempre exige aprovação. A pesquisa não grava nada, mas a
-consulta sai da máquina; nenhuma ferramenta de escrita fora do espaço de
+HTTPS externo e sempre exige aprovação. `web.abrir` também abre fontes HTTPS
+públicas e extrai texto limitado, sem JavaScript. A pesquisa não grava nada,
+mas a consulta sai da máquina; nenhuma ferramenta de escrita fora do espaço de
 trabalho da própria Lia, nem privilégio, é alcançável.
 `LIA_SESSIOND_EXECUTOR=mock` troca para um executor
 inteiramente simulado, só para os testes unitários do protocolo (aprovação,

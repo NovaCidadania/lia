@@ -223,6 +223,20 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
         r->codigo_saida = 0;
         r->dados_json = dados_web;
         return;
+    } else if (strcmp(m->base.nome, "web.abrir") == 0) {
+        const char *url = campo_str(parametros, "url");
+        char *erro_web = NULL;
+        char *pagina = lia_web_abrir(url, &erro_web);
+        if (!pagina) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("rede_indisponivel");
+            r->erro_mensagem = erro_web ? erro_web : g_strdup("página indisponível ou recusada");
+            return;
+        }
+        r->sucesso = TRUE;
+        r->codigo_saida = 0;
+        r->dados_json = pagina;
+        return;
     } else {
         r->sucesso = FALSE;
         r->erro_codigo = g_strdup("ferramenta_desconhecida");
@@ -248,7 +262,7 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
      * subcomandos) — envolvemos texto humano numa string JSON para que
      * 'dados' seja sempre JSON válido. */
     const char *nome = m->base.nome;
-    gboolean ja_e_json = strcmp(nome, "tools.list") == 0 || strcmp(nome, "web.pesquisar") == 0 || strncmp(nome, "sistema.", 8) == 0;
+    gboolean ja_e_json = strcmp(nome, "tools.list") == 0 || strcmp(nome, "web.pesquisar") == 0 || strcmp(nome, "web.abrir") == 0 || strncmp(nome, "sistema.", 8) == 0;
     if (ja_e_json) {
         char *saida = g_strndup(lia_out.p, lia_out.n);
         r->dados_json = g_strdup_printf("{\"saida\":%s}", saida);

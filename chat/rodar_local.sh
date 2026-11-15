@@ -186,4 +186,6 @@ fi
 
 echo "conectando lia-chat (/help para comandos, /sair para encerrar)..."
 echo
-env HOME="$TEST_HOME" "$RAIZ/build/lia-chat" --backend "$MODELO"
+# Repassa o modelo detectado ao cliente também. Sem isso o daemon usava, por
+# exemplo, llama3.2:3b, enquanto /modelo no chat mostrava o fallback llama3.
+env HOME="$TEST_HOME" $ENV_OLLAMA_MODELO "$RAIZ/build/lia-chat" --backend "$MODELO"

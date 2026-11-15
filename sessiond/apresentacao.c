@@ -240,9 +240,22 @@ static void render_dispositivos(GString *out, JsonArray *arr)
 
 static void render_web(GString *out, JsonObject *d)
 {
-    g_string_append_printf(out, "Pesquisa web para: %s\n", texto(d, "consulta", "(sem consulta)"));
+    g_string_append_printf(out, "Página/pesquisa web: %s\n", texto(d, "consulta", texto(d, "url", "(sem endereço)")));
     g_string_append_printf(out, "Fonte: %s\n", texto(d, "fonte", "desconhecida"));
+    if (json_object_has_member(d, "conteudo")) {
+        g_string_append(out, "Conteúdo extraído:\n");
+        anexar_seguro(out, texto(d, "conteudo", ""), 0);
+        g_string_append_c(out, '\n');
+    }
     JsonArray *arr = lista(d, "resultados");
+    JsonArray *cotacoes = lista(d, "cotacoes");
+    for (guint i = 0; cotacoes && i < json_array_get_length(cotacoes); i++) {
+        JsonObject *c = json_array_get_object_element(cotacoes, i);
+        g_string_append_printf(out, "Cotação de referência (%s): 1 %s = %.4f %s em %s\n",
+                               texto(c, "par", "moeda"), texto(c, "base", "?"),
+                               json_object_get_double_member(c, "valor"), texto(c, "destino", "?"),
+                               texto(c, "data", "data desconhecida"));
+    }
     guint n = arr ? json_array_get_length(arr) : 0;
     for (guint i = 0; i < n; i++) {
         JsonNode *el = json_array_get_element(arr, i);
@@ -636,7 +649,7 @@ RespostaModo apresentacao_modo_resposta(const char *ferramenta)
     const char *f = ferramenta ? ferramenta : "";
     if (e_ranking(f) || strcmp(f, "sistema.dispositivos") == 0)
         return RESPOSTA_DETERMINISTICA;
-    if (strcmp(f, "web.pesquisar") == 0)
+    if (strcmp(f, "web.pesquisar") == 0 || strcmp(f, "web.abrir") == 0)
         return RESPOSTA_DETERMINISTICA;
     if (strcmp(f, "sistema.recursos") == 0 || strcmp(f, "sistema.diagnosticar") == 0)
         return RESPOSTA_EXTRATIVA;

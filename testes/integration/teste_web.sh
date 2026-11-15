@@ -29,7 +29,9 @@ def recv():
 send("perguntar", "p1", {"mensagem":"pesquise na internet a cotação do dolar em relação ao real"})
 proposta = recv()
 assert proposta["tipo"] == "proposta"
+assert "plano_proposto" in proposta["dados"], proposta
 plano = proposta["dados"]["plano_proposto"]
+assert plano is not None, proposta
 assert plano["passos"][0]["ferramenta"] == "web.pesquisar"
 assert plano["risco"] == "baixo" and plano["requer_aprovacao"] is True
 send("solicitar", "s1", {"plano_id":plano["plano_id"], "hash":plano["hash"]})
@@ -43,9 +45,13 @@ for _ in range(12):
         resultado = msg
         if msg["dados"].get("estado") in ("sucesso", "falha", "cancelado"): break
 assert resultado is not None and resultado["dados"]["estado"] == "sucesso"
-dados = resultado["dados"]["dados"]["tarefa"]["passos"][0]["dados"]
-assert dados["fonte"] == "DuckDuckGo HTML"
-assert isinstance(dados["resultados"], list) and dados["resultados"]
-assert all(x["url"].startswith("https://") for x in dados["resultados"])
-print("web: consulta HTTPS real, aprovação, fontes e URLs validados")
+dados = resultado["dados"]["dados"]["tarefa"]["passos"][0].get("dados")
+assert dados and (isinstance(dados.get("cotacoes"), list) or isinstance(dados.get("resultados"), list))
+if dados.get("cotacoes"):
+    assert dados["cotacoes"][0]["valor"] > 0 and dados["cotacoes"][0]["data"]
+    print("web: cotação HTTPS real, valor e data validados")
+else:
+    assert dados["fonte"] == "DuckDuckGo HTML"
+    assert dados["resultados"] and all(x["url"].startswith("https://") for x in dados["resultados"])
+    print("web: consulta HTTPS real, fontes e URLs validados")
 PY

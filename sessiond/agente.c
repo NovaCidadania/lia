@@ -555,6 +555,20 @@ static char *web_parametros(const char *pedido)
     return s;
 }
 
+static char *web_url_parametros(const char *pedido)
+{
+    const char *ini = strstr(pedido ? pedido : "", "https://");
+    if (!ini) return NULL;
+    const char *fim = ini;
+    while (*fim && !g_ascii_isspace(*fim) && *fim != ')' && *fim != ']' && *fim != '"') fim++;
+    char *url = g_strndup(ini, (gsize)(fim - ini));
+    JsonBuilder *b = json_builder_new(); json_builder_begin_object(b);
+    json_builder_set_member_name(b, "url"); json_builder_add_string_value(b, url);
+    json_builder_end_object(b); g_free(url);
+    JsonNode *n = json_builder_get_root(b); JsonGenerator *g = json_generator_new(); json_generator_set_root(g, n);
+    char *s = json_generator_to_data(g, NULL); json_node_unref(n); g_object_unref(g); g_object_unref(b); return s;
+}
+
 AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteCompat *compat)
 {
     if (texto_direto) *texto_direto = NULL;
@@ -568,7 +582,8 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
     gboolean cpu = tem_algum(t, L(" cpu", " processador", " processamento"));
     gboolean memoria = tem_algum(t, L(" memoria", " ram "));
     gboolean malware = tem_algum(t, L(" virus", " malware", " infectad", " trojan", " ransomware", " rootkit", " spyware", " suspeit", " invadid", " hackead"));
-    gboolean web = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " preço", " fonte", " site", " online", " mercado"));
+    gboolean web = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " preço", " fonte", " site", " online", " mercado")) ||
+                   (pedido && (strstr(pedido, "https://") || strstr(pedido, "http://")));
 
     if (malware) {
         if (tem_algum(t, L(" expli", " insuficient", " quais dados", " por que nao", " o que falta"))) {
@@ -606,12 +621,16 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
         }
     } else if (web) {
         if (compat) *compat = COMPAT_COMPATIVEL;
-        p = agente_plano_novo("pesquisar na internet e retornar fontes", "pesquisa_web");
-        char *params = web_parametros(pedido);
-        agente_plano_acrescentar(p, NULL, "web.pesquisar", params, NULL,
-                                 "buscar fontes atuais na internet", L("resultados_web"), 20000, FALSE);
+        char *url_params = web_url_parametros(pedido);
+        gboolean abrir = url_params != NULL;
+        p = agente_plano_novo(abrir ? "abrir a fonte HTTPS indicada e extrair seu texto" : "pesquisar na internet e retornar fontes",
+                              abrir ? "abrir_web" : "pesquisa_web");
+        char *params = abrir ? url_params : web_parametros(pedido);
+        agente_plano_acrescentar(p, NULL, abrir ? "web.abrir" : "web.pesquisar", params, NULL,
+                                 abrir ? "ler a página pública indicada" : "buscar fontes atuais na internet",
+                                 abrir ? L("conteudo_web") : L("resultados_web"), 20000, FALSE);
         g_free(params);
-        p->criterios_sucesso = strv_de((const char *[]) { "resultados_web", NULL });
+        p->criterios_sucesso = strv_de((const char *[]) { abrir ? "conteudo_web" : "resultados_web", NULL });
         p->limitacoes = strv_de((const char *[]) {
             "a consulta é enviada a um mecanismo de busca externo",
             "resultados de busca não são verificação independente da verdade",
@@ -799,10 +818,17 @@ char **agente_extrair_evidencias(const char *ferramenta, const char *parametros_
         }
     } else if (strcmp(f, "web.pesquisar") == 0) {
         JsonArray *resultados = d ? jarr(d, "resultados") : NULL;
+        JsonArray *cotacoes = d ? jarr(d, "cotacoes") : NULL;
+        if (cotacoes && json_array_get_length(cotacoes) > 0)
+            ev = strv_acrescentar(ev, "cotacao_web");
         if (resultados && json_array_get_length(resultados) > 0)
             ev = strv_acrescentar(ev, "resultados_web");
         else
             lim = strv_acrescentar(lim, "a busca não devolveu resultados estruturados");
+    } else if (strcmp(f, "web.abrir") == 0) {
+        const char *conteudo = d ? jstr(d, "conteudo") : NULL;
+        if (conteudo && *conteudo) ev = strv_acrescentar(ev, "conteudo_web");
+        else lim = strv_acrescentar(lim, "a página não devolveu texto");
     } else if (strcmp(f, "sistema.dispositivos") == 0) {
         if (JSON_NODE_TYPE(carga) == JSON_NODE_ARRAY) {
             char *classe = NULL;
@@ -878,6 +904,7 @@ static const struct { const char *evidencia, *ferramenta, *parametros; } FORNECE
     { "dispositivos_bloco", "sistema.dispositivos", "{\"classe\":\"bloco\"}" },
     { "dispositivos_pci", "sistema.dispositivos", "{\"classe\":\"pci\"}" },
     { "resultados_web", "web.pesquisar", "{}" },
+    { "conteudo_web", "web.abrir", "{}" },
 };
 
 static int tentativas(const AgentePlano *p, const char *ferramenta, const char *params_norm)
@@ -1296,15 +1323,15 @@ char *agente_relatorio(const AgentePlano *p, AgenteVeredito v, char **ausentes, 
         if (n_alerta) g_string_append_printf(concl, "Ponto de atenção: %s.", alertas->str);
         else if (completo) g_string_append(concl, "Nenhum dos limites fixos de atenção (carga, memória, swap) foi ultrapassado nesta medição.");
         g_string_append(prox, "nenhum necessário; para detalhar processos, peça os que mais usam CPU ou memória");
-    } else if (!strcmp(in, "pesquisa_web")) {
+    } else if (!strcmp(in, "pesquisa_web") || !strcmp(in, "abrir_web")) {
         gboolean tem_resultados = FALSE;
         for (guint i = 0; i < p->passos->len; i++) {
             AgentePasso *s = g_ptr_array_index(p->passos, i);
             if (s->estado == PASSO_SUCESSO && strv_tem(s->evidencias, "resultados_web")) tem_resultados = TRUE;
         }
         if (tem_resultados) {
-            g_string_append(concl, "A pesquisa web devolveu resultados estruturados e URLs para conferência humana.");
-            g_string_append(prox, "abrir as fontes e comparar a data e a credibilidade antes de tomar decisões");
+            g_string_append(concl, !strcmp(in, "abrir_web") ? "A página HTTPS pública foi aberta e seu texto foi extraído." : "A pesquisa web devolveu resultados estruturados e URLs para conferência humana.");
+            g_string_append(prox, !strcmp(in, "abrir_web") ? "conferir o conteúdo e a data diretamente na fonte" : "abrir as fontes e comparar a data e a credibilidade antes de tomar decisões");
         } else {
             g_string_append(concl, "A pesquisa não devolveu resultados estruturados suficientes para uma conclusão.");
             g_string_append(prox, "reformular a consulta ou tentar novamente mais tarde");
@@ -1361,7 +1388,7 @@ char *agente_relatorio(const AgentePlano *p, AgenteVeredito v, char **ausentes, 
     gboolean tem_rede = FALSE;
     for (guint i = 0; i < p->passos->len; i++) {
         AgentePasso *s = g_ptr_array_index(p->passos, i);
-        if (s->ferramenta && !strcmp(s->ferramenta, "web.pesquisar")) tem_rede = TRUE;
+        if (s->ferramenta && (!strcmp(s->ferramenta, "web.pesquisar") || !strcmp(s->ferramenta, "web.abrir"))) tem_rede = TRUE;
     }
     g_string_append(o, tem_rede ? "\nAções realizadas (sem escrita; houve acesso externo autorizado):\n"
                                 : "\nAções realizadas (somente leitura):\n");
