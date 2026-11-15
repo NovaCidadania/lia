@@ -111,18 +111,26 @@ char *lia_web_abrir(const char *url, char **erro_saida)
 static char *pesquisar_cotacao(const char *consulta, char **erro_saida)
 {
     char *t = g_ascii_strdown(consulta, -1);
-    const char *base = NULL, *destino = NULL, *nome = NULL;
-    if ((strstr(t, "dolar") || strstr(t, "usd")) && (strstr(t, "real") || strstr(t, "brl"))) {
-        base = "USD"; destino = "BRL"; nome = "dólar americano para real brasileiro";
-    } else if (strstr(t, "libra") && (strstr(t, "real") || strstr(t, "brl"))) {
-        base = "GBP"; destino = "BRL"; nome = "libra esterlina para real brasileiro";
-    } else if (strstr(t, "libra") && (strstr(t, "dolar") || strstr(t, "usd"))) {
-        base = "GBP"; destino = "USD"; nome = "libra esterlina para dólar americano";
+    const char *base = NULL;
+    const char *destinos[3] = { NULL, NULL, NULL };
+    guint n_destinos = 0;
+    gboolean quer_dolar = strstr(t, "dolar") || strstr(t, "usd");
+    gboolean quer_real = strstr(t, "real") || strstr(t, "reais") || strstr(t, "brl");
+    if (strstr(t, "libra") || strstr(t, "gbp")) {
+        base = "GBP";
+        /* Uma única consulta permite responder, por exemplo, libra→dólar e libra→real. */
+        if (quer_dolar) destinos[n_destinos++] = "USD";
+        if (quer_real) destinos[n_destinos++] = "BRL";
+    } else if (quer_dolar && quer_real) {
+        base = "USD";
+        destinos[n_destinos++] = "BRL";
     }
     g_free(t);
-    if (!base) return NULL;
+    if (!base || n_destinos == 0) return NULL;
 
-    char *url = g_strdup_printf("https://api.frankfurter.dev/v1/latest?base=%s&symbols=%s", base, destino);
+    char *simbolos = g_strjoinv(",", (char **)destinos);
+    char *url = g_strdup_printf("https://api.frankfurter.dev/v1/latest?base=%s&symbols=%s", base, simbolos);
+    g_free(simbolos);
     guint status = 0;
     GBytes *bytes = web_get(url, &status, erro_saida);
     g_free(url);
@@ -137,25 +145,39 @@ static char *pesquisar_cotacao(const char *consulta, char **erro_saida)
                   JSON_NODE_TYPE(json_parser_get_root(p)) == JSON_NODE_OBJECT;
     JsonObject *o = ok ? json_node_get_object(json_parser_get_root(p)) : NULL;
     JsonObject *rates = o && json_object_has_member(o, "rates") ? json_object_get_object_member(o, "rates") : NULL;
-    JsonNode *valor = rates && json_object_has_member(rates, destino) ? json_object_get_member(rates, destino) : NULL;
-    if (!ok || !o || !rates || !valor || JSON_NODE_TYPE(valor) != JSON_NODE_VALUE) {
+    if (!ok || !o || !rates) {
         if (erro_saida) *erro_saida = g_strdup("resposta de câmbio sem cotação estruturada");
         g_object_unref(p); g_bytes_unref(bytes); return NULL;
+    }
+    for (guint i = 0; i < n_destinos; i++) {
+        JsonNode *valor = json_object_has_member(rates, destinos[i]) ? json_object_get_member(rates, destinos[i]) : NULL;
+        if (!valor || JSON_NODE_TYPE(valor) != JSON_NODE_VALUE) {
+            if (erro_saida) *erro_saida = g_strdup_printf("resposta de câmbio sem cotação para %s", destinos[i]);
+            g_object_unref(p); g_bytes_unref(bytes); return NULL;
+        }
     }
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "consulta"); json_builder_add_string_value(b, consulta);
     json_builder_set_member_name(b, "fonte"); json_builder_add_string_value(b, "Frankfurter / European Central Bank");
     json_builder_set_member_name(b, "cotacoes"); json_builder_begin_array(b);
-    json_builder_begin_object(b);
-    json_builder_set_member_name(b, "par"); json_builder_add_string_value(b, nome);
-    json_builder_set_member_name(b, "base"); json_builder_add_string_value(b, base);
-    json_builder_set_member_name(b, "destino"); json_builder_add_string_value(b, destino);
-    json_builder_set_member_name(b, "valor");
-    if (json_node_get_value_type(valor) == G_TYPE_DOUBLE) json_builder_add_double_value(b, json_node_get_double(valor));
-    else json_builder_add_int_value(b, json_node_get_int(valor));
-    json_builder_set_member_name(b, "data"); json_builder_add_string_value(b, json_object_get_string_member(o, "date"));
-    json_builder_end_object(b); json_builder_end_array(b);
+    for (guint i = 0; i < n_destinos; i++) {
+        const char *destino = destinos[i];
+        const char *nome = !strcmp(base, "GBP") && !strcmp(destino, "USD") ? "libra esterlina para dólar americano" :
+                           !strcmp(base, "GBP") && !strcmp(destino, "BRL") ? "libra esterlina para real brasileiro" :
+                           "dólar americano para real brasileiro";
+        JsonNode *valor = json_object_get_member(rates, destino);
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "par"); json_builder_add_string_value(b, nome);
+        json_builder_set_member_name(b, "base"); json_builder_add_string_value(b, base);
+        json_builder_set_member_name(b, "destino"); json_builder_add_string_value(b, destino);
+        json_builder_set_member_name(b, "valor");
+        if (json_node_get_value_type(valor) == G_TYPE_DOUBLE) json_builder_add_double_value(b, json_node_get_double(valor));
+        else json_builder_add_int_value(b, json_node_get_int(valor));
+        json_builder_set_member_name(b, "data"); json_builder_add_string_value(b, json_object_get_string_member(o, "date"));
+        json_builder_end_object(b);
+    }
+    json_builder_end_array(b);
     json_builder_set_member_name(b, "resultados"); json_builder_begin_array(b);
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "titulo"); json_builder_add_string_value(b, "Frankfurter — taxas de câmbio de referência");

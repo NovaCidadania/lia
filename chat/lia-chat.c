@@ -1240,6 +1240,21 @@ static JsonObject *campo_obj(JsonObject *obj, const char *chave)
 
 static void enviar_solicitar_da_proposta(LiaChat *c, const char *modo);
 
+static gboolean plano_tem_web(JsonObject *plano)
+{
+    if (!plano || !json_object_has_member(plano, "passos")) return FALSE;
+    JsonNode *n = json_object_get_member(plano, "passos");
+    if (JSON_NODE_TYPE(n) != JSON_NODE_ARRAY) return FALSE;
+    JsonArray *passos = json_node_get_array(n);
+    for (guint i = 0; i < json_array_get_length(passos); i++) {
+        JsonNode *p = json_array_get_element(passos, i);
+        if (JSON_NODE_TYPE(p) != JSON_NODE_OBJECT) continue;
+        const char *f = campo_str(json_node_get_object(p), "ferramenta");
+        if (f && (!strcmp(f, "web.pesquisar") || !strcmp(f, "web.abrir"))) return TRUE;
+    }
+    return FALSE;
+}
+
 static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
 {
     const char *pergunta_id = campo_str(m->dados, "pergunta_id");
@@ -1282,13 +1297,16 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         tarefa_ui_limpar(c);
         tarefa_ui_carregar(c, pp);
         gboolean auto_tarefa = c->autopilot && auto_ok && !requer;
+        gboolean web_interativa = c->autopilot && requer && plano_tem_web(pp);
         gboolean parcial = compat && !strcmp(compat, "parcial");
         if (c->term) {
             saida_linha(c, "%s  ✓ tarefa: %s (%d passos%s)%s", sgr(c, EST_FRACO), c->tarefa_objetivo ? c->tarefa_objetivo : "?", c->tarefa_n,
                         parcial ? "; compatibilidade PARCIAL: os dados coletados não respondem à pergunta de fundo" : "", sgr0(c));
-            if (!auto_tarefa)
+            if (!auto_tarefa && !web_interativa)
                 saida_linha(c, "%s  ⏸ a tarefa não roda sozinha (%s) — /plano para solicitar, ou faça outra pergunta%s", sgr(c, EST_AVISO),
                             !c->autopilot ? "modo manual" : (requer ? "exige aprovação" : "não é leitura pura"), sgr0(c));
+            else if (web_interativa)
+                saida_linha(c, "%s  ✓ pesquisa web pronta — solicitando agora; a aprovação aparecerá ao vivo%s", sgr(c, EST_FRACO), sgr0(c));
         } else {
             saida_linha(c, "[validação] tarefa=%s passos=%d compatibilidade=%s veredito=%s: %s", campo_str(pp, "intencao") ? campo_str(pp, "intencao") : "-",
                         c->tarefa_n, compat ? compat : "-", veredito ? veredito : "?", motivo);
@@ -1299,7 +1317,7 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         }
         g_free(texto);
         g_free(motivo);
-        if (auto_tarefa) enviar_solicitar_da_proposta(c, "executar");
+        if (auto_tarefa || web_interativa) enviar_solicitar_da_proposta(c, "executar");
         else { tarefa_ui_limpar(c); encerrar_turno(c, FALSE); }
         return;
     }

@@ -26,7 +26,7 @@ def recv():
     while b"\n" not in buf: buf += s.recv(65536)
     line, buf = buf.split(b"\n", 1)
     return json.loads(line)
-send("perguntar", "p1", {"mensagem":"pesquise na internet a cotação do dolar em relação ao real"})
+send("perguntar", "p1", {"mensagem":"pesquise na internet a cotação da libra esterlina em dolares americanos e reais"})
 proposta = recv()
 assert proposta["tipo"] == "proposta"
 assert "plano_proposto" in proposta["dados"], proposta
@@ -48,8 +48,11 @@ assert resultado is not None and resultado["dados"]["estado"] == "sucesso"
 dados = resultado["dados"]["dados"]["tarefa"]["passos"][0].get("dados")
 assert dados and (isinstance(dados.get("cotacoes"), list) or isinstance(dados.get("resultados"), list))
 if dados.get("cotacoes"):
-    assert dados["cotacoes"][0]["valor"] > 0 and dados["cotacoes"][0]["data"]
-    print("web: cotação HTTPS real, valor e data validados")
+    assert len(dados["cotacoes"]) == 2
+    pares = {(x["base"], x["destino"]) for x in dados["cotacoes"]}
+    assert pares == {("GBP", "USD"), ("GBP", "BRL")}
+    assert all(x["valor"] > 0 and x["data"] for x in dados["cotacoes"])
+    print("web: duas cotações HTTPS reais, valores e datas validados")
 else:
     assert dados["fonte"] == "DuckDuckGo HTML"
     assert dados["resultados"] and all(x["url"].startswith("https://") for x in dados["resultados"])

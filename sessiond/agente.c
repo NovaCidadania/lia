@@ -1325,12 +1325,38 @@ char *agente_relatorio(const AgentePlano *p, AgenteVeredito v, char **ausentes, 
         g_string_append(prox, "nenhum necessário; para detalhar processos, peça os que mais usam CPU ou memória");
     } else if (!strcmp(in, "pesquisa_web") || !strcmp(in, "abrir_web")) {
         gboolean tem_resultados = FALSE;
+        gboolean tem_cotacoes = FALSE;
         for (guint i = 0; i < p->passos->len; i++) {
             AgentePasso *s = g_ptr_array_index(p->passos, i);
-            if (s->estado == PASSO_SUCESSO && strv_tem(s->evidencias, "resultados_web")) tem_resultados = TRUE;
+            if (s->estado == PASSO_SUCESSO && (strv_tem(s->evidencias, "resultados_web") || strv_tem(s->evidencias, "conteudo_web"))) tem_resultados = TRUE;
+            if (s->estado == PASSO_SUCESSO && s->dados_json && !strcmp(s->ferramenta, "web.pesquisar")) {
+                JsonParser *jp = json_parser_new();
+                if (json_parser_load_from_data(jp, s->dados_json, -1, NULL)) {
+                    JsonNode *rn = json_parser_get_root(jp);
+                    JsonObject *jo = rn && JSON_NODE_HOLDS_OBJECT(rn) ? json_node_get_object(rn) : NULL;
+                    JsonArray *ca = jo && json_object_has_member(jo, "cotacoes") ? json_object_get_array_member(jo, "cotacoes") : NULL;
+                    if (ca && json_array_get_length(ca) > 0) {
+                        tem_cotacoes = TRUE;
+                        g_string_append(concl, "Cotações estruturadas recebidas: ");
+                        for (guint j = 0; j < json_array_get_length(ca); j++) {
+                            JsonObject *co = json_array_get_object_element(ca, j);
+                            if (!co) continue;
+                            if (j) g_string_append(concl, "; ");
+                            g_string_append_printf(concl, "1 %s = %.4f %s (%s)",
+                                                   jstr(co, "base") ? jstr(co, "base") : "?",
+                                                   json_object_get_double_member(co, "valor"),
+                                                   jstr(co, "destino") ? jstr(co, "destino") : "?",
+                                                   jstr(co, "data") ? jstr(co, "data") : "data não informada");
+                        }
+                        g_string_append(concl, ". ");
+                    }
+                }
+                g_object_unref(jp);
+            }
         }
         if (tem_resultados) {
-            g_string_append(concl, !strcmp(in, "abrir_web") ? "A página HTTPS pública foi aberta e seu texto foi extraído." : "A pesquisa web devolveu resultados estruturados e URLs para conferência humana.");
+            if (!strcmp(in, "abrir_web")) g_string_append(concl, "A página HTTPS pública foi aberta e seu texto foi extraído.");
+            else if (!tem_cotacoes) g_string_append(concl, "A pesquisa web devolveu resultados estruturados e URLs para conferência humana.");
             g_string_append(prox, !strcmp(in, "abrir_web") ? "conferir o conteúdo e a data diretamente na fonte" : "abrir as fontes e comparar a data e a credibilidade antes de tomar decisões");
         } else {
             g_string_append(concl, "A pesquisa não devolveu resultados estruturados suficientes para uma conclusão.");
