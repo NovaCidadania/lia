@@ -6,6 +6,10 @@
 
 ## Como usar hoje (Linux x86-64)
 
+### Launcher local do Cognis
+
+Use `/home/zad/scl.sh` para iniciar o Cognis no workspace Lia. CPU é o modo estável padrão. O modo Vulkan experimental usa `LIA_DEVICE=Vulkan0` e `LIA_GPU_LAYERS=1` ou `2`; quatro camadas falharam com `ErrorDeviceLost` na GT 750M.
+
 ```sh
 make            # compila build/lia, build/lia-cat, build/lia-echo e as
                  # implementações de referência em C (estáticos, sem libc)
