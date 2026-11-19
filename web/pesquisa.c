@@ -116,11 +116,13 @@ static char *pesquisar_cotacao(const char *consulta, char **erro_saida)
     guint n_destinos = 0;
     gboolean quer_dolar = strstr(t, "dolar") || strstr(t, "usd");
     gboolean quer_real = strstr(t, "real") || strstr(t, "reais") || strstr(t, "brl");
+    gboolean quer_zimbabue = strstr(t, "zimb") || strstr(t, "zwl");
     if (strstr(t, "libra") || strstr(t, "gbp")) {
         base = "GBP";
         /* Uma única consulta permite responder, por exemplo, libra→dólar e libra→real. */
         if (quer_dolar) destinos[n_destinos++] = "USD";
         if (quer_real) destinos[n_destinos++] = "BRL";
+        if (quer_zimbabue) destinos[n_destinos++] = "ZWL";
     } else if (quer_dolar && quer_real) {
         base = "USD";
         destinos[n_destinos++] = "BRL";
@@ -128,9 +130,24 @@ static char *pesquisar_cotacao(const char *consulta, char **erro_saida)
     g_free(t);
     if (!base || n_destinos == 0) return NULL;
 
-    char *simbolos = g_strjoinv(",", (char **)destinos);
-    char *url = g_strdup_printf("https://api.frankfurter.dev/v1/latest?base=%s&symbols=%s", base, simbolos);
-    g_free(simbolos);
+    gboolean usa_er_api = FALSE;
+    for (guint i = 0; i < n_destinos; i++)
+        if (!strcmp(destinos[i], "ZWL")) usa_er_api = TRUE;
+    char *url = NULL;
+    const char *fonte = NULL, *url_fonte = NULL, *campo_data = NULL;
+    if (usa_er_api) {
+        url = g_strdup_printf("https://open.er-api.com/v6/latest/%s", base);
+        fonte = "ExchangeRate-API Open Endpoint";
+        url_fonte = "https://open.er-api.com/v6/latest/GBP";
+        campo_data = "time_last_update_utc";
+    } else {
+        char *simbolos = g_strjoinv(",", (char **)destinos);
+        url = g_strdup_printf("https://api.frankfurter.dev/v1/latest?base=%s&symbols=%s", base, simbolos);
+        g_free(simbolos);
+        fonte = "Frankfurter / European Central Bank";
+        url_fonte = "https://api.frankfurter.dev/v1/latest";
+        campo_data = "date";
+    }
     guint status = 0;
     GBytes *bytes = web_get(url, &status, erro_saida);
     g_free(url);
@@ -159,12 +176,13 @@ static char *pesquisar_cotacao(const char *consulta, char **erro_saida)
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "consulta"); json_builder_add_string_value(b, consulta);
-    json_builder_set_member_name(b, "fonte"); json_builder_add_string_value(b, "Frankfurter / European Central Bank");
+    json_builder_set_member_name(b, "fonte"); json_builder_add_string_value(b, fonte);
     json_builder_set_member_name(b, "cotacoes"); json_builder_begin_array(b);
     for (guint i = 0; i < n_destinos; i++) {
         const char *destino = destinos[i];
         const char *nome = !strcmp(base, "GBP") && !strcmp(destino, "USD") ? "libra esterlina para dólar americano" :
                            !strcmp(base, "GBP") && !strcmp(destino, "BRL") ? "libra esterlina para real brasileiro" :
+                           !strcmp(base, "GBP") && !strcmp(destino, "ZWL") ? "libra esterlina para dólar zimbabuano" :
                            "dólar americano para real brasileiro";
         JsonNode *valor = json_object_get_member(rates, destino);
         json_builder_begin_object(b);
@@ -174,14 +192,16 @@ static char *pesquisar_cotacao(const char *consulta, char **erro_saida)
         json_builder_set_member_name(b, "valor");
         if (json_node_get_value_type(valor) == G_TYPE_DOUBLE) json_builder_add_double_value(b, json_node_get_double(valor));
         else json_builder_add_int_value(b, json_node_get_int(valor));
-        json_builder_set_member_name(b, "data"); json_builder_add_string_value(b, json_object_get_string_member(o, "date"));
+        json_builder_set_member_name(b, "data");
+        json_builder_add_string_value(b, json_object_has_member(o, campo_data) ?
+                                      json_object_get_string_member(o, campo_data) : "data desconhecida");
         json_builder_end_object(b);
     }
     json_builder_end_array(b);
     json_builder_set_member_name(b, "resultados"); json_builder_begin_array(b);
     json_builder_begin_object(b);
-    json_builder_set_member_name(b, "titulo"); json_builder_add_string_value(b, "Frankfurter — taxas de câmbio de referência");
-    json_builder_set_member_name(b, "url"); json_builder_add_string_value(b, "https://api.frankfurter.dev/v1/latest");
+    json_builder_set_member_name(b, "titulo"); json_builder_add_string_value(b, fonte);
+    json_builder_set_member_name(b, "url"); json_builder_add_string_value(b, url_fonte);
     json_builder_set_member_name(b, "resumo"); json_builder_add_string_value(b, "cotação estruturada com data de referência");
     json_builder_end_object(b); json_builder_end_array(b);
     json_builder_end_object(b);

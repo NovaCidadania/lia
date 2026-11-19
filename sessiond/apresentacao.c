@@ -242,6 +242,12 @@ static void render_web(GString *out, JsonObject *d)
 {
     g_string_append_printf(out, "Página/pesquisa web: %s\n", texto(d, "consulta", texto(d, "url", "(sem endereço)")));
     g_string_append_printf(out, "Fonte: %s\n", texto(d, "fonte", "desconhecida"));
+    const char *url = texto(d, "url", NULL);
+    if (url && *url) {
+        g_string_append(out, "URL: ");
+        anexar_seguro(out, url, 0);
+        g_string_append_c(out, '\n');
+    }
     if (json_object_has_member(d, "conteudo")) {
         g_string_append(out, "Conteúdo extraído:\n");
         anexar_seguro(out, texto(d, "conteudo", ""), 0);
@@ -309,7 +315,8 @@ char *apresentacao_renderizar(const char *ferramenta, const char *dados_json, gb
             render_diagnosticar(out, json_node_get_object(carga));
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_ARRAY && strcmp(f, "sistema.dispositivos") == 0)
             render_dispositivos(out, json_node_get_array(carga));
-        else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT && strcmp(f, "web.pesquisar") == 0)
+        else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT &&
+                 (strcmp(f, "web.pesquisar") == 0 || strcmp(f, "web.abrir") == 0))
             render_web(out, json_node_get_object(carga));
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_VALUE && json_node_get_value_type(carga) == G_TYPE_STRING) {
             for (const char *q = json_node_get_string(carga); *q; q++) /* texto humano da ferramenta: tira controle, mantém \n e \t */

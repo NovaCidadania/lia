@@ -294,6 +294,12 @@ static void testes_apresentacao(void)
     checar(t && *t, "renderizar: dados ausentes nunca devolvem NULL");
     g_free(t);
 
+    t = apresentacao_renderizar("web.abrir",
+        "{\"url\":\"https://example.com/documentacao\",\"conteudo\":\"Texto real da página\"}", NULL);
+    checar(strstr(t, "URL: https://example.com/documentacao") && strstr(t, "Texto real da página"),
+           "renderizar web.abrir: URL e conteúdo aparecem na resposta final");
+    g_free(t);
+
     GString *g = g_string_new("{\"texto\":\"");
     for (int i = 0; i < 2000; i++) g_string_append_printf(g, "item %d\\n", i);
     g_string_append(g, "\"}");
