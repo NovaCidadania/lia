@@ -1,6 +1,7 @@
 /* lia-sessiond — implementação de sessiond/agente.h. Ver o cabeçalho. */
 #include "agente.h"
 #include <json-glib/json-glib.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -514,6 +515,134 @@ static gboolean tem_algum(const char *t, const char *const *v)
 
 #define L(...) ((const char *const[]){ __VA_ARGS__, NULL })
 
+/* Calculadora local limitada a expressões numéricas: sem eval, comandos ou
+ * acesso a ferramentas. */
+typedef struct { const char *p; gboolean valido; } Expressao;
+static double expressao_soma(Expressao *e);
+
+static void expressao_espacos(Expressao *e)
+{
+    while (g_ascii_isspace(*e->p)) e->p++;
+}
+
+static double expressao_primaria(Expressao *e)
+{
+    expressao_espacos(e);
+    if (*e->p == '(') {
+        e->p++;
+        double v = expressao_soma(e);
+        expressao_espacos(e);
+        if (*e->p != ')') e->valido = FALSE;
+        else e->p++;
+        return v;
+    }
+    const char *ini = e->p;
+    while (g_ascii_isdigit(*e->p)) e->p++;
+    if (*e->p == '.' || *e->p == ',') {
+        e->p++;
+        while (g_ascii_isdigit(*e->p)) e->p++;
+    }
+    if (e->p == ini) { e->valido = FALSE; return 0; }
+    char *numero = g_strndup(ini, (gsize)(e->p - ini));
+    for (char *p = numero; *p; p++) if (*p == ',') *p = '.';
+    double v = g_ascii_strtod(numero, NULL);
+    g_free(numero);
+    if (!isfinite(v)) e->valido = FALSE;
+    return v;
+}
+
+static double expressao_unaria(Expressao *e)
+{
+    expressao_espacos(e);
+    if (*e->p == '+') { e->p++; return expressao_unaria(e); }
+    if (*e->p == '-') { e->p++; return -expressao_unaria(e); }
+    return expressao_primaria(e);
+}
+
+static gboolean expressao_operador_texto(Expressao *e, const char *texto)
+{
+    expressao_espacos(e);
+    gsize n = strlen(texto);
+    if (!g_str_has_prefix(e->p, texto) ||
+        (e->p[n] && !g_ascii_isspace(e->p[n]) && !strchr("?.,!", e->p[n])))
+        return FALSE;
+    e->p += n;
+    return TRUE;
+}
+
+static double expressao_potencia(Expressao *e)
+{
+    double v = expressao_unaria(e);
+    expressao_espacos(e);
+    if (*e->p == '^') {
+        e->p++;
+        v = pow(v, expressao_potencia(e));
+        if (!isfinite(v)) e->valido = FALSE;
+    }
+    return v;
+}
+
+static double expressao_produto(Expressao *e)
+{
+    double v = expressao_potencia(e);
+    for (;;) {
+        expressao_espacos(e);
+        char op = *e->p;
+        if (op == '*' || op == '/' || op == '%') e->p++;
+        else if (expressao_operador_texto(e, "vezes") || expressao_operador_texto(e, "multiplicado por")) op = '*';
+        else if (expressao_operador_texto(e, "dividido por")) op = '/';
+        else return v;
+        double b = expressao_potencia(e);
+        if ((op == '/' || op == '%') && b == 0) { e->valido = FALSE; return 0; }
+        v = op == '*' ? v * b : op == '/' ? v / b : fmod(v, b);
+        if (!isfinite(v)) e->valido = FALSE;
+    }
+}
+
+static double expressao_soma(Expressao *e)
+{
+    double v = expressao_produto(e);
+    for (;;) {
+        expressao_espacos(e);
+        char op = *e->p;
+        if (op == '+' || op == '-') e->p++;
+        else if (expressao_operador_texto(e, "mais")) op = '+';
+        else if (expressao_operador_texto(e, "menos")) op = '-';
+        else return v;
+        double b = expressao_produto(e);
+        v = op == '+' ? v + b : v - b;
+        if (!isfinite(v)) e->valido = FALSE;
+    }
+}
+
+static gboolean resposta_matematica(const char *pedido, const char *normalizado, char **resposta)
+{
+    gboolean raiz = strstr(normalizado, " raiz quadrada") != NULL;
+    gboolean pedido_calculo = raiz || tem_algum(normalizado,
+        L(" quanto e ", " quanto eh ", " calcule ", " resolva ", " resultado de ", " soma de ", " multiplique "));
+    if (!pedido_calculo) return FALSE;
+    const char *inicio = pedido;
+    while (*inicio && !g_ascii_isdigit(*inicio) && *inicio != '(' && *inicio != '+' && *inicio != '-') inicio++;
+    if (!*inicio) return FALSE;
+    Expressao e = { inicio, TRUE };
+    double valor = expressao_soma(&e);
+    expressao_espacos(&e);
+    if (!e.valido || (*e.p && !strchr("?.,!", *e.p))) return FALSE;
+    if (raiz) {
+        if (valor < 0) {
+            *resposta = g_strdup("A raiz quadrada de um número negativo não é um número real.");
+            return TRUE;
+        }
+        valor = sqrt(valor);
+    }
+    char formatado[96];
+    g_ascii_formatd(formatado, sizeof formatado, "%.12g", valor);
+    for (char *p = formatado; *p; p++) if (*p == '.') *p = ',';
+    *resposta = raiz ? g_strdup_printf("A raiz quadrada é %s.", formatado) :
+                       g_strdup_printf("O resultado é %s.", formatado);
+    return TRUE;
+}
+
 /* "os 10 processos", "top 5": só o número que a pessoa disse nessa posição */
 static int limite_pedido(const char *t)
 {
@@ -575,6 +704,14 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
     if (compat) *compat = COMPAT_COMPATIVEL;
     char *t = normalizar_pedido(pedido);
     AgentePlano *p = NULL;
+    char *resposta_calculo = NULL;
+    if (resposta_matematica(pedido ? pedido : "", t, &resposta_calculo)) {
+        if (compat) *compat = COMPAT_COMPATIVEL;
+        if (texto_direto) *texto_direto = resposta_calculo;
+        else g_free(resposta_calculo);
+        g_free(t);
+        return NULL;
+    }
     int limite = limite_pedido(t);
     char lim[32];
     g_snprintf(lim, sizeof lim, "{\"limite\":%d}", limite ? limite : 10);
@@ -582,7 +719,10 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
     gboolean cpu = tem_algum(t, L(" cpu", " processador", " processamento"));
     gboolean memoria = tem_algum(t, L(" memoria", " ram "));
     gboolean malware = tem_algum(t, L(" virus", " malware", " infectad", " trojan", " ransomware", " rootkit", " spyware", " suspeit", " invadid", " hackead"));
-    gboolean web = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " preço", " fonte", " site", " online", " mercado")) ||
+    gboolean web = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " fonte", " site", " online", " mercado",
+                                   " lancamento", " estreia", " data de lancamento", " quando sera lancado", " quando sera lancada",
+                                   " cust", " apartamento", " imovel", " aluguel", " quem foi", " biografia",
+                                   " copa do mundo", " proxima copa", " mundial")) ||
                    (pedido && (strstr(pedido, "https://") || strstr(pedido, "http://")));
 
     if (malware) {

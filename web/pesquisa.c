@@ -252,32 +252,137 @@ static char *extrair_url(const char *href)
     return url;
 }
 
-static void adicionar_resultados(JsonBuilder *b, const char *html, int limite)
+typedef struct {
+    char *titulo;
+    char *url;
+    char *resumo;
+    int relevancia;
+} ResultadoBusca;
+
+static void resultado_busca_liberar(gpointer dados)
+{
+    ResultadoBusca *r = dados;
+    g_free(r->titulo); g_free(r->url); g_free(r->resumo); g_free(r);
+}
+
+static char *normalizar_busca(const char *s)
+{
+    char *nfd = g_utf8_normalize(s ? s : "", -1, G_NORMALIZE_NFD);
+    GString *out = g_string_new(NULL);
+    for (const char *p = nfd ? nfd : ""; *p; p = g_utf8_next_char(p)) {
+        gunichar ch = g_utf8_get_char(p);
+        if (g_unichar_ismark(ch)) continue;
+        if (ch < 128 && g_ascii_isalnum((char)ch)) g_string_append_c(out, g_ascii_tolower((char)ch));
+        else if (out->len && out->str[out->len - 1] != ' ') g_string_append_c(out, ' ');
+    }
+    g_free(nfd);
+    char *bruto = g_string_free(out, FALSE);
+    char **partes = g_strsplit(bruto, " ", -1);
+    GString *canon = g_string_new(NULL);
+    for (guint i = 0; partes[i]; i++) {
+        char *p = partes[i];
+        gsize n = strlen(p);
+        if (n > 4 && g_str_has_suffix(p, "oes")) {
+            p[n - 3] = '\0';
+            p = g_strconcat(p, "ao", NULL);
+        } else if (n > 3 && p[n - 1] == 's') {
+            p[n - 1] = '\0';
+        }
+        if (*p) {
+            if (canon->len) g_string_append_c(canon, ' ');
+            g_string_append(canon, p);
+        }
+        if (p != partes[i]) g_free(p);
+    }
+    g_strfreev(partes); g_free(bruto);
+    return g_string_free(canon, FALSE);
+}
+
+static gboolean palavra_irrelevante(const char *p)
+{
+    static const char *const IGNORAR[] = { "qual", "quais", "que", "quem", "uma", "umas", "uns", "dos", "das", "para", "por", "com", "sem", "de", "do", "da", "em", "no", "na", "e", "o", "a", "os", "as", "hoje", "agora", "atual", NULL };
+    for (guint i = 0; IGNORAR[i]; i++) if (!strcmp(p, IGNORAR[i])) return TRUE;
+    return strlen(p) < 3;
+}
+
+static int relevancia_resultado(const char *consulta, const char *titulo, const char *resumo)
+{
+    char *q = normalizar_busca(consulta);
+    char *t = normalizar_busca(titulo);
+    char *s = normalizar_busca(resumo);
+    int pontos = 0;
+    char **palavras = g_strsplit(q, " ", -1);
+    for (guint i = 0; palavras[i]; i++) {
+        const char *p = palavras[i];
+        if (palavra_irrelevante(p)) continue;
+        char *needle = g_strdup_printf(" %s ", p);
+        gboolean achou_titulo = strstr(t, needle) != NULL;
+        gboolean achou_resumo = strstr(s, needle) != NULL;
+        g_free(needle);
+        if (!achou_titulo && !achou_resumo && strlen(p) >= 5) {
+            char prefixo[6]; memcpy(prefixo, p, 5); prefixo[5] = '\0';
+            achou_titulo = strstr(t, prefixo) != NULL;
+            achou_resumo = strstr(s, prefixo) != NULL;
+        }
+        if (achou_titulo) pontos += 3;
+        else if (achou_resumo) pontos += 2;
+    }
+    if ((strstr(q, "preco") || strstr(q, "cotacao") || strstr(q, "valor")) &&
+        strpbrk(s, "0123456789") &&
+        (strstr(s, " real") || strstr(s, " reais") || strstr(s, " brl") || strstr(s, " dolar") || strstr(s, " usd") || strstr(s, " r ")))
+        pontos += 6;
+    if ((strstr(q, "data") || strstr(q, "lancamento") || strstr(q, "quando")) &&
+        (strstr(s, " 20") || strstr(t, " 20")))
+        pontos += 4;
+    g_strfreev(palavras); g_free(q); g_free(t); g_free(s);
+    return pontos;
+}
+
+static gint comparar_relevancia(gconstpointer a, gconstpointer b)
+{
+    const ResultadoBusca *ra = *(ResultadoBusca * const *)a;
+    const ResultadoBusca *rb = *(ResultadoBusca * const *)b;
+    return rb->relevancia - ra->relevancia;
+}
+
+static void adicionar_resultados(JsonBuilder *b, const char *html, const char *consulta, int limite)
 {
     GError *erro = NULL;
     GRegex *links = g_regex_new("(?is)<a[^>]*class=[\\\"'][^\\\"']*result__a[^\\\"']*[\\\"'][^>]*href=[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a>.*?<a[^>]*class=[\\\"'][^\\\"']*result__snippet[^\\\"']*[\\\"'][^>]*>(.*?)</a>", 0, 0, &erro);
     if (erro) { g_error_free(erro); return; }
     GMatchInfo *mi = NULL;
     g_regex_match(links, html, 0, &mi);
-    int n = 0;
-    while (n < limite && g_match_info_matches(mi)) {
+    GPtrArray *resultados = g_ptr_array_new_with_free_func(resultado_busca_liberar);
+    while (resultados->len < 30 && g_match_info_matches(mi)) {
         char *href = g_match_info_fetch(mi, 1);
         char *titulo_html = g_match_info_fetch(mi, 2);
         char *resumo_html = g_match_info_fetch(mi, 3);
         char *url = extrair_url(href);
         char *titulo = html_limpar(titulo_html);
         char *resumo = html_limpar(resumo_html);
-        if (url && *titulo) {
-            json_builder_begin_object(b);
-            json_builder_set_member_name(b, "titulo"); json_builder_add_string_value(b, titulo);
-            json_builder_set_member_name(b, "url"); json_builder_add_string_value(b, url);
-            json_builder_set_member_name(b, "resumo"); json_builder_add_string_value(b, resumo);
-            json_builder_end_object(b);
-            n++;
+        gboolean anuncio = url && (strstr(url, "duckduckgo.com/y.js") || strstr(url, "ad_domain=") ||
+                                    strstr(url, "ad_provider=") || strstr(url, "ad_type="));
+        if (url && *titulo && !anuncio) {
+            ResultadoBusca *r = g_new0(ResultadoBusca, 1);
+            r->titulo = g_strdup(titulo);
+            r->url = g_strdup(url);
+            r->resumo = g_strdup(resumo);
+            r->relevancia = relevancia_resultado(consulta, titulo, resumo);
+            g_ptr_array_add(resultados, r);
         }
         g_free(href); g_free(titulo_html); g_free(resumo_html); g_free(url); g_free(titulo); g_free(resumo);
         g_match_info_next(mi, NULL);
     }
+    g_ptr_array_sort(resultados, comparar_relevancia);
+    for (guint i = 0; i < resultados->len && i < (guint)limite; i++) {
+        ResultadoBusca *r = g_ptr_array_index(resultados, i);
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "titulo"); json_builder_add_string_value(b, r->titulo);
+        json_builder_set_member_name(b, "url"); json_builder_add_string_value(b, r->url);
+        json_builder_set_member_name(b, "resumo"); json_builder_add_string_value(b, r->resumo);
+        json_builder_end_object(b);
+    }
+    g_ptr_array_unref(resultados);
     g_match_info_free(mi); g_regex_unref(links);
 }
 
@@ -320,7 +425,7 @@ char *lia_web_pesquisar(const char *consulta, int limite, char **erro_saida)
     json_builder_set_member_name(b, "fonte"); json_builder_add_string_value(b, "DuckDuckGo HTML");
     json_builder_set_member_name(b, "resultados"); json_builder_begin_array(b);
     char *html = g_strndup(corpo, tamanho);
-    adicionar_resultados(b, html, limite);
+    adicionar_resultados(b, html, consulta, limite);
     g_free(html);
     json_builder_end_array(b);
     json_builder_end_object(b);

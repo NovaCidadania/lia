@@ -150,6 +150,7 @@ typedef struct {
     gboolean autopilot;            /* LIA_CHAT_AUTOPILOT: TRUE = read-only (padrão), FALSE = manual */
     int fase;                      /* Fase: o que a linha de status mostra */
     gboolean turno_espera_resposta;/* a execução atual veio de uma proposta: um 'resposta' final ainda vai chegar */
+    gboolean turno_web;            /* pesquisa já exibida; oculta relatório técnico redundante */
     char *ferramenta_turno;        /* ferramenta do turno atual (para a linha de status) */
     gint64 turno_inicio_us;        /* pergunta enviada */
     gint64 t_proposta_ms, t_execucao_ms, t_resposta_ms; /* tempos informados pelo daemon; -1 = etapa não ocorreu */
@@ -381,7 +382,7 @@ static void ms_legivel(char *dst, gsize cap, gint64 ms)
  * tempos reais de cada etapa. */
 static void encerrar_turno(LiaChat *c, gboolean concluido)
 {
-    if (concluido && c->turno_inicio_us) {
+    if (concluido && c->turno_inicio_us && !c->turno_web) {
         gint64 total = (g_get_monotonic_time() - c->turno_inicio_us) / 1000;
         char t[32], a[32], b[32], d[32];
         ms_legivel(t, sizeof t, total);
@@ -397,6 +398,7 @@ static void encerrar_turno(LiaChat *c, gboolean concluido)
         g_string_free(det, TRUE);
     }
     c->turno_espera_resposta = FALSE;
+    c->turno_web = FALSE;
     c->turno_inicio_us = 0;
     g_clear_pointer(&c->ferramenta_turno, g_free);
     tarefa_ui_limpar(c);
@@ -1093,13 +1095,18 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
          * mostrados à medida que chegaram; aqui só o veredito do verificador */
         JsonObject *d = campo_obj(m->dados, "dados");
         tarefa_ui_carregar(c, campo_obj(d, "tarefa")); /* estado FINAL de cada passo, como o daemon registrou */
+        c->turno_web = FALSE;
+        for (int i = 0; i < c->tarefa_n; i++)
+            if (c->tarefa_ferramenta[i] && g_str_has_prefix(c->tarefa_ferramenta[i], "web.") &&
+                c->tarefa_estado[i] && !strcmp(c->tarefa_estado[i], "sucesso"))
+                c->turno_web = TRUE;
         const char *veredito = campo_str(d, "veredito");
         char *aus = lista_str_para_texto(d, "evidencias_ausentes");
         char t[32];
         ms_legivel(t, sizeof t, exec_ms < 0 ? 0 : exec_ms);
         gboolean cancelada = estado && !strcmp(estado, "cancelado");
         if (c->term) {
-            if (c->tarefa_n) {
+            if (c->tarefa_n && !(c->turno_web && sucesso)) {
                 GString *l = g_string_new(NULL);
                 for (int i = 0; i < c->tarefa_n; i++) { tarefa_ui_linha(c, l, i, TRUE); if (i + 1 < c->tarefa_n) g_string_append_c(l, '\n'); }
                 saida_linha(c, "%sPassos:%s", sgr(c, EST_FORTE), sgr0(c));
@@ -1108,9 +1115,9 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
             }
             if (cancelada)
                 saida_linha(c, "%s  ✗ tarefa cancelada: todos os passos em andamento foram interrompidos e os pendentes não rodaram%s", sgr(c, EST_AVISO), sgr0(c));
-            else if (sucesso)
+            else if (sucesso && !c->turno_web)
                 saida_linha(c, "%s  ✓ verificação: todos os critérios têm evidência — coleta concluída em %s%s", sgr(c, EST_OK), t, sgr0(c));
-            else
+            else if (!c->turno_web)
                 saida_linha(c, "%s  ✗ verificação: %s — evidências ausentes: %s (coleta: %s)%s", sgr(c, EST_ERRO),
                             veredito ? veredito : (estado ? estado : "?"), aus, t, sgr0(c));
         } else {
@@ -1137,6 +1144,7 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
 
     if (c->term) {
         const char *ferr = c->ferramenta_turno ? c->ferramenta_turno : (c->ferramenta_plano_pendente ? c->ferramenta_plano_pendente : "?");
+        c->turno_web = sucesso && g_str_has_prefix(ferr, "web.");
         if (sucesso) {
             char t[32];
             ms_legivel(t, sizeof t, exec_ms < 0 ? 0 : exec_ms);
@@ -1392,11 +1400,21 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
     char *aviso = campo_str(m->dados, "aviso") ? sanear(campo_str(m->dados, "aviso")) : NULL;
     const char *origem = campo_str(m->dados, "origem");
     gboolean deterministica = origem && !strcmp(origem, "deterministica");
-    gboolean resposta_web = (c->ferramenta_turno && g_str_has_prefix(c->ferramenta_turno, "web.")) ||
+    gboolean resposta_web = c->turno_web ||
+                            (c->ferramenta_turno && g_str_has_prefix(c->ferramenta_turno, "web.")) ||
                             (strstr(texto, "Evidências") && strstr(texto, "web.pesquisar"));
     c->t_resposta_ms = campo_int(m->dados, "tempo_modelo_ms", -1);
     parar_progresso_pergunta(c);
     gboolean extrativa = origem && !strcmp(origem, "modelo_extrativa");
+    if (resposta_web) {
+        /* A ferramenta já mostrou os resultados, resumos e links na ordem
+         * recebida. A resposta genérica do verificador só repetiria o estado
+         * da coleta; encerra o turno deixando o resultado como última saída. */
+        g_free(texto);
+        g_free(aviso);
+        encerrar_turno(c, TRUE);
+        return;
+    }
     /* Relatórios de tarefa incluem evidências, limitações e trilha de execução.
      * Para pesquisa web, a apresentação dos dados e das fontes já foi mostrada
      * no resultado; manter só a conclusão deixa a resposta final fácil de ler. */
