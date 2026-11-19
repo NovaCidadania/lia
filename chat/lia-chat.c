@@ -109,6 +109,7 @@ typedef struct {
     GDataInputStream *entrada_stdin; /* só usado quando !interativo (ver main()) */
     Term *term;             /* != NULL só no modo interativo humano (tty e sem --json): chat/terminal.c */
     GString *buffer_saida;  /* saida_linha acumula; flush_saida escreve tudo de uma vez acima da região viva */
+    GString *historico_conversa; /* memória curta, só em RAM; enviada como contexto para a próxima pergunta */
     GMainLoop *loop;
 
     char *socket_caminho;
@@ -151,6 +152,7 @@ typedef struct {
     int fase;                      /* Fase: o que a linha de status mostra */
     gboolean turno_espera_resposta;/* a execução atual veio de uma proposta: um 'resposta' final ainda vai chegar */
     gboolean turno_web;            /* pesquisa já exibida; oculta relatório técnico redundante */
+    gboolean ocultar_status_pronto; /* após pesquisa web, deixa a região de status vazia */
     char *ferramenta_turno;        /* ferramenta do turno atual (para a linha de status) */
     gint64 turno_inicio_us;        /* pergunta enviada */
     gint64 t_proposta_ms, t_execucao_ms, t_resposta_ms; /* tempos informados pelo daemon; -1 = etapa não ocorreu */
@@ -245,10 +247,33 @@ static char *sanear(const char *s)
     return g_string_free(out, FALSE);
 }
 
+static void historico_adicionar(LiaChat *c, const char *papel, const char *texto)
+{
+    if (!c->historico_conversa || !texto || !*texto) return;
+    char *seguro = sanear(texto);
+    glong n_chars = g_utf8_strlen(seguro, -1);
+    if (n_chars > 1200) {
+        char *curto = g_utf8_substring(seguro, 0, 1200);
+        g_free(seguro);
+        seguro = g_strconcat(curto, " …", NULL);
+        g_free(curto);
+    }
+    g_string_append_printf(c->historico_conversa, "%s: %s\n", papel, seguro);
+    g_free(seguro);
+    if (c->historico_conversa->len > 8000) {
+        gsize descartar = c->historico_conversa->len - 6000;
+        char *quebra = memchr(c->historico_conversa->str + descartar, '\n',
+                              c->historico_conversa->len - descartar);
+        if (quebra) g_string_erase(c->historico_conversa, 0,
+                                   (gssize)(quebra - c->historico_conversa->str) + 1);
+    }
+}
+
 /* ---- fase atual -> linha de status (só estados operacionais observáveis) ---- */
 static void definir_fase(LiaChat *c, Fase f)
 {
     gboolean continua = c->fase != FASE_OCIOSO && f != FASE_OCIOSO; /* mesmo turno: o relógio não reinicia */
+    if (f != FASE_OCIOSO) c->ocultar_status_pronto = FALSE;
     c->fase = f;
     if (!c->term) return;
     char *txt = NULL;
@@ -274,7 +299,8 @@ static void definir_fase(LiaChat *c, Fase f)
         break;
     case FASE_GERANDO_RESPOSTA: txt = g_strdup(c->tarefa_objetivo ? "finalizando · comparando evidências" : "gerando resposta final"); break;
     default:
-        txt = g_strdup_printf("conectado · pronto · %s · /help",
+        txt = c->ocultar_status_pronto ? g_strdup("") :
+              g_strdup_printf("conectado · pronto · %s · /help",
                               c->autopilot ? "leituras seguras automáticas" : "modo manual (toda ferramenta pede /plano)");
         break;
     }
@@ -382,6 +408,7 @@ static void ms_legivel(char *dst, gsize cap, gint64 ms)
  * tempos reais de cada etapa. */
 static void encerrar_turno(LiaChat *c, gboolean concluido)
 {
+    c->ocultar_status_pronto = c->turno_web;
     if (concluido && c->turno_inicio_us && !c->turno_web) {
         gint64 total = (g_get_monotonic_time() - c->turno_inicio_us) / 1000;
         char t[32], a[32], b[32], d[32];
@@ -571,6 +598,10 @@ static void enviar_perguntar(LiaChat *c, const char *mensagem)
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "mensagem");
     json_builder_add_string_value(b, mensagem);
+    if (c->historico_conversa && c->historico_conversa->len) {
+        json_builder_set_member_name(b, "contexto");
+        json_builder_add_string_value(b, c->historico_conversa->str);
+    }
     if (c->arquivos->len > 0) {
         json_builder_set_member_name(b, "arquivos");
         json_builder_begin_array(b);
@@ -589,6 +620,7 @@ static void enviar_perguntar(LiaChat *c, const char *mensagem)
     char *id = enviar(c, LIA_MSG_PERGUNTAR, b, NULL, 0, FALSE);
     g_object_unref(b);
     if (id) {
+        historico_adicionar(c, "Usuário", mensagem);
         c->pergunta_em_andamento = TRUE;
         c->pergunta_abandonada_localmente = FALSE;
         c->turno_inicio_us = g_get_monotonic_time();
@@ -1089,6 +1121,8 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
         ? json_para_texto(json_object_get_member(m->dados, "dados")) : NULL;
     char *apres = apresentacao ? sanear(apresentacao) : NULL;
     if (apres) g_strchomp(apres);
+    if (!campo_bool(m->dados, "tarefa", FALSE) && sucesso && apres && *apres)
+        historico_adicionar(c, "Lia", apres);
 
     if (campo_bool(m->dados, "tarefa", FALSE)) {
         /* resultado da TAREFA inteira: os dados de cada passo já foram
@@ -1345,6 +1379,7 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
      * monta o plano e, se por qualquer motivo o plano exigir aprovação,
      * para e pergunta do mesmo jeito (tratar_msg_plano). */
     gboolean vai_auto = ferramenta && c->autopilot && auto_ok && !requer;
+    if (!ferramenta && *texto) historico_adicionar(c, "Lia", texto);
 
     if (c->term) {
         if (intencao)
@@ -1415,22 +1450,7 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
         encerrar_turno(c, TRUE);
         return;
     }
-    /* Relatórios de tarefa incluem evidências, limitações e trilha de execução.
-     * Para pesquisa web, a apresentação dos dados e das fontes já foi mostrada
-     * no resultado; manter só a conclusão deixa a resposta final fácil de ler. */
-    if (resposta_web) {
-        char *conclusao = strstr(texto, "Conclusão:");
-        if (conclusao) {
-            conclusao += strlen("Conclusão:");
-            while (*conclusao == ' ') conclusao++;
-            char *fim = strstr(conclusao, "\n\n");
-            if (!fim) fim = strchr(conclusao, '\n');
-            if (fim) *fim = '\0';
-            char *curta = g_strdup_printf("%s", conclusao);
-            g_free(texto);
-            texto = curta;
-        }
-    }
+    historico_adicionar(c, "Lia", texto);
     if (c->term && strstr(texto, "\nEvidências")) {
         /* relatório de tarefa: destaca o título de cada seção */
         static const char *const SECOES[] = { "RESULTADO ", "Motivo:", "Dados ausentes:", "Conclusão:", "Evidências", "Limitações:",
@@ -1905,6 +1925,7 @@ int main(int argc, char **argv)
         c.backend_assumido = g_strdup("mock");
     c.arquivos = g_ptr_array_new_with_free_func((GDestroyNotify)arquivo_anexo_liberar);
     c.buffer_saida = g_string_new(NULL);
+    c.historico_conversa = g_string_new(NULL);
 
     lia_sessao_iniciar(&c.sessao);
     c.sessao.modo_leitura = FALSE; /* lia-chat PODE enviar 'aprovar' — é o próprio ponto desta CLI */
@@ -1957,6 +1978,7 @@ int main(int argc, char **argv)
     lia_sessao_liberar(&c.sessao);
     g_ptr_array_free(c.arquivos, TRUE);
     g_string_free(c.buffer_saida, TRUE);
+    g_string_free(c.historico_conversa, TRUE);
     if (c.proposta_pendente) proposta_pendente_liberar(c.proposta_pendente);
     if (c.plano_dados_pendente) json_object_unref(c.plano_dados_pendente);
     g_free(c.plano_id_pendente);

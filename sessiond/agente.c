@@ -667,12 +667,33 @@ static const char *const LIMITACOES_MALWARE[] = {
     NULL,
 };
 
-static char *web_parametros(const char *pedido)
+static char *web_parametros(const char *pedido, const char *contexto)
 {
+    const gsize limite = 512;
+    const char *solicitacao = pedido ? pedido : "";
+    char *normalizado = normalizar_pedido(solicitacao);
+    gboolean pergunta_proxima = strstr(normalizado, " proxima ") || strstr(normalizado, " proximo ");
+    g_free(normalizado);
+    const char *inicio_contexto = contexto ? contexto : "";
+    const char *ultima_pergunta = g_strrstr(inicio_contexto, "Usuário: ");
+    if (ultima_pergunta) inicio_contexto = ultima_pergunta + strlen("Usuário: ");
+    gsize n_contexto = strcspn(inicio_contexto, "\n");
+    gsize espaco = limite > strlen(solicitacao) + 1 ? limite - strlen(solicitacao) - 1 : 0;
+    if (n_contexto > espaco) {
+        inicio_contexto += n_contexto - espaco;
+        while (*inicio_contexto && !g_ascii_isspace(*inicio_contexto)) inicio_contexto++;
+        n_contexto = strcspn(inicio_contexto, "\n");
+    }
+    GString *q = g_string_new(NULL);
+    if (n_contexto) { g_string_append(q, inicio_contexto); g_string_append_c(q, ' '); }
+    g_string_append(q, solicitacao);
+    if (pergunta_proxima && q->len + strlen(" próxima edição datas calendário") < limite)
+        g_string_append(q, " próxima edição datas calendário");
+    char *consulta = g_string_free(q, FALSE);
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "consulta");
-    json_builder_add_string_value(b, pedido ? pedido : "");
+    json_builder_add_string_value(b, consulta);
     json_builder_set_member_name(b, "limite");
     json_builder_add_int_value(b, 5);
     json_builder_end_object(b);
@@ -680,7 +701,7 @@ static char *web_parametros(const char *pedido)
     JsonGenerator *g = json_generator_new();
     json_generator_set_root(g, n);
     char *s = json_generator_to_data(g, NULL);
-    json_node_unref(n); g_object_unref(g); g_object_unref(b);
+    json_node_unref(n); g_object_unref(g); g_object_unref(b); g_free(consulta);
     return s;
 }
 
@@ -698,7 +719,8 @@ static char *web_url_parametros(const char *pedido)
     char *s = json_generator_to_data(g, NULL); json_node_unref(n); g_object_unref(g); g_object_unref(b); return s;
 }
 
-AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteCompat *compat)
+AgentePlano *agente_planejar_com_contexto(const char *pedido, const char *contexto,
+                                          char **texto_direto, AgenteCompat *compat)
 {
     if (texto_direto) *texto_direto = NULL;
     if (compat) *compat = COMPAT_COMPATIVEL;
@@ -719,10 +741,14 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
     gboolean cpu = tem_algum(t, L(" cpu", " processador", " processamento"));
     gboolean memoria = tem_algum(t, L(" memoria", " ram "));
     gboolean malware = tem_algum(t, L(" virus", " malware", " infectad", " trojan", " ransomware", " rootkit", " spyware", " suspeit", " invadid", " hackead"));
-    gboolean web = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " fonte", " site", " online", " mercado",
-                                   " lancamento", " estreia", " data de lancamento", " quando sera lancado", " quando sera lancada",
-                                   " cust", " apartamento", " imovel", " aluguel", " quem foi", " biografia",
-                                   " copa do mundo", " proxima copa", " mundial")) ||
+    gboolean local = cpu || memoria || malware ||
+                     tem_algum(t, L(" processo", " inventario", " dispositivo", " hardware", " computador", " pc ",
+                                    " maquina", " sistema operacional", " kernel", " uptime", " swap", " carga media"));
+    gboolean pergunta = (pedido && strchr(pedido, '?')) ||
+                        tem_algum(t, L(" qual ", " quem ", " quando ", " onde ", " quanto ", " como ", " por que ", " o que "));
+    gboolean pedido_informativo = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " fonte", " site", " online", " mercado",
+                                                 " explique ", " fale sobre ", " conte sobre ", " informe sobre "));
+    gboolean web = pedido_informativo || (pergunta && !local) ||
                    (pedido && (strstr(pedido, "https://") || strstr(pedido, "http://")));
 
     if (malware) {
@@ -765,7 +791,7 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
         gboolean abrir = url_params != NULL;
         p = agente_plano_novo(abrir ? "abrir a fonte HTTPS indicada e extrair seu texto" : "pesquisar na internet e retornar fontes",
                               abrir ? "abrir_web" : "pesquisa_web");
-        char *params = abrir ? url_params : web_parametros(pedido);
+        char *params = abrir ? url_params : web_parametros(pedido, contexto);
         agente_plano_acrescentar(p, NULL, abrir ? "web.abrir" : "web.pesquisar", params, NULL,
                                  abrir ? "ler a página pública indicada" : "buscar fontes atuais na internet",
                                  abrir ? L("conteudo_web") : L("resultados_web"), 20000, FALSE);
@@ -822,6 +848,11 @@ AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteComp
     }
     g_free(t);
     return p;
+}
+
+AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteCompat *compat)
+{
+    return agente_planejar_com_contexto(pedido, NULL, texto_direto, compat);
 }
 
 /* -------------------------------------------------------- execução/ordem --- */

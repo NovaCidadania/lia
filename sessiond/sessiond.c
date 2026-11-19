@@ -1283,6 +1283,7 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
         return;
     }
     const char *mensagem = campo_string(m->dados, "mensagem");
+    const char *contexto_conversa = campo_string(m->dados, "contexto");
     if (!mensagem || !*mensagem) {
         enviar_erro(c, m->id, "parametro_invalido", "'mensagem' ausente ou vazia");
         return;
@@ -1307,7 +1308,7 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
 
     char *manifesto_texto = construir_manifesto_texto();
     char *prompt_final = NULL;
-    PromptErro pe = prompt_montar(manifesto_texto, mensagem, arquivos, &prompt_final);
+    PromptErro pe = prompt_montar_com_contexto(manifesto_texto, mensagem, contexto_conversa, arquivos, &prompt_final);
     g_free(manifesto_texto);
     g_list_free_full(arquivos, (GDestroyNotify)prompt_arquivo_liberar);
 
@@ -1326,7 +1327,7 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
     {
         char *texto_direto = NULL;
         AgenteCompat compat = COMPAT_COMPATIVEL;
-        AgentePlano *plano = agente_planejar(mensagem, &texto_direto, &compat);
+        AgentePlano *plano = agente_planejar_com_contexto(mensagem, contexto_conversa, &texto_direto, &compat);
         if (plano || texto_direto) {
             char *pid = lia_novo_id("perg");
             char *erro = plano ? agente_plano_validar(plano, &AG_MANIFESTO) : NULL;

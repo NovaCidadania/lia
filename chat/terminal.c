@@ -138,6 +138,11 @@ static const char *const QUADROS_ASCII[] = { "|", "/", "-", "\\" };
 static void compor_status(Term *t, GString *out)
 {
     GString *bruto = g_string_new(NULL);
+    if (!t->ativo && (!t->status || !*t->status)) {
+        t->larg_status = 0;
+        g_string_free(bruto, TRUE);
+        return;
+    }
     if (t->ativo) {
         const char *quadro = t->utf8 ? QUADROS_UTF8[t->quadro % G_N_ELEMENTS(QUADROS_UTF8)]
                                      : QUADROS_ASCII[t->quadro % G_N_ELEMENTS(QUADROS_ASCII)];

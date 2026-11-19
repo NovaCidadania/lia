@@ -327,13 +327,10 @@ static int relevancia_resultado(const char *consulta, const char *titulo, const 
         if (achou_titulo) pontos += 3;
         else if (achou_resumo) pontos += 2;
     }
-    if ((strstr(q, "preco") || strstr(q, "cotacao") || strstr(q, "valor")) &&
-        strpbrk(s, "0123456789") &&
-        (strstr(s, " real") || strstr(s, " reais") || strstr(s, " brl") || strstr(s, " dolar") || strstr(s, " usd") || strstr(s, " r ")))
-        pontos += 6;
-    if ((strstr(q, "data") || strstr(q, "lancamento") || strstr(q, "quando")) &&
-        (strstr(s, " 20") || strstr(t, " 20")))
-        pontos += 4;
+    int sequencias_numericas = 0;
+    for (const char *p = s; *p; p++)
+        if (g_ascii_isdigit(*p) && (p == s || !g_ascii_isdigit(p[-1]))) sequencias_numericas++;
+    pontos += MIN(sequencias_numericas, 4) * 2;
     g_strfreev(palavras); g_free(q); g_free(t); g_free(s);
     return pontos;
 }

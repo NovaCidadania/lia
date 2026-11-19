@@ -240,24 +240,18 @@ static void render_dispositivos(GString *out, JsonArray *arr)
 
 static void render_web(GString *out, JsonObject *d)
 {
-    const char *consulta = texto(d, "consulta", NULL);
     const char *fonte = texto(d, "fonte", "fonte não informada");
-    gboolean tem_cotacao = lista(d, "cotacoes") && json_array_get_length(lista(d, "cotacoes")) > 0;
-    if (tem_cotacao) g_string_append(out, "Resultado da busca\n");
-    else g_string_append(out, "Resultados da busca\n");
-    if (consulta && *consulta) {
-        g_string_append(out, "Consulta: ");
-        anexar_seguro(out, consulta, 0);
-        g_string_append_c(out, '\n');
-    }
+    JsonArray *arr = lista(d, "resultados");
+    JsonArray *cotacoes = lista(d, "cotacoes");
+    guint n_cotacoes = cotacoes ? json_array_get_length(cotacoes) : 0;
+    guint n_resultados = arr ? json_array_get_length(arr) : 0;
     if (json_object_has_member(d, "conteudo")) {
         g_string_append(out, "Conteúdo da página:\n");
         anexar_seguro(out, texto(d, "conteudo", ""), 0);
         g_string_append_c(out, '\n');
     }
-    JsonArray *arr = lista(d, "resultados");
-    JsonArray *cotacoes = lista(d, "cotacoes");
-    for (guint i = 0; cotacoes && i < json_array_get_length(cotacoes); i++) {
+    if (n_cotacoes) g_string_append(out, "Resposta\n");
+    for (guint i = 0; i < n_cotacoes; i++) {
         JsonObject *c = json_array_get_object_element(cotacoes, i);
         double taxa = json_object_get_double_member(c, "valor");
         char valor[64];
@@ -272,29 +266,29 @@ static void render_web(GString *out, JsonObject *d)
         anexar_seguro(out, fonte, 0);
         g_string_append_c(out, '\n');
     }
-    guint n = arr ? json_array_get_length(arr) : 0;
-    for (guint i = 0; i < n; i++) {
-        JsonNode *el = json_array_get_element(arr, i);
-        if (JSON_NODE_TYPE(el) != JSON_NODE_OBJECT) continue;
-        JsonObject *o = json_node_get_object(el);
-        g_string_append_printf(out, "%u) ", i + 1);
-        anexar_seguro(out, texto(o, "titulo", "Resultado sem título"), 0);
-        g_string_append_c(out, '\n');
+    if (!n_cotacoes && n_resultados > 0) {
+        JsonNode *el = json_array_get_element(arr, 0);
+        JsonObject *o = JSON_NODE_TYPE(el) == JSON_NODE_OBJECT ? json_node_get_object(el) : NULL;
+        const char *titulo = texto(o, "titulo", "Resultado da pesquisa");
         const char *resumo = texto(o, "resumo", "");
-        if (*resumo && strcmp(resumo, "resultado encontrado na pesquisa web") != 0 &&
-            strcmp(resumo, "cotação estruturada com data de referência") != 0) {
-            g_string_append(out, "   Resumo: ");
+        g_string_append(out, "Resposta\n");
+        if (*resumo && strcmp(resumo, "resultado encontrado na pesquisa web") != 0)
             anexar_seguro(out, resumo, 0);
-            g_string_append_c(out, '\n');
-        }
+        else
+            anexar_seguro(out, titulo, 0);
+        g_string_append_c(out, '\n');
+        g_string_append(out, "Fonte: ");
+        anexar_seguro(out, titulo, 0);
+        g_string_append_c(out, '\n');
         const char *url = texto(o, "url", NULL);
         if (url && *url) {
-            g_string_append(out, "   Fonte: ");
+            g_string_append(out, "Link: ");
             anexar_seguro(out, url, 0);
             g_string_append_c(out, '\n');
         }
     }
-    if (n == 0) g_string_append(out, "Nenhum resultado estruturado foi encontrado.\n");
+    if (!n_cotacoes && n_resultados == 0)
+        g_string_append(out, "A busca não encontrou uma resposta estruturada.\n");
 }
 
 static void render_generico(GString *out, JsonNode *n)

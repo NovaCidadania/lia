@@ -154,6 +154,10 @@ char *agente_plano_para_json(const AgentePlano *p, gboolean com_estado);
  *     (segue o fluxo de consulta simples).
  * *compat sempre preenchido. */
 AgentePlano *agente_planejar(const char *pedido, char **texto_direto, AgenteCompat *compat);
+/* Variante que usa turnos anteriores apenas como contexto para referências
+ * e expansão de consultas web; o pedido atual continua sendo a ação principal. */
+AgentePlano *agente_planejar_com_contexto(const char *pedido, const char *contexto,
+                                           char **texto_direto, AgenteCompat *compat);
 
 /* Passos que podem começar agora: AGUARDANDO com todas as dependências em
  * SUCESSO. Marca como PULADO (e conta em *pulados) o passo cuja dependência

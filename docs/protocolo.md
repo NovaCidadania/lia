@@ -54,7 +54,7 @@ Uma versão incompatível do protocolo é rejeitada explicitamente (`erro` com `
 | `aprovar` | `{ "plano_id": "...", "decisao": "aprovar" \| "rejeitar", "escopo": "uma_vez" \| "sessao" }` | Resposta humana a um `plano` pendente. |
 | `cancelar` | `{ "execucao_id": "..." }` | Pede cancelamento cooperativo de uma execução em andamento. |
 | `assinar` | `{ "canais": ["auditoria", "execucao"] }` | Assina um fluxo de eventos (ex.: a GUI assina `auditoria` para mostrar o histórico ao vivo). |
-| `perguntar` | `{ "mensagem": "...", "arquivos"?: [{"caminho","conteudo"}] }` | Fala com o modelo (seção 9) — nunca aprova nem executa nada por si só. Sempre aceita, independente da máquina de estados de execução acima. |
+| `perguntar` | `{ "mensagem": "...", "contexto"?: "...", "arquivos"?: [{"caminho","conteudo"}] }` | Fala com o modelo (seção 9) — nunca aprova nem executa nada por si só. `contexto` é histórico opcional, não confiável e serve apenas para resolver referências; `mensagem` continua sendo o pedido atual. |
 
 ### Daemon → cliente
 

@@ -56,6 +56,9 @@ const char *prompt_erro_texto(PromptErro e);
  * não de fora). */
 PromptErro prompt_montar(const char *manifesto_texto, const char *pedido_usuario,
                           GList *arquivos /* PromptArquivo* */, char **prompt_saida);
+PromptErro prompt_montar_com_contexto(const char *manifesto_texto, const char *pedido_usuario,
+                                      const char *contexto_conversa,
+                                      GList *arquivos /* PromptArquivo* */, char **prompt_saida);
 
 /* Acrescenta, ao final de um prompt já montado por prompt_montar, uma
  * seção CONFIÁVEL de correção: usada para a única nova tentativa quando a
