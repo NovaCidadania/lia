@@ -255,7 +255,7 @@ static char *extrair_url(const char *href)
 static void adicionar_resultados(JsonBuilder *b, const char *html, int limite)
 {
     GError *erro = NULL;
-    GRegex *links = g_regex_new("(?is)<a[^>]*class=[\\\"']result__a[\\\"'][^>]*href=[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a>", 0, 0, &erro);
+    GRegex *links = g_regex_new("(?is)<a[^>]*class=[\\\"'][^\\\"']*result__a[^\\\"']*[\\\"'][^>]*href=[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a>.*?<a[^>]*class=[\\\"'][^\\\"']*result__snippet[^\\\"']*[\\\"'][^>]*>(.*?)</a>", 0, 0, &erro);
     if (erro) { g_error_free(erro); return; }
     GMatchInfo *mi = NULL;
     g_regex_match(links, html, 0, &mi);
@@ -263,17 +263,19 @@ static void adicionar_resultados(JsonBuilder *b, const char *html, int limite)
     while (n < limite && g_match_info_matches(mi)) {
         char *href = g_match_info_fetch(mi, 1);
         char *titulo_html = g_match_info_fetch(mi, 2);
+        char *resumo_html = g_match_info_fetch(mi, 3);
         char *url = extrair_url(href);
         char *titulo = html_limpar(titulo_html);
+        char *resumo = html_limpar(resumo_html);
         if (url && *titulo) {
             json_builder_begin_object(b);
             json_builder_set_member_name(b, "titulo"); json_builder_add_string_value(b, titulo);
             json_builder_set_member_name(b, "url"); json_builder_add_string_value(b, url);
-            json_builder_set_member_name(b, "resumo"); json_builder_add_string_value(b, "resultado encontrado na pesquisa web");
+            json_builder_set_member_name(b, "resumo"); json_builder_add_string_value(b, resumo);
             json_builder_end_object(b);
             n++;
         }
-        g_free(href); g_free(titulo_html); g_free(url); g_free(titulo);
+        g_free(href); g_free(titulo_html); g_free(resumo_html); g_free(url); g_free(titulo); g_free(resumo);
         g_match_info_next(mi, NULL);
     }
     g_match_info_free(mi); g_regex_unref(links);

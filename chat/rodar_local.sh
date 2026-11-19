@@ -64,7 +64,7 @@ fi
 OLLAMA_HOST="${LIA_OLLAMA_HOST:-127.0.0.1}"
 OLLAMA_PORTA="${LIA_OLLAMA_PORTA:-11434}"
 LLAMACPP_HOST="${LIA_LLAMACPP_HOST:-127.0.0.1}"
-LLAMACPP_PORTA="${LIA_LLAMACPP_PORTA:-8080}"
+LLAMACPP_PORTA="${LIA_LLAMACPP_PORTA:-8774}"
 
 # detectar_ollama: 0 se http://$OLLAMA_HOST:$OLLAMA_PORTA tiver ao menos
 # um modelo baixado (/api/tags), 1 senão. Nunca assume: se 'curl' não
@@ -151,15 +151,21 @@ SOCK="$TEST_HOME/.lia/run/session.sock"
 
 REBUILD="${LIA_CHAT_REBUILD:-auto}"
 case "$REBUILD" in auto|always|never) : ;; *) echo "LIA_CHAT_REBUILD deve ser auto, always ou never" >&2; exit 2 ;; esac
-if [ "$REBUILD" = always ] || [ ! -x "$RAIZ/build/lia-chat" ] || [ ! -x "$RAIZ/build/lia-sessiond" ]; then
-    if [ "$REBUILD" = never ]; then
+if [ "$REBUILD" = never ]; then
+    if [ ! -x "$RAIZ/build/lia-chat" ] || [ ! -x "$RAIZ/build/lia-sessiond" ]; then
         echo "binários precompilados ausentes; execute make chat sessiond ou remova LIA_CHAT_REBUILD=never" >&2
         exit 1
     fi
-    echo "binários ausentes/desatualização solicitada: compilando (make chat sessiond)..."
-    (cd "$RAIZ" && make chat sessiond) || exit 1
-else
     echo "usando binários precompilados: build/lia-chat e build/lia-sessiond"
+else
+    # Sempre chama o make em modo auto: ele recompila só alvos com fontes ou
+    # dependências mais novos e não deixa um binário antigo mascarar mudanças.
+    if [ "$REBUILD" = always ]; then
+        echo "recompilação solicitada: make chat sessiond..."
+    else
+        echo "verificando fontes e compilando se necessário (make chat sessiond)..."
+    fi
+    (cd "$RAIZ" && make chat sessiond) || exit 1
 fi
 
 echo "HOME de teste: $TEST_HOME (executor=$EXECUTOR, modelo=$MODELO, log em $TEST_HOME/sessiond.log)"

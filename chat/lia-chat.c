@@ -1392,9 +1392,27 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
     char *aviso = campo_str(m->dados, "aviso") ? sanear(campo_str(m->dados, "aviso")) : NULL;
     const char *origem = campo_str(m->dados, "origem");
     gboolean deterministica = origem && !strcmp(origem, "deterministica");
+    gboolean resposta_web = (c->ferramenta_turno && g_str_has_prefix(c->ferramenta_turno, "web.")) ||
+                            (strstr(texto, "Evidências") && strstr(texto, "web.pesquisar"));
     c->t_resposta_ms = campo_int(m->dados, "tempo_modelo_ms", -1);
     parar_progresso_pergunta(c);
     gboolean extrativa = origem && !strcmp(origem, "modelo_extrativa");
+    /* Relatórios de tarefa incluem evidências, limitações e trilha de execução.
+     * Para pesquisa web, a apresentação dos dados e das fontes já foi mostrada
+     * no resultado; manter só a conclusão deixa a resposta final fácil de ler. */
+    if (resposta_web) {
+        char *conclusao = strstr(texto, "Conclusão:");
+        if (conclusao) {
+            conclusao += strlen("Conclusão:");
+            while (*conclusao == ' ') conclusao++;
+            char *fim = strstr(conclusao, "\n\n");
+            if (!fim) fim = strchr(conclusao, '\n');
+            if (fim) *fim = '\0';
+            char *curta = g_strdup_printf("%s", conclusao);
+            g_free(texto);
+            texto = curta;
+        }
+    }
     if (c->term && strstr(texto, "\nEvidências")) {
         /* relatório de tarefa: destaca o título de cada seção */
         static const char *const SECOES[] = { "RESULTADO ", "Motivo:", "Dados ausentes:", "Conclusão:", "Evidências", "Limitações:",
@@ -1419,16 +1437,16 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
         texto = g_string_free(o, FALSE);
     }
     if (c->term) {
-        saida_linha(c, "%sLia:%s %s", sgr(c, EST_FORTE), sgr0(c), texto);
-        if (origem && !strcmp(origem, "deterministica+modelo"))
+        saida_linha(c, "%s%s:%s %s", sgr(c, EST_FORTE), resposta_web ? "Resposta" : "Lia", sgr0(c), texto);
+        if (!resposta_web && origem && !strcmp(origem, "deterministica+modelo"))
             saida_linha(c, "%s  · relatório montado pelo daemon com os dados reais; a \"leitura do modelo\" ao final foi conferida contra eles%s", sgr(c, EST_FRACO), sgr0(c));
-        else if (deterministica)
+        else if (deterministica && !resposta_web)
             saida_linha(c, "%s  · resposta montada pelo daemon só com os dados reais acima (sem texto livre do modelo)%s", sgr(c, EST_FRACO), sgr0(c));
-        else if (extrativa)
+        else if (extrativa && !resposta_web)
             saida_linha(c, "%s  · o modelo escolheu quais linhas respondem; o texto foi copiado dos dados reais%s", sgr(c, EST_FRACO), sgr0(c));
-        else
+        else if (!resposta_web)
             saida_linha(c, "%s  · resumo do modelo, conferido contra os dados reais%s", sgr(c, EST_FRACO), sgr0(c));
-        if (aviso) saida_linha(c, "%s  ! %s%s", sgr(c, EST_AVISO), aviso, sgr0(c));
+        if (aviso && !resposta_web) saida_linha(c, "%s  ! %s%s", sgr(c, EST_AVISO), aviso, sgr0(c));
     } else {
         saida_linha(c, deterministica ? "[resposta, determinística] %s" : (extrativa ? "[resposta, extrativa] %s" :
                     (origem && !strcmp(origem, "deterministica+modelo")) ? "[resposta, determinística+modelo] %s" : "[modelo, resumo] %s"), texto);
