@@ -31,6 +31,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -46,6 +47,7 @@
 #include "roteador.h"
 #include "apresentacao.h"
 #include "agente.h"
+#include "sintese_web.h"
 
 #define LIA_SESSIOND_LINHA_MAX 65536
 #define LIA_SESSIOND_CHUNK 4096
@@ -133,6 +135,7 @@ static void enviar_proposta_tarefa(Cliente *c, const char *pergunta_id, const Ag
                                     const char *texto, const char *origem, const char *veredito, const char *motivo,
                                     gint64 tempo_ms, int tentativas);
 static void guardar_plano_proposto(Cliente *c, AgentePlano *plano, const char *pergunta_id, const char *pedido);
+static void aquecer_modelo(void);
 static Daemon *g_daemon_para_auditoria; /* único daemon neste processo */
 static const Executor *g_executor;
 static const ModeloBackend *g_modelo;
@@ -2003,6 +2006,170 @@ static void ao_comentario_modelo(gpointer ctx, const ModeloResposta *r)
     comentario_ctx_liberar(cc);
 }
 
+/* ---- resposta final de pesquisas web (sessiond/sintese_web.h) ---- */
+#define LIA_MODELO_TOKENS_SINTESE_WEB 520
+
+typedef struct {
+    Cliente *c;
+    char *pergunta_id, *modelo_id, *pedido;
+    GPtrArray *fontes; /* FonteWeb* */
+    gint64 inicio_us;
+} SinteseCtx;
+
+static void sintese_ctx_liberar(SinteseCtx *sc)
+{
+    cliente_unref(sc->c);
+    g_free(sc->pergunta_id);
+    g_free(sc->modelo_id);
+    g_free(sc->pedido);
+    if (sc->fontes) g_ptr_array_unref(sc->fontes);
+    g_free(sc);
+}
+
+/* andamento da escrita da resposta: 'progresso' SEM execucao_id (a coleta
+ * já terminou; isto é só o modelo escrevendo), com o pergunta_id */
+static void ao_sintese_progresso(gpointer ctx, gint64 tokens)
+{
+    SinteseCtx *sc = ctx;
+    Cliente *c = sc->c;
+    if (c->fechado || !c->resumo_pendente_id || strcmp(c->resumo_pendente_id, sc->modelo_id) != 0) return;
+    gint64 seg = (g_get_monotonic_time() - sc->inicio_us) / G_USEC_PER_SEC;
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "pergunta_id");
+    json_builder_add_string_value(b, sc->pergunta_id);
+    json_builder_set_member_name(b, "fracao");
+    json_builder_add_double_value(b, MIN(1.0, (double)tokens / LIA_MODELO_TOKENS_SINTESE_WEB));
+    char *msg = g_strdup_printf("organizando a resposta: %" G_GINT64_FORMAT " tokens escritos em %" G_GINT64_FORMAT " s", tokens, seg);
+    json_builder_set_member_name(b, "mensagem");
+    json_builder_add_string_value(b, msg);
+    g_free(msg);
+    json_builder_set_member_name(b, "sintese");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "tokens");
+    json_builder_add_int_value(b, tokens);
+    json_builder_set_member_name(b, "max_tokens");
+    json_builder_add_int_value(b, LIA_MODELO_TOKENS_SINTESE_WEB);
+    json_builder_set_member_name(b, "fontes");
+    json_builder_add_int_value(b, sc->fontes->len);
+    json_builder_end_object(b);
+    json_builder_end_object(b);
+    char *id = lia_novo_id("msg");
+    char *linha = lia_msg_montar(LIA_MSG_PROGRESSO, id, NULL, b);
+    g_free(id);
+    g_object_unref(b);
+    escrever_linha(c, linha);
+}
+
+static void ao_sintese_web(gpointer ctx, const ModeloResposta *r)
+{
+    SinteseCtx *sc = ctx;
+    Cliente *c = sc->c;
+    gboolean valido = !c->fechado && c->resumo_pendente_id && strcmp(c->resumo_pendente_id, sc->modelo_id) == 0;
+    if (valido) {
+        g_clear_pointer(&c->resumo_pendente_id, g_free);
+        gint64 tempo_ms = (g_get_monotonic_time() - sc->inicio_us) / 1000;
+        char *motivo = NULL;
+        int descartados = 0;
+        char *texto = r->sucesso ? sintese_web_renderizar(r->resposta_texto, sc->fontes, sc->pedido, &descartados, &motivo) : NULL;
+        if (g_strcmp0(g_getenv("LIA_SESSIOND_DEPURAR_SINTESE"), "1") == 0)
+            g_print("lia-sessiond: [depuração] saída bruta da síntese: %.3000s\n", r->resposta_texto ? r->resposta_texto : "(nenhuma)");
+        const char *origem = "modelo_sintese";
+        char *aviso = NULL;
+        if (!texto) {
+            /* o modelo falhou ou nada da síntese conferiu: resposta extrativa,
+             * ainda conclusiva e organizada, só com frases das fontes */
+            char *nota = r->sucesso
+                ? g_strdup_printf("a síntese do modelo não pôde ser usada (%s)", motivo ? motivo : "inválida")
+                : g_strdup_printf("o modelo não respondeu (%s: %s)", r->erro_codigo ? r->erro_codigo : "erro",
+                                  r->erro_mensagem ? r->erro_mensagem : "sem detalhe");
+            texto = sintese_web_extrativa(sc->fontes, sc->pedido, nota);
+            aviso = nota;
+            origem = "extrativa";
+        } else if (motivo) {
+            aviso = g_strdup_printf("parte da síntese do modelo foi descartada por não conferir com as fontes: %s", motivo);
+        }
+        g_print("lia-sessiond: pergunta %s: resposta web (%s) em %" G_GINT64_FORMAT " ms, %u fonte(s), %d item(ns) descartado(s)%s%s\n",
+                sc->pergunta_id, origem, tempo_ms, sc->fontes->len, descartados, motivo ? " — " : "", motivo ? motivo : "");
+        enviar_resposta_final(c, sc->pergunta_id, texto, origem, TRUE, aviso, tempo_ms);
+        g_free(texto);
+        g_free(aviso);
+        g_free(motivo);
+    }
+    sintese_ctx_liberar(sc);
+}
+
+/* TRUE se tratou (e enviou, ou agendou) a resposta final desta tarefa web */
+static gboolean tarefa_resposta_web(Tarefa *t, Cliente *c, const char *pergunta_id, const char *pedido)
+{
+    if (strcmp(t->plano->intencao, "pesquisa_web") != 0 && strcmp(t->plano->intencao, "abrir_web") != 0)
+        return FALSE;
+    GPtrArray *dados = g_ptr_array_new();
+    const char *erro = NULL;
+    for (guint i = 0; i < t->plano->passos->len; i++) {
+        AgentePasso *s = g_ptr_array_index(t->plano->passos, i);
+        if (!g_str_has_prefix(s->ferramenta, "web.")) continue;
+        if (s->estado == PASSO_SUCESSO && s->dados_json) g_ptr_array_add(dados, s->dados_json);
+        else if (s->erro && !erro) erro = s->erro;
+    }
+    g_ptr_array_add(dados, NULL);
+    const char *const *dj = (const char *const *)dados->pdata;
+    char *cotacao = sintese_web_cotacao(dj);
+    if (cotacao) {
+        g_print("lia-sessiond: pergunta %s: resposta web (cotação estruturada, sem modelo)\n", pergunta_id);
+        enviar_resposta_final(c, pergunta_id, cotacao, "deterministica", TRUE, NULL, 0);
+        g_free(cotacao);
+        g_ptr_array_free(dados, TRUE);
+        return TRUE;
+    }
+    GPtrArray *fontes = sintese_web_fontes(dj, pedido, SINTESE_WEB_MAX_FONTES);
+    g_ptr_array_free(dados, TRUE);
+    if (fontes->len == 0) {
+        char *texto = sintese_web_sem_dados(fontes, pedido, erro);
+        g_print("lia-sessiond: pergunta %s: resposta web sem fontes (%s)\n", pergunta_id, erro ? erro : "busca sem resultados");
+        enviar_resposta_final(c, pergunta_id, texto, "deterministica", TRUE,
+                              erro ? "a ferramenta web falhou; o erro real está na resposta" : "a busca não devolveu fontes utilizáveis", 0);
+        g_free(texto);
+        g_ptr_array_unref(fontes);
+        return TRUE;
+    }
+    if (!g_modelo || g_strcmp0(g_getenv("LIA_SESSIOND_SINTESE_WEB"), "extrativa") == 0) {
+        char *texto = sintese_web_extrativa(fontes, pedido, g_modelo ? "síntese pelo modelo desligada (LIA_SESSIOND_SINTESE_WEB=extrativa)" : NULL);
+        enviar_resposta_final(c, pergunta_id, texto, "extrativa", TRUE, NULL, 0);
+        g_free(texto);
+        g_ptr_array_unref(fontes);
+        return TRUE;
+    }
+    SinteseCtx *sc = g_new0(SinteseCtx, 1);
+    sc->c = cliente_ref(c);
+    sc->pergunta_id = g_strdup(pergunta_id);
+    sc->modelo_id = g_strdup_printf("%s-sintese", pergunta_id);
+    sc->pedido = g_strdup(pedido);
+    sc->fontes = fontes;
+    sc->inicio_us = g_get_monotonic_time();
+    char *fontes_texto = sintese_web_fontes_para_prompt(fontes);
+    GDateTime *agora = g_date_time_new_now_local();
+    char *hoje = g_date_time_format(agora, "%Y-%m-%d");
+    g_date_time_unref(agora);
+    char *prompt = prompt_montar_sintese_web(pedido, fontes_texto, hoje);
+    g_free(hoje);
+    g_free(fontes_texto);
+    g_free(c->resumo_pendente_id);
+    c->resumo_pendente_id = g_strdup(sc->modelo_id);
+    /* SEM saída restrita por esquema (o formato JSON vai no prompt): com
+     * "format", o Ollama só devolve o texto no fim — sem andamento nenhum
+     * durante ~1 min. O JSON é lido de forma tolerante (texto em volta,
+     * cercas de código, saída cortada): sessiond/sintese_web.c. */
+    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = LIA_MODELO_TOKENS_SINTESE_WEB, .resumo = TRUE,
+                        .progresso_cb = ao_sintese_progresso, .progresso_ctx = sc };
+    g_print("lia-sessiond: pergunta %s: sintetizando a resposta a partir de %u fonte(s)\n", pergunta_id, fontes->len);
+    char *id = g_strdup(sc->modelo_id);
+    g_modelo->perguntar(g_modelo, id, prompt, &op, ao_sintese_web, sc);
+    g_free(id);
+    g_free(prompt);
+    return TRUE;
+}
+
 static void tarefa_finalizar(Tarefa *t, AgenteVeredito v, char **ausentes, const char *motivo_extra)
 {
     if (t->encerrada) return;
@@ -2074,6 +2241,17 @@ static void tarefa_finalizar(Tarefa *t, AgenteVeredito v, char **ausentes, const
     char *evid = agente_evidencias_texto(t->plano);
     char *pedido = g_strdup(t->pedido ? t->pedido : t->plano->objetivo);
     tarefa_desligar_do_cliente(t);
+
+    /* pesquisa web: a resposta final é a síntese das fontes lidas (ou a
+     * cotação, ou o erro real) — nunca o relatório genérico da coleta */
+    if (!c->fechado && tarefa_resposta_web(t, c, pergunta_id, pedido)) {
+        g_free(pergunta_id);
+        g_free(relatorio);
+        g_free(evid);
+        g_free(pedido);
+        tarefa_unref(t);
+        return;
+    }
 
     if (quer_modelo) {
         ComentarioCtx *cc = g_new0(ComentarioCtx, 1);
@@ -2867,6 +3045,30 @@ static void escolher_modelo(void)
     }
 }
 
+static void ao_aquecimento(gpointer ctx, const ModeloResposta *r)
+{
+    gint64 *inicio = ctx;
+    g_print("lia-sessiond: aquecimento do modelo %s em %" G_GINT64_FORMAT " ms\n",
+            r->sucesso ? "concluído" : "falhou", (g_get_monotonic_time() - *inicio) / 1000);
+    g_free(inicio);
+}
+
+/* LIA_SESSIOND_AQUECER_MODELO=sim (chat/rodar_local.sh liga): carrega o
+ * modelo real na memória logo que o daemon sobe, em segundo plano, para a
+ * primeira pergunta não pagar o carregamento. Desligado por padrão (os
+ * testes com servidor falso não devem receber requisições extras). */
+static void aquecer_modelo(void)
+{
+    if (!g_modelo || !strcmp(g_modelo->nome_backend, "mock") ||
+        g_strcmp0(g_getenv("LIA_SESSIOND_AQUECER_MODELO"), "sim") != 0)
+        return;
+    gint64 *inicio = g_new(gint64, 1);
+    *inicio = g_get_monotonic_time();
+    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = 1, .resumo = TRUE };
+    g_print("lia-sessiond: aquecendo o modelo (%s) em segundo plano\n", g_modelo->nome_backend);
+    g_modelo->perguntar(g_modelo, "aquecimento", "Responda apenas: ok", &op, ao_aquecimento, inicio);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -2904,6 +3106,11 @@ int main(int argc, char **argv)
      * as duas coisas juntas sempre falham por desenho; a variável abaixo
      * existe só para os testes com ASan (testes/integration/), nunca para
      * uso normal, e não desliga nenhuma outra proteção do daemon. */
+    /* glibc reserva uma arena de malloc de 64 MiB (virtual) por thread que
+     * aloca memória; com RLIMIT_AS abaixo, as threads de abertura de fontes
+     * da pesquisa web (web/pesquisa.c) esgotavam o espaço de endereçamento.
+     * Duas arenas bastam para este daemon (laço principal + executor). */
+    mallopt(M_ARENA_MAX, 2);
     if (!g_getenv("LIA_SESSIOND_SEM_RLIMIT_PARA_TESTE")) {
         struct rlimit rl = { .rlim_cur = (rlim_t)LIA_SESSIOND_RLIMIT_AS_MB * 1024 * 1024,
                               .rlim_max = (rlim_t)LIA_SESSIOND_RLIMIT_AS_MB * 1024 * 1024 };
@@ -2913,6 +3120,7 @@ int main(int argc, char **argv)
 
     escolher_executor();
     escolher_modelo();
+    aquecer_modelo();
     const char *rot = g_getenv("LIA_SESSIOND_ROTEAMENTO");
     if (!rot || !*rot || strcmp(rot, "direto") == 0) {
         g_rota_direta = TRUE;

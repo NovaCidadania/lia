@@ -211,8 +211,23 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
             if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_INT64)
                 limite = json_node_get_int(n);
         }
+        /* abrir_fontes: quantas das melhores fontes abrir para extrair o
+         * trecho relevante (0..4, padrão 3) — sem isso a resposta final só
+         * teria títulos e resumos de busca, nunca o conteúdo das páginas */
+        gint64 abrir = 3;
+        if (parametros && json_object_has_member(parametros, "abrir_fontes")) {
+            JsonNode *n = json_object_get_member(parametros, "abrir_fontes");
+            if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_INT64)
+                abrir = json_node_get_int(n);
+        }
+        if (limite < 1 || limite > 10 || abrir < 0 || abrir > 4) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("parametro_invalido");
+            r->erro_mensagem = g_strdup("limite (1..10) ou abrir_fontes (0..4) fora da faixa");
+            return;
+        }
         char *erro_web = NULL;
-        char *dados_web = lia_web_pesquisar(consulta, (int)limite, &erro_web);
+        char *dados_web = lia_web_pesquisar(consulta, (int)limite, (int)abrir, &erro_web);
         if (!dados_web) {
             r->sucesso = FALSE;
             r->erro_codigo = g_strdup("rede_indisponivel");

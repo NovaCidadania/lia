@@ -89,4 +89,11 @@ char *prompt_montar_selecao(const char *pedido_usuario, const char *linhas_numer
  * conferida depois (sessiond.c, ao_comentario_modelo). */
 char *prompt_montar_interpretacao(const char *pedido_usuario, const char *relatorio);
 
+/* Prompt da SÍNTESE de uma pesquisa web (sessiond/sintese_web.h): o modelo
+ * recebe as fontes numeradas com o trecho lido de cada página, como DADO
+ * delimitado, e devolve JSON estruturado (resposta conclusiva, pontos com
+ * citações, linha do tempo, lacunas). 'hoje' (AAAA-MM-DD) situa perguntas
+ * sobre o "estado atual". */
+char *prompt_montar_sintese_web(const char *pedido_usuario, const char *fontes_numeradas, const char *hoje);
+
 #endif

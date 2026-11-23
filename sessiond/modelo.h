@@ -81,6 +81,11 @@ typedef struct {
     const char *esquema_json;
     int max_tokens;      /* limite de tokens gerados; <= 0 usa o padrão do backend */
     gboolean resumo;     /* TRUE: é o pedido de resumo final de um resultado já executado — nunca propõe ferramenta */
+    /* Opcional: andamento da geração (tokens recebidos até agora), no
+     * máximo uma vez por segundo, só para mostrar progresso. Backends sem
+     * streaming ignoram. Nunca chamado depois de concluido_cb. */
+    void (*progresso_cb)(gpointer ctx, gint64 tokens);
+    gpointer progresso_ctx;
 } ModeloOpcoes;
 
 typedef struct ModeloBackend ModeloBackend;

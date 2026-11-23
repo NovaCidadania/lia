@@ -1,5 +1,6 @@
 /* lia-sessiond — implementação de sessiond/agente.h. Ver o cabeçalho. */
 #include "agente.h"
+#include "roteador.h"
 #include <json-glib/json-glib.h>
 #include <math.h>
 #include <stdlib.h>
@@ -667,35 +668,124 @@ static const char *const LIMITACOES_MALWARE[] = {
     NULL,
 };
 
+/* palavra sem acento, minúscula, sem pontuação nas pontas */
+static char *palavra_normalizada(const char *w)
+{
+    char *n = normalizar_pedido(w);
+    g_strstrip(n);
+    return n;
+}
+
+/* Tira do começo do pedido o que é conversa, não assunto ("me conte com
+ * detalhes a", "pesquise na internet sobre o", "você pode me dizer") e a
+ * pontuação final — o buscador recebe só o assunto: "evolução da linguagem
+ * Haskell". Se não sobrar nada, devolve o pedido como veio. */
+static char *consulta_limpa(const char *pedido)
+{
+    static const char *const ENCHIMENTO[] = {
+        "me", "nos", "conte", "conta", "contar", "fale", "fala", "falar", "diga", "diz", "dizer", "explique", "explica",
+        "explicar", "descreva", "descreve", "mostre", "mostra", "resuma", "resume", "pesquise", "pesquisa", "pesquisar",
+        "busque", "busca", "buscar", "procure", "procura", "procurar", "encontre", "informe", "liste", "lista", "na", "no",
+        "em", "pela", "pelo", "internet", "web", "google", "sobre", "a", "o", "os", "as", "um", "uma", "com", "mais",
+        "detalhes", "detalhadamente", "detalhe", "detalhada", "detalhado", "brevemente", "rapidamente", "resumidamente",
+        "por", "favor", "lia", "voce", "vc", "pode", "poderia", "consegue", "conseguiria", "quero", "queria", "gostaria",
+        "de", "saber", "entao", "ok", "oi", "ola", "ei", "ai", "agora", "tudo", "que", "sabe", "sei", "algo", "coisa", NULL };
+    char **palavras = g_strsplit_set(pedido ? pedido : "", " \t\n", -1);
+    guint i = 0;
+    for (; palavras[i]; i++) {
+        if (!*palavras[i]) continue;
+        char *n = palavra_normalizada(palavras[i]);
+        gboolean enchimento = !*n || g_strv_contains(ENCHIMENTO, n);
+        g_free(n);
+        if (!enchimento) break;
+    }
+    GString *o = g_string_new(NULL);
+    for (guint k = i; palavras[k]; k++) {
+        if (!*palavras[k]) continue;
+        if (o->len) g_string_append_c(o, ' ');
+        g_string_append(o, palavras[k]);
+    }
+    g_strfreev(palavras);
+    /* "… por favor", pontuação final */
+    char *t = g_string_free(o, FALSE);
+    char *min = g_utf8_strdown(t, -1);
+    if (g_str_has_suffix(min, " por favor")) t[strlen(t) - strlen(" por favor")] = '\0';
+    g_free(min);
+    gsize n = strlen(t);
+    while (n && strchr("?.!,;: ", t[n - 1])) t[--n] = '\0';
+    if (n < 2) { g_free(t); t = g_strdup(pedido ? pedido : ""); g_strstrip(t); }
+    return t;
+}
+
+/* pergunta de continuação ("e a versão atual dela?", "quando isso
+ * aconteceu?"): curta e apoiada no assunto anterior */
+static gboolean pedido_de_continuacao(const char *limpa)
+{
+    char *t = normalizar_pedido(limpa);
+    gboolean anafora = g_str_has_prefix(t, " e ") ||
+        tem_algum(t, L(" ele ", " ela ", " eles ", " elas ", " isso ", " disso ", " nisso ", " isto ", " dele ", " dela ",
+                       " deles ", " delas ", " esse ", " essa ", " desse ", " dessa ", " este ", " deste ", " desta ",
+                       " mesmo ", " mesma ", " anterior ", " seu ", " sua ", " seus ", " suas "));
+    int palavras = 0;
+    for (const char *p = t; *p; p++) if (*p == ' ' && p[1]) palavras++;
+    g_free(t);
+    return anafora && palavras <= 7;
+}
+
+/* última pergunta da pessoa no contexto (linhas "Usuário: …" que o
+ * lia-chat envia), diferente do pedido atual; nunca texto da Lia */
+static char *pergunta_anterior(const char *contexto, const char *pedido)
+{
+    char *ultima = NULL;
+    char **linhas = g_strsplit(contexto ? contexto : "", "\n", -1);
+    for (guint i = 0; linhas[i]; i++) {
+        if (!g_str_has_prefix(linhas[i], "Usuário: ")) continue;
+        const char *q = linhas[i] + strlen("Usuário: ");
+        if (!*q || (pedido && !strcmp(q, pedido))) continue;
+        g_free(ultima);
+        ultima = g_strdup(q);
+    }
+    g_strfreev(linhas);
+    return ultima;
+}
+
 static char *web_parametros(const char *pedido, const char *contexto)
 {
-    const gsize limite = 512;
-    const char *solicitacao = pedido ? pedido : "";
-    char *normalizado = normalizar_pedido(solicitacao);
+    const gsize limite = 500;
+    char *consulta = consulta_limpa(pedido);
+    if (pedido_de_continuacao(consulta)) {
+        char *anterior = pergunta_anterior(contexto, pedido);
+        if (anterior) {
+            char *assunto = consulta_limpa(anterior);
+            if (strlen(assunto) + strlen(consulta) + 1 < limite) {
+                char *junto = g_strdup_printf("%s %s", assunto, consulta);
+                g_free(consulta);
+                consulta = junto;
+            }
+            g_free(assunto);
+            g_free(anterior);
+        }
+    }
+    char *normalizado = normalizar_pedido(consulta);
     gboolean pergunta_proxima = strstr(normalizado, " proxima ") || strstr(normalizado, " proximo ");
     g_free(normalizado);
-    const char *inicio_contexto = contexto ? contexto : "";
-    const char *ultima_pergunta = g_strrstr(inicio_contexto, "Usuário: ");
-    if (ultima_pergunta) inicio_contexto = ultima_pergunta + strlen("Usuário: ");
-    gsize n_contexto = strcspn(inicio_contexto, "\n");
-    gsize espaco = limite > strlen(solicitacao) + 1 ? limite - strlen(solicitacao) - 1 : 0;
-    if (n_contexto > espaco) {
-        inicio_contexto += n_contexto - espaco;
-        while (*inicio_contexto && !g_ascii_isspace(*inicio_contexto)) inicio_contexto++;
-        n_contexto = strcspn(inicio_contexto, "\n");
+    if (pergunta_proxima && strlen(consulta) + strlen(" próxima edição datas calendário") < limite) {
+        char *c2 = g_strconcat(consulta, " próxima edição datas calendário", NULL);
+        g_free(consulta);
+        consulta = c2;
     }
-    GString *q = g_string_new(NULL);
-    if (n_contexto) { g_string_append(q, inicio_contexto); g_string_append_c(q, ' '); }
-    g_string_append(q, solicitacao);
-    if (pergunta_proxima && q->len + strlen(" próxima edição datas calendário") < limite)
-        g_string_append(q, " próxima edição datas calendário");
-    char *consulta = g_string_free(q, FALSE);
+    if (strlen(consulta) > limite) {
+        const char *corte = g_utf8_find_prev_char(consulta, consulta + limite);
+        if (corte) consulta[corte - consulta] = '\0';
+    }
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "consulta");
     json_builder_add_string_value(b, consulta);
     json_builder_set_member_name(b, "limite");
-    json_builder_add_int_value(b, 5);
+    json_builder_add_int_value(b, 6);
+    json_builder_set_member_name(b, "abrir_fontes");
+    json_builder_add_int_value(b, 3);
     json_builder_end_object(b);
     JsonNode *n = json_builder_get_root(b);
     JsonGenerator *g = json_generator_new();
@@ -741,15 +831,59 @@ AgentePlano *agente_planejar_com_contexto(const char *pedido, const char *contex
     gboolean cpu = tem_algum(t, L(" cpu", " processador", " processamento"));
     gboolean memoria = tem_algum(t, L(" memoria", " ram "));
     gboolean malware = tem_algum(t, L(" virus", " malware", " infectad", " trojan", " ransomware", " rootkit", " spyware", " suspeit", " invadid", " hackead"));
-    gboolean local = cpu || memoria || malware ||
+    /* local: palavras de sistema, ou uma intenção que o roteador de
+     * consultas simples reconhece (rede/discos/PCI, kernel, recursos,
+     * programas instalados, espaço em disco...) — essas nunca vão para a web */
+    Rota rota;
+    roteador_classificar(pedido ? pedido : "", &rota);
+    gboolean local_roteador = rota.intencao && (rota.sem_ferramenta || rota.esclarecer ||
+                              (rota.ferramenta && (g_str_has_prefix(rota.ferramenta, "sistema.") || g_str_has_prefix(rota.ferramenta, "tools."))));
+    /* tarefas sobre ESTA máquina (lentidão, consumo anormal, relatório de
+     * recursos, estado do sistema): "por que o Python é lento?" é pergunta
+     * de conhecimento; "por que o sistema está lento?" é diagnóstico local */
+    gboolean sobre_a_maquina = tem_algum(t, L(" sistema", " computador", " maquina", " pc ", " notebook", " linux", " arch",
+                                              " recursos atuais", " meus recursos"));
+    /* "por que está lento?", sem assunto nenhum, também é sobre esta máquina */
+    gboolean sem_assunto = TRUE;
+    {
+        static const char *const VAZIAS[] = { "por", "que", "porque", "o", "a", "os", "as", "e", "esta", "estao", "ta", "tao",
+            "muito", "meu", "minha", "tudo", "ficou", "anda", "andando", "sendo", "lento", "lenta", "lentos", "travando",
+            "devagar", "agora", "hoje", "isso", "isto", "assim", "tanto", "demais", "ultimamente", "de", "repente", NULL };
+        char **ps = g_strsplit(t, " ", -1);
+        for (guint i = 0; ps[i] && sem_assunto; i++) if (*ps[i] && !g_strv_contains(VAZIAS, ps[i])) sem_assunto = FALSE;
+        g_strfreev(ps);
+    }
+    gboolean tarefa_local = (sobre_a_maquina || sem_assunto) &&
+                            tem_algum(t, L(" lent", " travando", " devagar", " desempenho", " engasg", " anormal", " anomal",
+                                           " incomum", " excessiv", " fora do normal", " relatorio", " estado atual",
+                                           " estado geral", " estado do ", " situacao atual", " resum", " evidenc"));
+    gboolean local = cpu || memoria || malware || local_roteador || tarefa_local ||
                      tem_algum(t, L(" processo", " inventario", " dispositivo", " hardware", " computador", " pc ",
-                                    " maquina", " sistema operacional", " kernel", " uptime", " swap", " carga media"));
+                                    " maquina", " sistema operacional", " kernel", " uptime", " swap", " carga media",
+                                    " este sistema", " meu sistema", " minha maquina"));
     gboolean pergunta = (pedido && strchr(pedido, '?')) ||
-                        tem_algum(t, L(" qual ", " quem ", " quando ", " onde ", " quanto ", " como ", " por que ", " o que "));
-    gboolean pedido_informativo = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " preco", " fonte", " site", " online", " mercado",
-                                                 " explique ", " fale sobre ", " conte sobre ", " informe sobre "));
-    gboolean web = pedido_informativo || (pergunta && !local) ||
-                   (pedido && (strstr(pedido, "https://") || strstr(pedido, "http://")));
+                        tem_algum(t, L(" qual ", " quais ", " quem ", " quando ", " onde ", " quanto ", " quanta ", " quantos ",
+                                       " como ", " por que ", " porque ", " o que ", " existe ", " existem "));
+    /* pedido de conhecimento: verbo de pedido de informação ou assunto
+     * claramente factual — "me conte com detalhes a evolução de X" não tem
+     * interrogação, mas pede conhecimento que só a web confirma */
+    gboolean pedido_informativo = tem_algum(t, L(" pesquis", " internet", " noticia", " cotacao", " dolar", " euro", " libra",
+                                                 " preco", " fonte", " site", " online", " mercado", " conte", " conta ", " fale",
+                                                 " fala ", " explique", " explica", " descreva", " descreve", " resuma", " resume ",
+                                                 " defina", " diga ", " me diz", " informe", " busque", " procure", " encontre",
+                                                 " historia", " evolucao", " detalh", " significado", " diferenca", " vantage",
+                                                 " desvantage", " ultimas ", " lancament", " novidade", " estado atual"));
+    /* conversa social curta ("oi", "obrigado", "quem é você?") não é pesquisa */
+    int n_palavras = 0;
+    for (const char *q = t; *q; q++) if (*q == ' ' && q[1]) n_palavras++;
+    gboolean social = n_palavras <= 6 &&
+                      tem_algum(t, L(" oi ", " ola ", " bom dia", " boa tarde", " boa noite", " obrigad", " valeu ", " tudo bem",
+                                     " quem e voce", " quem voce e", " o que voce faz", " o que voce pode", " seu nome", " teste ",
+                                     /* pedido de ajuda sem assunto: conversa, não pesquisa */
+                                     " pode me ajudar", " poderia me ajudar", " me ajuda ", " me ajude ", " preciso de ajuda",
+                                     " voce pode ajudar", " consegue me ajudar"));
+    gboolean web = !social && !local &&
+                   (pedido_informativo || pergunta || (pedido && (strstr(pedido, "https://") || strstr(pedido, "http://"))));
 
     if (malware) {
         if (tem_algum(t, L(" expli", " insuficient", " quais dados", " por que nao", " o que falta"))) {
@@ -789,17 +923,19 @@ AgentePlano *agente_planejar_com_contexto(const char *pedido, const char *contex
         if (compat) *compat = COMPAT_COMPATIVEL;
         char *url_params = web_url_parametros(pedido);
         gboolean abrir = url_params != NULL;
-        p = agente_plano_novo(abrir ? "abrir a fonte HTTPS indicada e extrair seu texto" : "pesquisar na internet e retornar fontes",
+        p = agente_plano_novo(abrir ? "abrir a fonte HTTPS indicada e responder com base nela"
+                                    : "pesquisar na web, ler as melhores fontes e responder com base nelas",
                               abrir ? "abrir_web" : "pesquisa_web");
         char *params = abrir ? url_params : web_parametros(pedido, contexto);
         agente_plano_acrescentar(p, NULL, abrir ? "web.abrir" : "web.pesquisar", params, NULL,
-                                 abrir ? "ler a página pública indicada" : "buscar fontes atuais na internet",
-                                 abrir ? L("conteudo_web") : L("resultados_web"), 20000, FALSE);
+                                 abrir ? "ler a página pública indicada" : "buscar e ler fontes atuais na internet",
+                                 abrir ? L("conteudo_web") : L("resultados_web"), 35000, FALSE);
         g_free(params);
         p->criterios_sucesso = strv_de((const char *[]) { abrir ? "conteudo_web" : "resultados_web", NULL });
         p->limitacoes = strv_de((const char *[]) {
-            "a consulta é enviada a um mecanismo de busca externo",
-            "resultados de busca não são verificação independente da verdade",
+            abrir ? "a URL indicada é aberta na internet pública" :
+                    "a consulta é enviada a um mecanismo de busca externo e até 3 das páginas encontradas são abertas",
+            "a resposta é tão confiável quanto as fontes lidas: confira as datas e a credibilidade de cada uma",
             NULL });
     } else if (tem_algum(t, L(" compar")) && cpu && memoria) {
         p = agente_plano_novo("comparar os processos que mais usam CPU com os que mais usam memória", "comparar_cpu_memoria");

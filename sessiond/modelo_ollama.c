@@ -95,6 +95,8 @@ static void ollama_perguntar(const ModeloBackend *self, const char *pergunta_id,
     t->resumo = opcoes && opcoes->resumo;
     t->req = ollama_gerar_opcoes(obter_config(), prompt_montado, opcoes ? opcoes->esquema_json : NULL,
                                   opcoes ? opcoes->max_tokens : 0, ao_concluir_ollama, t);
+    if (t->req && opcoes && opcoes->progresso_cb)
+        ollama_definir_progresso(t->req, opcoes->progresso_cb, opcoes->progresso_ctx);
 }
 
 static void ollama_cancelar_pergunta(const ModeloBackend *self, const char *pergunta_id)

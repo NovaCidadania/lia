@@ -42,6 +42,11 @@ struct OllamaRequisicao {
     int status_http;
     gboolean viu_done;
 
+    void (*progresso_cb)(gpointer ctx, gint64 tokens);
+    gpointer progresso_ctx;
+    gint64 fragmentos;
+    gint64 ultimo_progresso_us;
+
     Fase fase;
     gboolean finalizado;
     guint timer_inatividade;
@@ -211,12 +216,32 @@ static gboolean processar_linhas_ndjson(OllamaRequisicao *req)
         JsonObject *obj = json_node_get_object(raiz);
         if (json_object_has_member(obj, "response")) {
             JsonNode *n = json_object_get_member(obj, "response");
-            if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_STRING)
+            if (JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_STRING) {
                 g_string_append(req->texto_completo, json_node_get_string(n));
+                req->fragmentos++;
+                gint64 agora = g_get_monotonic_time();
+                if (req->progresso_cb && agora - req->ultimo_progresso_us >= G_USEC_PER_SEC) {
+                    req->ultimo_progresso_us = agora;
+                    req->progresso_cb(req->progresso_ctx, req->fragmentos);
+                }
+            }
         }
         gboolean done = json_object_has_member(obj, "done") &&
                         JSON_NODE_TYPE(json_object_get_member(obj, "done")) == JSON_NODE_VALUE &&
                         json_object_get_boolean_member(obj, "done");
+        if (done) {
+            /* medição: onde foi o tempo (carregar o modelo, avaliar o prompt,
+             * gerar) — vai para o log do daemon, nunca para o modelo */
+            #define NS_MS(k) (json_object_has_member(obj, k) ? json_object_get_int_member(obj, k) / 1000000 : -1)
+            #define QTD(k) (json_object_has_member(obj, k) ? json_object_get_int_member(obj, k) : -1)
+            gint64 ev = QTD("eval_count"), evd = NS_MS("eval_duration");
+            g_print("lia-ollama: carga %" G_GINT64_FORMAT " ms · prompt %" G_GINT64_FORMAT " tokens em %" G_GINT64_FORMAT
+                    " ms · geração %" G_GINT64_FORMAT " tokens em %" G_GINT64_FORMAT " ms (%.1f tokens/s)\n",
+                    NS_MS("load_duration"), QTD("prompt_eval_count"), NS_MS("prompt_eval_duration"), ev, evd,
+                    ev > 0 && evd > 0 ? (double)ev * 1000.0 / (double)evd : 0.0);
+            #undef NS_MS
+            #undef QTD
+        }
         g_object_unref(p);
 
         if ((gsize)req->texto_completo->len > req->cfg->limite_resposta_bytes) {
@@ -262,7 +287,11 @@ static gboolean decodificar_corpo_disponivel(OllamaRequisicao *req)
         gsize tam_restante = disponivel - req->pos_consumida;
         char *fim_linha = memchr(restante, '\n', tam_restante);
         if (!fim_linha)
-            return TRUE; /* linha de tamanho ainda incompleta; espera mais bytes */
+            /* linha de tamanho ainda incompleta: processa as linhas NDJSON
+             * que JÁ chegaram (streaming de verdade — antes, nada era
+             * processado até o chunk terminador, e o andamento da geração
+             * só aparecia no fim) e espera mais bytes */
+            return processar_linhas_ndjson(req);
         gsize tam_linha_tam = (gsize)(fim_linha - restante);
         char buf_tam[32];
         gsize copiar = tam_linha_tam < sizeof(buf_tam) - 1 ? tam_linha_tam : sizeof(buf_tam) - 1;
@@ -297,7 +326,7 @@ static gboolean decodificar_corpo_disponivel(OllamaRequisicao *req)
 
         gsize offset_dados = tam_linha_tam + 1; /* depois do '\n' do tamanho */
         if (tam_restante < offset_dados + (gsize)tam_chunk + 2)
-            return TRUE; /* chunk ainda não chegou inteiro (dados + \r\n final) */
+            return processar_linhas_ndjson(req); /* chunk ainda não chegou inteiro (dados + \r\n final) */
 
         /* confere rigorosamente o CRLF depois dos dados do chunk — nunca
          * avança por cima de dois bytes não verificados. */
@@ -471,6 +500,11 @@ static void ao_conectar(GObject *origem, GAsyncResult *res, gpointer dados)
     json_builder_add_string_value(b, prompt_guardado ? prompt_guardado : "");
     json_builder_set_member_name(b, "stream");
     json_builder_add_boolean_value(b, TRUE);
+    /* mantém o modelo carregado durante a conversa: sem isto o Ollama o
+     * descarrega após 5 min ociosos e a próxima pergunta paga de novo o
+     * carregamento (medido: ~90 s a mais numa CPU) */
+    json_builder_set_member_name(b, "keep_alive");
+    json_builder_add_string_value(b, "30m");
     const char *formato = g_object_get_data(G_OBJECT(req->cliente_socket), "lia-formato");
     if (formato) {
         /* saída estruturada: o Ollama restringe a geração a este esquema */
@@ -591,4 +625,11 @@ void ollama_cancelar(OllamaRequisicao *req)
         g_cancellable_cancel(req->cancelavel);
     /* a operação assíncrona pendente (connect ou read) vai retornar com
      * G_IO_ERROR_CANCELLED e finalizar() será chamada a partir de lá. */
+}
+
+void ollama_definir_progresso(OllamaRequisicao *req, void (*cb)(gpointer ctx, gint64 tokens), gpointer ctx)
+{
+    if (!req) return;
+    req->progresso_cb = cb;
+    req->progresso_ctx = ctx;
 }

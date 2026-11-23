@@ -181,7 +181,7 @@ Cada etapa é uma mensagem (ou um campo) separada — texto do modelo, intençã
 | validação | `proposta.dados.validacao` | `origem` (`roteador`, `modelo`, `modelo+roteador`), `veredito` (`rota_direta`, `aceita`, `corrigida`, `sem_ferramenta`, `esclarecer`, `rejeitada`), `motivo`, `ferramenta_do_modelo`, `saida_estruturada`, `tentativas`, `risco`, `requer_aprovacao`, `somente_leitura`, `execucao_automatica_permitida` |
 | plano | `plano` | igual à seção 4 — o daemon valida de novo manifesto, capacidades e parâmetros |
 | resultado | `resultado` | `dados` (JSON bruto da ferramenta, intacto), `apresentacao` (texto legível derivado **só** desse JSON por `sessiond/apresentacao.c`) e `tempo_execucao_ms` |
-| resposta final | `resposta` | `resposta_texto`, `origem` (`deterministica`, `modelo_extrativa`, `modelo`), `fundamentada`, `aviso`, `tempo_modelo_ms` |
+| resposta final | `resposta` | `resposta_texto`, `origem` (`deterministica`, `modelo_extrativa`, `modelo`; para pesquisa web também `modelo_sintese` e `extrativa` — §11.8), `fundamentada`, `aviso`, `tempo_modelo_ms` |
 
 **Resposta estruturada do modelo.** Quando o backend suporta (Ollama `format`, llama-server `json_schema`), o daemon pede a saída restrita a um esquema JSON — `{"tipo","ferramenta","parametros","justificativa","resposta"}`, com `ferramenta` como enum dos nomes do manifesto ativo mais `"nenhuma"` — em vez de procurar JSON no meio de texto livre (`modelo_preencher_proposta_estruturada`; o caminho antigo de JSON embutido continua só como compatibilidade). Resposta inválida: nada é executado; há **uma** nova tentativa com o motivo da rejeição; se falhar, a proposta sai sem ferramenta com uma mensagem clara. Nenhuma heurística fabrica parâmetros.
 
@@ -305,3 +305,21 @@ A **leitura do modelo** — até duas frases relacionando as evidências, a part
 ### 11.7 Cancelamento global
 
 `cancelar` com o `execucao_id` da tarefa (ou sem id) interrompe todos os passos em execução, marca os pendentes como `pulado`, cancela qualquer consulta ao modelo e responde um único `resultado` com estado `cancelado`. Nada mais chega depois. Desconexão do cliente tem o mesmo efeito.
+
+### 11.8 Pesquisa web: resposta final conclusiva e estruturada
+
+Uma tarefa cujos passos são `web.pesquisar`/`web.abrir` nunca termina só com a lista de resultados: depois do `resultado`, o daemon sempre envia uma `resposta` que começa por **Resposta:** (a conclusão) e segue com **Pontos principais**, **Linha do tempo** (só quando a pergunta é sobre história/evolução e as fontes têm datas), **O que as fontes não esclarecem**, **Fontes** (numeradas, com título, URL e a data declarada pela página — ou "a página não declara data") e **Como esta resposta foi montada** (`sessiond/sintese_web.c`).
+
+**Coleta.** O planejador (`sessiond/agente.c`) tira da pergunta as palavras de pedido ("me conte com detalhes a…", "por favor") e usa a pergunta anterior do `contexto` só quando a nova é uma continuação ("e quando ela foi lançada?") — nunca o texto da Lia. `web.pesquisar` recebe `abrir_fontes` (padrão 3, máximo 4): as melhores páginas HTTPS públicas, de domínios distintos, são abertas em paralelo; cada resultado lido traz `conteudo` (o trecho mais relevante para a consulta, até 1800 caracteres) e `data`, ou `erro_abertura` quando não abriu. Redirecionamentos (até 3) são seguidos só se o destino passar pela mesma validação de URL pública HTTPS.
+
+**Síntese.** O modelo local recebe os trechos lidos, numerados e delimitados como dados, e devolve JSON com `resposta`, `pontos` (cada um com `fontes`), `linha_do_tempo` e `lacunas`. Antes de exibir, o daemon confere cada item: índices de fonte válidos; o texto precisa ter respaldo lexical na fonte citada (ou é reatribuído à fonte que o sustenta, ou descartado); todo número/ano precisa existir na fonte citada; repetições são removidas. Uma conclusão sem respaldo é trocada pelo primeiro ponto conferido. Itens descartados aparecem em `aviso`.
+
+**Sem modelo utilizável** (não respondeu, texto não é JSON, nada conferiu, ou `LIA_SESSIOND_SINTESE_WEB=extrativa`): a resposta é **extrativa** — frases copiadas dos trechos, escolhidas pela relevância à pergunta, cada uma citada — e diz isso. **Cotação** de moedas é sempre determinística (valor, par, data de referência, fonte, URL). **Sem dados** (rede, timeout, HTTP de erro, busca vazia): a resposta diz o erro real e que nada foi inventado.
+
+`resposta.origem` para pesquisas web: `modelo_sintese`, `extrativa` ou `deterministica` (cotação, e também "sem dados", que vem com `aviso`).
+
+**Andamento.** Enquanto o modelo escreve, o daemon envia `progresso` sem `execucao_id` (a coleta já terminou): `{ "pergunta_id", "fracao", "mensagem", "sintese": { "tokens", "max_tokens", "fontes" } }`, no máximo um por segundo. `cancelar` com `pergunta: true` interrompe a síntese; nenhuma `resposta` chega depois.
+
+**Desempenho medido** (llama3.2:3b em CPU, nesta máquina): coleta + abertura de 3 fontes ~2–3 s; síntese com o modelo já carregado ~50–60 s (prompt ~800–950 tokens em 6–10 s, geração ~300–420 tokens a ~7 tokens/s); primeira pergunta com o modelo frio, +30–90 s. `chat/rodar_local.sh` aquece o modelo ao iniciar o daemon (`LIA_SESSIOND_AQUECER_MODELO=sim`) e as requisições pedem `keep_alive` de 30 min. Limitação conhecida: um modelo de 3B ainda erra relações entre fatos que passam na conferência numérica (por exemplo, juntar dois fatos de anos diferentes numa frase); a conferência garante que números e citações existem nas fontes, não que a frase esteja semanticamente perfeita.
+
+Para depurar a síntese, `LIA_SESSIOND_DEPURAR_SINTESE=1` imprime no log do daemon a saída bruta do modelo antes da conferência.

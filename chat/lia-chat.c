@@ -151,7 +151,8 @@ typedef struct {
     gboolean autopilot;            /* LIA_CHAT_AUTOPILOT: TRUE = read-only (padrão), FALSE = manual */
     int fase;                      /* Fase: o que a linha de status mostra */
     gboolean turno_espera_resposta;/* a execução atual veio de uma proposta: um 'resposta' final ainda vai chegar */
-    gboolean turno_web;            /* pesquisa já exibida; oculta relatório técnico redundante */
+    gboolean turno_web;            /* turno de pesquisa web: a resposta final é a síntese das fontes */
+    gint64 sintese_tokens, sintese_fontes; /* andamento da escrita da resposta (progresso 'sintese') */
     gboolean ocultar_status_pronto; /* após pesquisa web, deixa a região de status vazia */
     char *ferramenta_turno;        /* ferramenta do turno atual (para a linha de status) */
     gint64 turno_inicio_us;        /* pergunta enviada */
@@ -297,7 +298,14 @@ static void definir_fase(LiaChat *c, Fase f)
             txt = g_strdup_printf("executando leitura%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : "");
         }
         break;
-    case FASE_GERANDO_RESPOSTA: txt = g_strdup(c->tarefa_objetivo ? "finalizando · comparando evidências" : "gerando resposta final"); break;
+    case FASE_GERANDO_RESPOSTA:
+        if (c->turno_web && c->sintese_tokens > 0)
+            txt = g_strdup_printf("organizando a resposta a partir de %" G_GINT64_FORMAT " fonte(s) · %" G_GINT64_FORMAT " tokens escritos",
+                                  c->sintese_fontes, c->sintese_tokens);
+        else
+            txt = g_strdup(c->turno_web ? "lendo as fontes e organizando a resposta (o modelo local pode levar 1 min)" :
+                           c->tarefa_objetivo ? "finalizando · comparando evidências" : "gerando resposta final");
+        break;
     default:
         txt = c->ocultar_status_pronto ? g_strdup("") :
               g_strdup_printf("conectado · pronto · %s · /help",
@@ -408,8 +416,8 @@ static void ms_legivel(char *dst, gsize cap, gint64 ms)
  * tempos reais de cada etapa. */
 static void encerrar_turno(LiaChat *c, gboolean concluido)
 {
-    c->ocultar_status_pronto = c->turno_web;
-    if (concluido && c->turno_inicio_us && !c->turno_web) {
+    c->ocultar_status_pronto = FALSE;
+    if (concluido && c->turno_inicio_us) {
         gint64 total = (g_get_monotonic_time() - c->turno_inicio_us) / 1000;
         char t[32], a[32], b[32], d[32];
         ms_legivel(t, sizeof t, total);
@@ -426,6 +434,7 @@ static void encerrar_turno(LiaChat *c, gboolean concluido)
     }
     c->turno_espera_resposta = FALSE;
     c->turno_web = FALSE;
+    c->sintese_tokens = c->sintese_fontes = 0;
     c->turno_inicio_us = 0;
     g_clear_pointer(&c->ferramenta_turno, g_free);
     tarefa_ui_limpar(c);
@@ -1035,6 +1044,15 @@ static void tratar_msg_progresso_ou_saida(LiaChat *c, const LiaMsg *m, gboolean 
     const char *exec_id = campo_str(m->dados, "execucao_id");
     if (exec_id && !c->execucao_id_pendente)
         c->execucao_id_pendente = g_strdup(exec_id);
+    JsonObject *sint = progresso ? campo_obj(m->dados, "sintese") : NULL;
+    if (sint) {
+        /* o modelo está escrevendo a resposta: só a linha de status muda
+         * (nada entra no histórico até a resposta conferida chegar) */
+        c->sintese_tokens = campo_int(sint, "tokens", 0);
+        c->sintese_fontes = campo_int(sint, "fontes", 0);
+        if (c->term) definir_fase(c, FASE_GERANDO_RESPOSTA);
+        return;
+    }
     JsonObject *tar = progresso ? campo_obj(m->dados, "tarefa") : NULL;
     if (tar) {
         /* evento de uma TAREFA: fase atual e, quando houver, a observação de um passo */
@@ -1441,20 +1459,13 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
     c->t_resposta_ms = campo_int(m->dados, "tempo_modelo_ms", -1);
     parar_progresso_pergunta(c);
     gboolean extrativa = origem && !strcmp(origem, "modelo_extrativa");
-    if (resposta_web) {
-        /* A ferramenta já mostrou os resultados, resumos e links na ordem
-         * recebida. A resposta genérica do verificador só repetiria o estado
-         * da coleta; encerra o turno deixando o resultado como última saída. */
-        g_free(texto);
-        g_free(aviso);
-        encerrar_turno(c, TRUE);
-        return;
-    }
     historico_adicionar(c, "Lia", texto);
-    if (c->term && strstr(texto, "\nEvidências")) {
-        /* relatório de tarefa: destaca o título de cada seção */
+    if (c->term && (strstr(texto, "\nEvidências") || g_str_has_prefix(texto, "Resposta:"))) {
+        /* relatório de tarefa / resposta de pesquisa: destaca o título de cada seção */
         static const char *const SECOES[] = { "RESULTADO ", "Motivo:", "Dados ausentes:", "Conclusão:", "Evidências", "Limitações:",
-                                               "Ações realizadas", "Ações não realizadas:", "Próximo passo:", "Leitura do modelo", NULL };
+                                               "Ações realizadas", "Ações não realizadas:", "Próximo passo:", "Leitura do modelo",
+                                               "Resposta:", "Pontos principais:", "Linha do tempo:", "O que as fontes não esclarecem:",
+                                               "Fontes:", "Detalhes:", "Observação:", "Como esta resposta foi montada:", NULL };
         char **linhas = g_strsplit(texto, "\n", -1);
         GString *o = g_string_new(NULL);
         for (int i = 0; linhas[i]; i++) {
@@ -1475,18 +1486,27 @@ static void tratar_msg_resposta(LiaChat *c, const LiaMsg *m)
         texto = g_string_free(o, FALSE);
     }
     if (c->term) {
-        saida_linha(c, "%s%s:%s %s", sgr(c, EST_FORTE), resposta_web ? "Resposta" : "Lia", sgr0(c), texto);
-        if (!resposta_web && origem && !strcmp(origem, "deterministica+modelo"))
-            saida_linha(c, "%s  · relatório montado pelo daemon com os dados reais; a \"leitura do modelo\" ao final foi conferida contra eles%s", sgr(c, EST_FRACO), sgr0(c));
-        else if (deterministica && !resposta_web)
-            saida_linha(c, "%s  · resposta montada pelo daemon só com os dados reais acima (sem texto livre do modelo)%s", sgr(c, EST_FRACO), sgr0(c));
-        else if (extrativa && !resposta_web)
-            saida_linha(c, "%s  · o modelo escolheu quais linhas respondem; o texto foi copiado dos dados reais%s", sgr(c, EST_FRACO), sgr0(c));
-        else if (!resposta_web)
-            saida_linha(c, "%s  · resumo do modelo, conferido contra os dados reais%s", sgr(c, EST_FRACO), sgr0(c));
-        if (aviso && !resposta_web) saida_linha(c, "%s  ! %s%s", sgr(c, EST_AVISO), aviso, sgr0(c));
+        if (resposta_web) {
+            /* pesquisa web: a resposta conclusiva, já organizada em seções
+             * (Resposta, Pontos principais, Linha do tempo, Fontes…) */
+            saida_linha(c, "");
+            saida_linha(c, "%s", texto);
+            if (aviso) saida_linha(c, "%s  ! %s%s", sgr(c, EST_AVISO), aviso, sgr0(c));
+        } else {
+            saida_linha(c, "%sLia:%s %s", sgr(c, EST_FORTE), sgr0(c), texto);
+            if (origem && !strcmp(origem, "deterministica+modelo"))
+                saida_linha(c, "%s  · relatório montado pelo daemon com os dados reais; a \"leitura do modelo\" ao final foi conferida contra eles%s", sgr(c, EST_FRACO), sgr0(c));
+            else if (deterministica)
+                saida_linha(c, "%s  · resposta montada pelo daemon só com os dados reais acima (sem texto livre do modelo)%s", sgr(c, EST_FRACO), sgr0(c));
+            else if (extrativa)
+                saida_linha(c, "%s  · o modelo escolheu quais linhas respondem; o texto foi copiado dos dados reais%s", sgr(c, EST_FRACO), sgr0(c));
+            else
+                saida_linha(c, "%s  · resumo do modelo, conferido contra os dados reais%s", sgr(c, EST_FRACO), sgr0(c));
+            if (aviso) saida_linha(c, "%s  ! %s%s", sgr(c, EST_AVISO), aviso, sgr0(c));
+        }
     } else {
         saida_linha(c, deterministica ? "[resposta, determinística] %s" : (extrativa ? "[resposta, extrativa] %s" :
+                    (origem && !strcmp(origem, "modelo_sintese")) ? "[resposta, síntese web conferida] %s" :
                     (origem && !strcmp(origem, "deterministica+modelo")) ? "[resposta, determinística+modelo] %s" : "[modelo, resumo] %s"), texto);
         if (aviso) saida_linha(c, "[aviso] %s", aviso);
     }

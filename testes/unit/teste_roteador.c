@@ -295,9 +295,9 @@ static void testes_apresentacao(void)
     g_free(t);
 
     t = apresentacao_renderizar("web.abrir",
-        "{\"url\":\"https://example.com/documentacao\",\"conteudo\":\"Texto real da página\"}", NULL);
-    checar(strstr(t, "URL: https://example.com/documentacao") && strstr(t, "Texto real da página"),
-           "renderizar web.abrir: URL e conteúdo aparecem na resposta final");
+        "{\"url\":\"https://example.com/documentacao\",\"titulo\":\"Documentação\",\"data\":\"2024-05-01\",\"conteudo\":\"Texto real da página\"}", NULL);
+    checar(strstr(t, "Página aberta: Documentação") && strstr(t, "https://example.com/documentacao") && strstr(t, "20 caracteres") &&
+           strstr(t, "2024-05-01"), "renderizar web.abrir: título, URL, tamanho do texto e data (a resposta vem depois, sintetizada)");
     g_free(t);
 
     GString *g = g_string_new("{\"texto\":\"");

@@ -101,4 +101,8 @@ OllamaRequisicao *ollama_gerar_opcoes(OllamaConfig *cfg, const char *prompt,
 
 void ollama_cancelar(OllamaRequisicao *req);
 
+/* Andamento da geração: 'cb' recebe quantos fragmentos (≈ tokens) já
+ * chegaram, no máximo uma vez por segundo, até a conclusão. */
+void ollama_definir_progresso(OllamaRequisicao *req, void (*cb)(gpointer ctx, gint64 tokens), gpointer ctx);
+
 #endif

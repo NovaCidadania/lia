@@ -179,7 +179,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
                   $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
                   $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o \
-                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o
+                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -232,8 +232,22 @@ $(B)/sessiond-roteador.o: sessiond/roteador.c sessiond/roteador.h | $(B)
 $(B)/sessiond-apresentacao.o: sessiond/apresentacao.c sessiond/apresentacao.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/sessiond-agente.o: sessiond/agente.c sessiond/agente.h | $(B)
+$(B)/sessiond-agente.o: sessiond/agente.c sessiond/agente.h sessiond/roteador.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-sintese-web.o: sessiond/sintese_web.c sessiond/sintese_web.h sessiond/apresentacao.h web/pesquisa.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+# Testes da resposta final de pesquisas web (fontes, extração de trechos,
+# conferência da síntese do modelo, resposta extrativa): sem rede, sem modelo.
+$(B)/teste-sintese-web.o: testes/unit/teste_sintese_web.c sessiond/sintese_web.h web/pesquisa.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-sintese-web: $(B)/teste-sintese-web.o $(B)/sessiond-sintese-web.o $(B)/sessiond-apresentacao.o $(B)/sessiond-web-pesquisa.o
+	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
+
+teste-sintese-web: $(B)/teste-sintese-web
+	$(B)/teste-sintese-web
 
 $(B)/sessiond-web-pesquisa.o: web/pesquisa.c web/pesquisa.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -243,8 +257,8 @@ $(B)/sessiond-web-pesquisa.o: web/pesquisa.c web/pesquisa.h | $(B)
 $(B)/teste-agente.o: testes/unit/teste_agente.c sessiond/agente.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/teste-agente: $(B)/teste-agente.o $(B)/sessiond-agente.o
-	$(CC) $^ $(SESSIOND_LIBS) -o $@
+$(B)/teste-agente: $(B)/teste-agente.o $(B)/sessiond-agente.o $(B)/sessiond-roteador.o
+	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
 
 teste-agente: $(B)/teste-agente
 	$(B)/teste-agente
@@ -308,6 +322,11 @@ teste-llama-cpp: $(B)/teste-cliente-llama-cpp
 teste-web: sessiond
 	sh testes/integration/teste_web.sh
 
+# pesquisa web de ponta a ponta SEM rede (fixtures): consulta, aprovação,
+# abertura das fontes, resposta conclusiva conferida, falhas e cancelamento
+teste-web-resposta: sessiond teste-sintese-web
+	python3 -I testes/integration/teste_web_resposta.py
+
 # ---------------------------------------------------------------------------
 # lia-chat (chat/): primeiro cliente de chat interativo de terminal para o
 # protocolo (docs/protocolo.md §9). Camada fina sobre gui/protocolo.c — não
@@ -338,4 +357,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
+.PHONY: teste-web-resposta teste-sintese-web teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run

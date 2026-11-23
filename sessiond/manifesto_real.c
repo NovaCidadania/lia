@@ -27,6 +27,7 @@ static const ParametroManifesto PARAM_VAZIO[] = {
 static const ParametroManifesto PARAM_WEB_PESQUISAR[] = {
     { .nome = "consulta", .tipo = PARAM_STRING, .obrigatorio = TRUE },
     { .nome = "limite", .tipo = PARAM_INTEIRO, .obrigatorio = FALSE, .min = 1, .max = 10 },
+    { .nome = "abrir_fontes", .tipo = PARAM_INTEIRO, .obrigatorio = FALSE, .min = 0, .max = 4 },
     { .nome = NULL },
 };
 
@@ -212,10 +213,12 @@ static const ManifestoReal TABELA[] = {
             .nome = "web.pesquisar", .risco = "baixo", .requer_aprovacao = TRUE,
             .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_REDE,
-            .efeitos = "envia a consulta a um mecanismo de busca HTTPS externo; não grava dados e limita resposta e tempo",
-            .timeout_padrao_ms = 20000,
+            .efeitos = "envia a consulta a um mecanismo de busca HTTPS externo e abre em paralelo até 4 das melhores fontes "
+                       "(HTTPS público, redirecionamentos validados) para extrair o trecho relevante; não grava dados e limita resposta e tempo",
+            .timeout_padrao_ms = 30000,
             .somente_leitura = FALSE,
-            .uso = "pesquisar na internet e devolver títulos e URLs; a consulta sai da máquina e exige aprovação",
+            .uso = "pesquisar na internet, abrir as melhores fontes e devolver títulos, URLs, datas e o trecho relevante de cada uma; "
+                   "parâmetros consulta, limite (1..10), abrir_fontes (0..4, padrão 3); a consulta sai da máquina e exige aprovação",
         },
         .parametros = PARAM_WEB_PESQUISAR,
     },
@@ -224,10 +227,10 @@ static const ManifestoReal TABELA[] = {
             .nome = "web.abrir", .risco = "baixo", .requer_aprovacao = TRUE,
             .versao = "0.1.0", .idempotente = TRUE,
             .reversivel = "nao_aplicavel", .capacidades = CAP_REDE,
-            .efeitos = "abre uma URL HTTPS pública, lê texto limitado e não executa JavaScript nem grava o conteúdo",
+            .efeitos = "abre uma URL HTTPS pública (até 3 redirecionamentos, cada destino revalidado), lê texto limitado e não executa JavaScript nem grava o conteúdo",
             .timeout_padrao_ms = 20000,
             .somente_leitura = FALSE,
-            .uso = "abrir uma fonte HTTPS pública indicada pela pessoa; redirecionamentos e redes privadas são recusados",
+            .uso = "abrir uma fonte HTTPS pública indicada pela pessoa; destinos em rede privada são recusados",
         },
         .parametros = PARAM_WEB_ABRIR,
     },

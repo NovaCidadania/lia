@@ -20,6 +20,7 @@
  * confiança, é a diferença entre o mock responder de propósito ou por
  * acidente. */
 #include "modelo.h"
+#include <stdlib.h>
 #include <string.h>
 
 static gboolean contem_ci(const char *texto, const char *alvo)
@@ -44,6 +45,55 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
          * ferramenta não devolveu — testa a checagem de fundamentação. */
         ModeloResposta rr = { 0 };
         rr.sucesso = TRUE;
+        if (strstr(prompt_montado_completo, "\"linha_do_tempo\"")) {
+            /* síntese de pesquisa web (sessiond/sintese_web.h). Marcadores no
+             * pedido: MOCK_SINTESE_INVENTADA (números que as fontes não têm),
+             * MOCK_SINTESE_INVALIDA (não é JSON). Lentidão/cancelamento são
+             * testados com o servidor Ollama falso (modo "lento"), nunca
+             * bloqueando o laço principal aqui. */
+            const char *s = prompt_montado_completo;
+            if (strstr(s, "MOCK_SINTESE_INVALIDA")) {
+                rr.resposta_texto = g_strdup("isto não é JSON");
+            } else if (strstr(s, "MOCK_SINTESE_INVENTADA")) {
+                rr.resposta_texto = g_strdup(
+                    "{\"resposta\":\"Foi criada em 1777 por um comitê [1].\",\"pontos\":[{\"texto\":\"A versão 9.99 saiu em 2031.\",\"fontes\":[1]},"
+                    "{\"texto\":\"(mock) frase que nenhuma fonte sustenta sobre receitas de bolo.\",\"fontes\":[1]}],"
+                    "\"linha_do_tempo\":[{\"quando\":\"2031\",\"evento\":\"lançamento inventado\",\"fontes\":[1]}],\"lacunas\":\"\"}");
+            } else {
+                /* "bem-comportado": copia a primeira frase de cada fonte do
+                 * prompt (linhas "[n] título" seguidas do trecho) como ponto
+                 * citado; a terceira cita uma fonte inexistente de propósito
+                 * (o daemon precisa reatribuir ou descartar) */
+                const char *dados = strstr(s, "----- início dos dados -----");
+                char **linhas = g_strsplit(dados ? dados : "", "\n", -1);
+                GString *pontos = g_string_new(NULL);
+                char *primeira = NULL;
+                int n = 0;
+                for (int i = 0; linhas[i] && linhas[i + 1] && n < 3; i++) {
+                    if (linhas[i][0] != '[' || !g_ascii_isdigit(linhas[i][1])) continue;
+                    int fonte = atoi(linhas[i] + 1);
+                    char *frase = g_strdup(linhas[i + 1]);
+                    char *ponto = strstr(frase, ". ");
+                    if (ponto) ponto[1] = '\0';
+                    GString *esc = g_string_new(NULL);
+                    for (const char *q = frase; *q; q++) { if (*q == '"' || *q == '\\') g_string_append_c(esc, '\\'); g_string_append_c(esc, *q); }
+                    if (!primeira) primeira = g_strdup(esc->str);
+                    g_string_append_printf(pontos, "%s{\"texto\":\"%s\",\"fontes\":[%d]}", n ? "," : "", esc->str, n == 2 ? 9 : fonte);
+                    n++;
+                    g_string_free(esc, TRUE);
+                    g_free(frase);
+                }
+                rr.resposta_texto = g_strdup_printf(
+                    "{\"resposta\":\"(mock) síntese conclusiva: %s\",\"pontos\":[%s],\"linha_do_tempo\":[],\"lacunas\":\"(mock) nenhuma lacuna relevante.\"}",
+                    primeira ? primeira : "sem fontes", pontos->str);
+                g_free(primeira);
+                g_string_free(pontos, TRUE);
+                g_strfreev(linhas);
+            }
+            concluido_cb(ctx, &rr);
+            modelo_resposta_liberar(&rr);
+            return;
+        }
         if (opcoes->esquema_json) {
             /* seleção extrativa: devolve {"linhas":[...]}; MOCK_SELECAO_INVALIDA
              * força índices fora da faixa (o daemon precisa ignorá-los). */

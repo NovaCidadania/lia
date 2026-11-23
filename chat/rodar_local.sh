@@ -179,7 +179,12 @@ if [ "$MODELO" = ollama ] && [ -z "${LIA_OLLAMA_MODELO:-}" ] && [ -n "$OLLAMA_MO
     echo "  usando o modelo Ollama detectado: $OLLAMA_MODELO_DETECTADO (defina LIA_OLLAMA_MODELO para escolher outro)"
 fi
 
-env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
+# Com um modelo real, carrega-o na memória já agora (em segundo plano), para
+# a primeira pergunta não pagar o carregamento; e o mantém carregado por 30
+# min entre perguntas (keep_alive, ollama/cliente_ollama.c).
+ENV_AQUECER=""
+[ "$MODELO" != mock ] && ENV_AQUECER="LIA_SESSIOND_AQUECER_MODELO=sim"
+env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO $ENV_AQUECER "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null' EXIT INT TERM
 
