@@ -48,6 +48,8 @@
 #include "apresentacao.h"
 #include "agente.h"
 #include "sintese_web.h"
+#include "../projeto/arquivos.h"
+#include "../projeto/praticas.h"
 
 #define LIA_SESSIOND_LINHA_MAX 65536
 #define LIA_SESSIOND_CHUNK 4096
@@ -110,6 +112,11 @@ typedef struct {
     char *plano_proposto_pedido;
     Tarefa *tarefa;
     char *plano_hash_pendente;    /* hash do plano de um passo (fluxo antigo): 'aprovar' precisa trazê-lo */
+    /* escrita em arquivo do projeto: a prévia (diff) que a pessoa aprova e
+     * o sha256 dela — na execução a prévia é recalculada e precisa ser
+     * idêntica; se o arquivo mudou no meio, nada é alterado */
+    char *previa_pendente;
+    char *previa_sha_pendente;
     gint64 exec_inicio_us;        /* g_get_monotonic_time() de quando a execução atual foi despachada */
 } Cliente;
 
@@ -263,6 +270,8 @@ static void enviar_erro(Cliente *c, const char *em_resposta_a, const char *codig
 }
 
 static gboolean web_automatica(const ExecutorManifesto *mf);
+static gboolean capacidades_permitidas(const ExecutorManifesto *mf);
+static char *previa_arquivo(const char *ferramenta, JsonObject *params, char **sha, char **erro);
 static gboolean requer_aprovacao_efetiva(const ExecutorManifesto *mf);
 
 static void enviar_plano(Cliente *c, const char *em_resposta_a, const ExecutorManifesto *mf)
@@ -322,6 +331,11 @@ static void enviar_plano(Cliente *c, const char *em_resposta_a, const ExecutorMa
     json_builder_add_boolean_value(b, requer_aprovacao_efetiva(mf));
     json_builder_set_member_name(b, "web_automatica");
     json_builder_add_boolean_value(b, web_automatica(mf));
+    if (c->previa_pendente) {
+        /* o que vai mudar nos arquivos, exatamente — é isto que se aprova */
+        json_builder_set_member_name(b, "previa");
+        json_builder_add_string_value(b, c->previa_pendente);
+    }
     json_builder_end_object(b);
 
     char *id = lia_novo_id("msg");
@@ -489,6 +503,8 @@ static void resetar_para_conectado(Cliente *c)
     c->estado = ESTADO_CONECTADO;
     g_free(c->plano_id_pendente); c->plano_id_pendente = NULL;
     g_free(c->plano_hash_pendente); c->plano_hash_pendente = NULL;
+    g_free(c->previa_pendente); c->previa_pendente = NULL;
+    g_free(c->previa_sha_pendente); c->previa_sha_pendente = NULL;
     g_free(c->ferramenta_pendente); c->ferramenta_pendente = NULL;
     g_free(c->execucao_id_atual); c->execucao_id_atual = NULL;
     if (c->parametros_pendentes) { json_node_unref(c->parametros_pendentes); c->parametros_pendentes = NULL; }
@@ -655,6 +671,28 @@ static gboolean ao_timeout_execucao(gpointer ctx)
 
 static void despachar_execucao(Cliente *c, const ExecutorManifesto *mf)
 {
+    if (c->previa_sha_pendente) {
+        /* o arquivo pode ter mudado entre a prévia e a aprovação (editor,
+         * git checkout...): a alteração só segue se a prévia de agora for
+         * idêntica à aprovada */
+        char *sha = NULL, *erro_pv = NULL;
+        char *pv = previa_arquivo(mf->nome, c->parametros_pendentes ? json_node_get_object(c->parametros_pendentes) : NULL, &sha, &erro_pv);
+        gboolean igual = pv && sha && !strcmp(sha, c->previa_sha_pendente);
+        g_free(pv); g_free(sha);
+        if (!igual) {
+            g_print("lia-sessiond: %s: a prévia mudou desde a aprovação (%s) — nada foi alterado\n", mf->nome, erro_pv ? erro_pv : "diff diferente");
+            char *motivo = g_strdup_printf("os arquivos mudaram desde a prévia aprovada (%s); nada foi alterado — peça de novo para ver a prévia atual",
+                                           erro_pv ? erro_pv : "o diff seria outro");
+            enviar_erro(c, NULL, "plano_alterado", motivo);
+            char *pid = c->pergunta_id_origem ? g_strdup(c->pergunta_id_origem) : NULL;
+            finalizar_plano_cancelado(c, motivo);
+            if (pid && !c->fechado) enviar_resposta_final(c, pid, motivo, "deterministica", TRUE, NULL, 0);
+            g_free(pid);
+            g_free(motivo);
+            g_free(erro_pv);
+            return;
+        }
+    }
     g_free(c->execucao_id_atual);
     c->execucao_id_atual = lia_novo_id("exec");
     c->estado = ESTADO_EXECUTANDO;
@@ -719,7 +757,7 @@ static char *construir_manifesto_texto(void)
     const char * const *nomes = g_executor->listar_nomes(g_executor);
     for (int i = 0; nomes[i]; i++) {
         const ExecutorManifesto *mf = g_executor->buscar_manifesto(nomes[i]);
-        if (!mf) continue;
+        if (!mf || !capacidades_permitidas(mf)) continue;
         g_string_append_printf(out, "- %s: %s%s\n", mf->nome, mf->uso ? mf->uso : mf->efeitos,
                                requer_aprovacao_efetiva(mf) ? " [exige aprovação de uma pessoa]" : "");
     }
@@ -794,13 +832,32 @@ static char *construir_esquema_proposta(void)
 
 /* mesma política de capacidades de tratar_solicitar: uma ferramenta que o
  * 'solicitar' recusaria por capacidade nem conta como existente aqui. */
+/* Prévia de uma escrita em arquivo do projeto (projeto/arquivos.h): o diff
+ * que a pessoa vê antes de aprovar e o sha256 dele. NULL + *erro quando a
+ * alteração não pode ser feita como pedida (trecho ausente, arquivo já
+ * existe, fora do projeto...) — antes de qualquer aprovação. */
+static char *previa_arquivo(const char *ferramenta, JsonObject *params, char **sha, char **erro)
+{
+    char *pv = proj_previa(ferramenta, params, erro);
+    if (pv && sha) *sha = g_compute_checksum_for_string(G_CHECKSUM_SHA256, pv, -1);
+    return pv;
+}
+
 static gboolean capacidades_permitidas(const ExecutorManifesto *mf)
 {
+    /* arquivos do projeto só existem com um projeto definido
+     * (LIA_SESSIOND_PROJETO) — sem ele, nem aparecem para o modelo */
+    if (g_str_has_prefix(mf->nome, "arquivo.") && !proj_raiz())
+        return FALSE;
     if (!g_executor->restringe_a_leitura)
         return TRUE;
-    for (int i = 0; mf->capacidades[i]; i++)
+    for (int i = 0; mf->capacidades[i]; i++) {
+        /* escrita SÓ dentro do projeto, sempre com aprovação e prévia */
+        if (strcmp(mf->capacidades[i], "escrita_projeto") == 0 && proj_raiz() && mf->requer_aprovacao)
+            continue;
         if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0 && strcmp(mf->capacidades[i], "rede") != 0)
             return FALSE;
+    }
     return TRUE;
 }
 
@@ -824,6 +881,13 @@ static char *rot_validar(const char *ferramenta, const char *parametros_json, gp
         return g_strdup("parâmetros não são um objeto JSON");
     }
     char *erro = g_executor->validar_parametros(mf, json_node_get_object(json_parser_get_root(p)));
+    /* escrita em arquivo: a alteração precisa ser possível AGORA (trecho
+     * encontrado e único, arquivo novo que ainda não existe...) — senão o
+     * plano é recusado antes de pedir aprovação, com o motivo real */
+    if (!erro && proj_ferramenta_de_escrita(ferramenta)) {
+        char *pv = previa_arquivo(ferramenta, json_node_get_object(json_parser_get_root(p)), NULL, &erro);
+        g_free(pv);
+    }
     g_object_unref(p);
     return erro;
 }
@@ -1373,7 +1437,17 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
             } else {
                 if (erro) {
                     g_print("lia-sessiond: pergunta %s: plano de tarefa inválido (%s)\n", pid, erro);
-                    char *txt = g_strdup_printf("Não foi possível montar um plano válido para este pedido (%s). Nada foi executado.", erro);
+                    char *txt;
+                    if (g_str_has_prefix(plano->intencao, "arquivo") && !proj_raiz()) {
+                        txt = g_strdup("Nenhuma pasta de projeto está definida, então não leio nem altero arquivos. Inicie o chat de dentro do "
+                                       "repositório (./chat/rodar_local.sh) ou escolha a pasta com LIA_PROJETO=/caminho/do/projeto.");
+                    } else if (g_str_has_prefix(plano->intencao, "arquivo")) {
+                        /* o motivo real (trecho não encontrado, já existe, fora do projeto...) sem o prefixo técnico */
+                        const char *motivo = strstr(erro, "): ") ? strstr(erro, "): ") + 3 : erro;
+                        txt = g_strdup_printf("Não dá para fazer isso: %s. Nada foi alterado.", motivo);
+                    } else {
+                        txt = g_strdup_printf("Não foi possível montar um plano válido para este pedido (%s). Nada foi executado.", erro);
+                    }
                     enviar_proposta_tarefa(c, pid, NULL, COMPAT_INEXISTENTE, txt, "roteador", "rejeitada", erro, 0, 0);
                     g_free(txt);
                     g_free(erro);
@@ -1489,6 +1563,7 @@ struct Tarefa {
     char *exec_passo[AGENTE_MAX_PASSOS];
     guint timer_passo[AGENTE_MAX_PASSOS];
     gint64 inicio_passo[AGENTE_MAX_PASSOS];
+    char *previa_sha[AGENTE_MAX_PASSOS]; /* escrita em arquivo: sha256 da prévia aprovada */
     gboolean sugestao_pedida; /* o modelo já foi consultado para um passo de replanejamento nesta tarefa */
     char *modelo_id;          /* consulta ao modelo em andamento (sugestão de replanejamento), para cancelar */
 };
@@ -1503,7 +1578,7 @@ static void tarefa_unref(Tarefa *t)
     g_free(t->pergunta_id);
     g_free(t->pedido);
     g_free(t->modelo_id);
-    for (int i = 0; i < AGENTE_MAX_PASSOS; i++) g_free(t->exec_passo[i]);
+    for (int i = 0; i < AGENTE_MAX_PASSOS; i++) { g_free(t->exec_passo[i]); g_free(t->previa_sha[i]); }
     cliente_unref(t->c);
     g_free(t);
 }
@@ -1839,6 +1914,18 @@ static gboolean ao_timeout_global(gpointer dados)
     return G_SOURCE_REMOVE;
 }
 
+typedef struct { PassoCtx *pc; char *motivo; } FalhaPasso;
+
+static gboolean entregar_falha_passo(gpointer dados)
+{
+    FalhaPasso *f = dados;
+    ExecutorResultado r = { .sucesso = FALSE, .codigo_saida = 1, .erro_codigo = (char *)"plano_alterado", .erro_mensagem = f->motivo };
+    ao_passo_concluido(f->pc, &r);
+    g_free(f->motivo);
+    g_free(f);
+    return G_SOURCE_REMOVE;
+}
+
 static void tarefa_despachar(Tarefa *t, int idx)
 {
     AgentePasso *s = g_ptr_array_index(t->plano->passos, (guint)idx);
@@ -1857,6 +1944,24 @@ static void tarefa_despachar(Tarefa *t, int idx)
     if (json_parser_load_from_data(jp, s->parametros_json, -1, NULL) && json_parser_get_root(jp) &&
         JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT)
         params = json_node_get_object(json_parser_get_root(jp));
+    if (proj_ferramenta_de_escrita(s->ferramenta)) {
+        /* só altera se a prévia de agora for idêntica à aprovada */
+        char *sha = NULL, *erro_pv = NULL;
+        char *pv = previa_arquivo(s->ferramenta, params, &sha, &erro_pv);
+        gboolean igual = pv && sha && idx < AGENTE_MAX_PASSOS && t->previa_sha[idx] && !strcmp(sha, t->previa_sha[idx]);
+        g_free(pv); g_free(sha);
+        if (!igual) {
+            FalhaPasso *f = g_new0(FalhaPasso, 1);
+            f->pc = passo_ctx_novo(t, idx);
+            f->motivo = g_strdup_printf("os arquivos mudaram desde a prévia aprovada (%s); nada foi alterado — peça de novo para ver a prévia atual",
+                                        erro_pv ? erro_pv : "o diff seria outro");
+            g_free(erro_pv);
+            g_idle_add(entregar_falha_passo, f);
+            g_object_unref(jp);
+            return;
+        }
+        g_free(erro_pv);
+    }
     /* o executor guarda a própria referência ao objeto de parâmetros */
     g_executor->iniciar(g_executor, t->exec_passo[idx], mf, params, ao_passo_saida, ao_passo_progresso,
                          ao_passo_concluido, passo_ctx_novo(t, idx));
@@ -2146,6 +2251,33 @@ static void ao_sintese_web(gpointer ctx, const ModeloResposta *r)
 }
 
 /* TRUE se tratou (e enviou, ou agendou) a resposta final desta tarefa web */
+/* Tarefa de arquivos do projeto: a resposta final é curta e
+ * determinística — o que foi lido/feito (o detalhe já apareceu no passo),
+ * ou o erro real de cada passo; nunca o relatório genérico da coleta. */
+static gboolean tarefa_resposta_arquivos(Tarefa *t, Cliente *c, const char *pergunta_id)
+{
+    if (!g_str_has_prefix(t->plano->intencao, "arquivo") && strcmp(t->plano->intencao, "boas_praticas") != 0) return FALSE;
+    GString *o = g_string_new(NULL);
+    gboolean alguma_falha = FALSE;
+    for (guint i = 0; i < t->plano->passos->len; i++) {
+        AgentePasso *s = g_ptr_array_index(t->plano->passos, i);
+        if (o->len) g_string_append_c(o, '\n');
+        if (s->estado == PASSO_SUCESSO && s->dados_json) {
+            char *f = apresentacao_frase(s->ferramenta, s->dados_json);
+            g_string_append(o, f);
+            g_free(f);
+        } else {
+            alguma_falha = TRUE;
+            g_string_append_printf(o, "Não foi feito (%s): %s", s->ferramenta,
+                                   s->erro ? s->erro : s->estado == PASSO_CANCELADO ? "cancelado" : agente_passo_estado_texto(s->estado));
+        }
+    }
+    if (alguma_falha) g_string_append(o, "\nNenhum arquivo foi alterado por um passo que não deu certo.");
+    enviar_resposta_final(c, pergunta_id, o->str, "deterministica", TRUE, NULL, 0);
+    g_string_free(o, TRUE);
+    return TRUE;
+}
+
 static gboolean tarefa_resposta_web(Tarefa *t, Cliente *c, const char *pergunta_id, const char *pedido)
 {
     if (strcmp(t->plano->intencao, "pesquisa_web") != 0 && strcmp(t->plano->intencao, "abrir_web") != 0)
@@ -2290,7 +2422,7 @@ static void tarefa_finalizar(Tarefa *t, AgenteVeredito v, char **ausentes, const
 
     /* pesquisa web: a resposta final é a síntese das fontes lidas (ou a
      * cotação, ou o erro real) — nunca o relatório genérico da coleta */
-    if (!c->fechado && tarefa_resposta_web(t, c, pergunta_id, pedido)) {
+    if (!c->fechado && (tarefa_resposta_arquivos(t, c, pergunta_id) || tarefa_resposta_web(t, c, pergunta_id, pedido))) {
         g_free(pergunta_id);
         g_free(relatorio);
         g_free(evid);
@@ -2422,6 +2554,28 @@ static void tarefa_criar(Cliente *c, const char *em_resposta_a, AgentePlano *pla
     json_builder_add_string_value(b, t->exec_id);
     json_builder_set_member_name(b, "web_automatica");
     json_builder_add_boolean_value(b, plano_web_automatico(plano));
+    /* escrita em arquivo: a prévia (diff) de cada passo — é o que a pessoa
+     * aprova; o sha256 fica guardado para conferir na hora de executar */
+    gboolean tem_previa = FALSE;
+    for (guint i = 0; i < plano->passos->len && i < AGENTE_MAX_PASSOS; i++) {
+        AgentePasso *s = g_ptr_array_index(plano->passos, i);
+        if (!proj_ferramenta_de_escrita(s->ferramenta)) continue;
+        JsonParser *pp = json_parser_new();
+        char *pv = NULL, *erro_pv = NULL;
+        if (json_parser_load_from_data(pp, s->parametros_json, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(pp)) == JSON_NODE_OBJECT)
+            pv = previa_arquivo(s->ferramenta, json_node_get_object(json_parser_get_root(pp)), &t->previa_sha[i], &erro_pv);
+        g_object_unref(pp);
+        if (!tem_previa) { json_builder_set_member_name(b, "previas"); json_builder_begin_array(b); tem_previa = TRUE; }
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "passo_id"); json_builder_add_string_value(b, s->id);
+        json_builder_set_member_name(b, "ferramenta"); json_builder_add_string_value(b, s->ferramenta);
+        json_builder_set_member_name(b, "previa");
+        json_builder_add_string_value(b, pv ? pv : "");
+        if (!pv) { json_builder_set_member_name(b, "erro"); json_builder_add_string_value(b, erro_pv ? erro_pv : "prévia indisponível"); }
+        json_builder_end_object(b);
+        g_free(pv); g_free(erro_pv);
+    }
+    if (tem_previa) json_builder_end_array(b);
     json_builder_set_member_name(b, "ferramenta"); /* compatibilidade com clientes que só leem um nome */
     json_builder_add_string_value(b, "(tarefa de vários passos)");
     json_builder_end_object(b);
@@ -2593,14 +2747,19 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
      * 'real' (Executor.restringe_a_leitura) — o mock precisa poder testar
      * mock.escrita/mock.admin (risco médio/admin), que é exatamente o que
      * o real nunca tem; por isso não se aplica a ele. */
-    if (g_executor->restringe_a_leitura) {
-        for (int i = 0; mf->capacidades[i]; i++) {
+    if (!capacidades_permitidas(mf)) {
+        /* a única escrita aceita é a do projeto (escrita_projeto), sempre
+         * com aprovação e prévia — ver capacidades_permitidas */
+        const char *negada = g_str_has_prefix(mf->nome, "arquivo.") && !proj_raiz()
+            ? "nenhum projeto definido (LIA_SESSIOND_PROJETO): ferramentas de arquivo indisponíveis" : NULL;
+        for (int i = 0; !negada && mf->capacidades[i]; i++) {
             const char *cap = mf->capacidades[i];
-            if (strcmp(cap, "leitura_arquivo") != 0 && strcmp(cap, "processo") != 0 && strcmp(cap, "rede") != 0) {
-                enviar_erro(c, m->id, "capacidade_negada", cap);
-                return;
-            }
+            if (strcmp(cap, "leitura_arquivo") != 0 && strcmp(cap, "processo") != 0 && strcmp(cap, "rede") != 0 &&
+                strcmp(cap, "escrita_projeto") != 0)
+                negada = cap;
         }
+        enviar_erro(c, m->id, "capacidade_negada", negada ? negada : "capacidade não permitida");
+        return;
     }
 
     JsonObject *params_brutos = NULL;
@@ -2614,6 +2773,18 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
         enviar_erro(c, m->id, "parametro_invalido", erro_param);
         g_free(erro_param);
         return;
+    }
+    /* escrita em arquivo: a prévia (diff) é calculada AGORA — se a
+     * alteração não for possível como pedida, nada de plano nem aprovação */
+    char *previa = NULL, *previa_sha = NULL;
+    if (proj_ferramenta_de_escrita(ferramenta)) {
+        char *erro_pv = NULL;
+        previa = previa_arquivo(ferramenta, params_brutos, &previa_sha, &erro_pv);
+        if (!previa) {
+            enviar_erro(c, m->id, "parametro_invalido", erro_pv ? erro_pv : "alteração impossível");
+            g_free(erro_pv);
+            return;
+        }
     }
 
     /* 'objetivo'/'justificativa'/'origem_modelo'/'pergunta_id' são opcionais
@@ -2643,6 +2814,10 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
     c->ferramenta_pendente = g_strdup(ferramenta);
     if (c->parametros_pendentes) json_node_unref(c->parametros_pendentes);
     c->parametros_pendentes = obter_parametros_copia(m->dados);
+    g_free(c->previa_pendente);
+    c->previa_pendente = previa;
+    g_free(c->previa_sha_pendente);
+    c->previa_sha_pendente = previa_sha;
     {
         JsonGenerator *gh = json_generator_new();
         json_generator_set_root(gh, c->parametros_pendentes);
@@ -3172,6 +3347,41 @@ int main(int argc, char **argv)
     escolher_modelo();
     aquecer_modelo();
     g_web_automatica = g_strcmp0(g_getenv("LIA_SESSIOND_WEB_AUTOMATICA"), "sim") == 0;
+    /* catálogo de boas práticas: LIA_SESSIOND_PRATICAS ou, ao lado do
+     * binário, ../conhecimento/praticas/praticas.json; o projeto pode
+     * acrescentar/substituir práticas em <projeto>/.lia/praticas.json */
+    {
+        char *exe = g_file_read_link("/proc/self/exe", NULL);
+        char *dir_exe = exe ? g_path_get_dirname(exe) : g_strdup(".");
+        char *padrao = g_build_filename(dir_exe, "..", "conhecimento", "praticas", "praticas.json", NULL);
+        const char *nucleo = g_getenv("LIA_SESSIOND_PRATICAS") ? g_getenv("LIA_SESSIOND_PRATICAS") : padrao;
+        const char *proj_env = g_getenv("LIA_SESSIOND_PROJETO");
+        char *ext = proj_env && *proj_env ? g_build_filename(proj_env, ".lia", "praticas.json", NULL) : NULL;
+        const char *arqs[] = { nucleo, ext, NULL };
+        char *erro_pr = NULL;
+        PraticasCatalogo *cat = praticas_carregar(arqs, &erro_pr);
+        if (cat) {
+            praticas_definir_global(cat);
+            g_print("lia-sessiond: boas práticas: %u no catálogo (%s%s), versão %.12s\n", praticas_total(cat), nucleo,
+                    ext && g_file_test(ext, G_FILE_TEST_EXISTS) ? " + extensão do projeto" : "", praticas_versao(cat));
+        } else {
+            g_print("lia-sessiond: boas práticas indisponíveis: %s\n", erro_pr);
+        }
+        g_free(erro_pr); g_free(ext); g_free(padrao); g_free(dir_exe); g_free(exe);
+    }
+    /* projeto: a pasta onde a Lia lê e (sempre com aprovação e prévia)
+     * altera arquivos — nunca fora dela */
+    const char *projeto = g_getenv("LIA_SESSIOND_PROJETO");
+    if (projeto && *projeto) {
+        char *erro_proj = NULL;
+        if (proj_definir_raiz(projeto, &erro_proj))
+            g_print("lia-sessiond: projeto: %s (leitura livre; criar/editar/apagar/mover só com aprovação e prévia; nunca .git/ nem fora dele)\n", proj_raiz());
+        else
+            g_print("lia-sessiond: projeto RECUSADO: %s — ferramentas de arquivo desligadas\n", erro_proj);
+        g_free(erro_proj);
+    } else {
+        g_print("lia-sessiond: projeto: nenhum (defina LIA_SESSIOND_PROJETO para ler e alterar arquivos)\n");
+    }
     g_print("lia-sessiond: web automática: %s\n", g_web_automatica
             ? "LIGADA (web.pesquisar/web.abrir sem confirmação; demais ações continuam exigindo aprovação)"
             : "desligada (toda pesquisa web pede aprovação)");

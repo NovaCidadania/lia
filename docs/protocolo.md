@@ -325,3 +325,31 @@ Uma tarefa cujos passos são `web.pesquisar`/`web.abrir` nunca termina só com a
 Para depurar a síntese, `LIA_SESSIOND_DEPURAR_SINTESE=1` imprime no log do daemon a saída bruta do modelo antes da conferência.
 
 **Web automática.** Com `LIA_SESSIOND_WEB_AUTOMATICA=sim` (ligada por padrão em `chat/rodar_local.sh`; `LIA_WEB_AUTOMATICA=nao` desliga), `web.pesquisar` e `web.abrir` rodam sem `aprovar`: a política vale só para ferramentas `web.` cuja única capacidade é `rede` (HTTPS externo, nada gravado, nada executado na máquina). Gravação em disco, persistência, administração e execução de programas continuam exigindo aprovação explícita. O daemon marca `"web_automatica": true` em `proposta.dados.validacao` e em `plano`, e o cliente é obrigado a sinalizar o acesso (o lia-chat mostra "🌐 web automática: acessando a internet sem pedir confirmação — <consulta>"). Cada passo é auditado com `aprovacao` = "dispensada: web automática" na mensagem `auditoria` e `aprovacao=dispensada_web_automatica` no log em disco. Sem a variável, o daemon continua exigindo aprovação para toda pesquisa web.
+
+## 12. Arquivos do projeto e boas práticas
+
+Com `LIA_SESSIOND_PROJETO` definido, o executor real oferece as ferramentas
+`arquivo.*` (ler, listar, buscar, info — sem aprovação; criar, escrever,
+editar, anexar, apagar, mover, copiar, criar_pasta, converter, permissoes,
+desfazer — sempre com aprovação) e `praticas.consultar` (catálogo local de
+boas práticas, sem aprovação). Detalhes, segurança e exemplos em
+`docs/CODING.md`.
+
+Mudanças no protocolo:
+
+- `plano.previa` (ferramenta isolada) e `plano.previas[]` (tarefa:
+  `{passo_id, ferramenta, previa, erro?}`): diff unificado do que a escrita
+  vai fazer. É o que a pessoa aprova; o cliente deve exibi-lo antes de
+  pedir a decisão.
+- Uma escrita impossível (trecho ausente/ambíguo, arquivo que já existe,
+  fora do projeto, `.git/`) é recusada antes do plano: `erro`
+  `parametro_invalido` (ou `capacidade_negada` fora do projeto) para
+  `solicitar` direto, ou `proposta` sem plano com o motivo em
+  `resposta_texto` no fluxo de pergunta.
+- Se os arquivos mudarem entre a prévia e a execução, nada é alterado: o
+  passo termina com `plano_alterado` e a `resposta` explica.
+- `auditoria.aprovacao`: "aprovada por uma pessoa", "dispensada: web
+  automática (...)" ou "não exigida (leitura local)".
+- Tarefas de arquivo e de boas práticas terminam com uma `resposta`
+  determinística curta (o detalhe — conteúdo, lista, diff, práticas — vem
+  na observação do passo).

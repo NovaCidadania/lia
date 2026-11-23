@@ -1,6 +1,7 @@
 /* lia-sessiond — implementação de sessiond/agente.h. Ver o cabeçalho. */
 #include "agente.h"
 #include "roteador.h"
+#include "intencao_arquivos.h"
 #include <json-glib/json-glib.h>
 #include <math.h>
 #include <stdlib.h>
@@ -824,6 +825,44 @@ AgentePlano *agente_planejar_com_contexto(const char *pedido, const char *contex
         g_free(t);
         return NULL;
     }
+    /* boas práticas de programação: catálogo local (projeto/praticas.h),
+     * antes da web — "boas práticas de C" não é pergunta para a internet */
+    if (tem_algum(t, L(" boas praticas", " boa pratica", " melhores praticas", " praticas de ", " praticas para ", " checklist de",
+                      " checklist para", " qual a forma correta", " como fazer direito", " do jeito certo", " padroes de codigo",
+                      " principios de"))) {
+        JsonBuilder *jb = json_builder_new();
+        json_builder_begin_object(jb);
+        json_builder_set_member_name(jb, "tarefa");
+        json_builder_add_string_value(jb, pedido);
+        json_builder_end_object(jb);
+        JsonGenerator *jg = json_generator_new();
+        JsonNode *raiz = json_builder_get_root(jb);
+        json_generator_set_root(jg, raiz);
+        char *params = json_generator_to_data(jg, NULL);
+        json_node_unref(raiz);
+        g_object_unref(jg);
+        g_object_unref(jb);
+        AgentePlano *pp = agente_plano_novo("consultar o catálogo local de boas práticas para esta tarefa", "boas_praticas");
+        agente_plano_acrescentar(pp, NULL, "praticas.consultar", params, NULL, "boas práticas relevantes", L("praticas_selecionadas"), 0, FALSE);
+        g_free(params);
+        pp->criterios_sucesso = strv_de(L("praticas_selecionadas"));
+        if (compat) *compat = COMPAT_COMPATIVEL;
+        g_free(t);
+        return pp;
+    }
+    /* arquivos do projeto: pedidos explícitos (ler, listar, procurar, criar,
+     * substituir, apagar, mover...) viram um plano de um passo; a escrita
+     * continua exigindo aprovação com prévia no daemon */
+    {
+        char *pergunta_arq = NULL;
+        AgentePlano *pa = agente_planejar_arquivos(pedido, &pergunta_arq);
+        if (pa || pergunta_arq) {
+            if (compat) *compat = pa ? COMPAT_COMPATIVEL : COMPAT_ESCLARECER;
+            if (texto_direto) *texto_direto = pergunta_arq; else g_free(pergunta_arq);
+            g_free(t);
+            return pa;
+        }
+    }
     int limite = limite_pedido(t);
     char lim[32];
     g_snprintf(lim, sizeof lim, "{\"limite\":%d}", limite ? limite : 10);
@@ -1132,6 +1171,21 @@ char **agente_extrair_evidencias(const char *ferramenta, const char *parametros_
             ev = strv_acrescentar(ev, "resultados_web");
         else
             lim = strv_acrescentar(lim, "a busca não devolveu resultados estruturados");
+    } else if (strcmp(f, "praticas.consultar") == 0) {
+        JsonArray *pa = d && json_object_has_member(d, "praticas") ? json_object_get_array_member(d, "praticas") : NULL;
+        if (pa && json_array_get_length(pa) > 0) ev = strv_acrescentar(ev, "praticas_selecionadas");
+        else lim = strv_acrescentar(lim, "nenhuma prática do catálogo se aplicou claramente ao pedido");
+    } else if (g_str_has_prefix(f, "arquivo.")) {
+        /* arquivos do projeto: a evidência é o próprio resultado da operação */
+        if (!strcmp(f, "arquivo.ler")) ev = strv_acrescentar(ev, "conteudo_arquivo");
+        else if (!strcmp(f, "arquivo.listar")) ev = strv_acrescentar(ev, "lista_arquivos");
+        else if (!strcmp(f, "arquivo.buscar")) ev = strv_acrescentar(ev, "busca_arquivos");
+        else if (!strcmp(f, "arquivo.info")) ev = strv_acrescentar(ev, "info_arquivo");
+        else if (d && json_object_has_member(d, "operacao_id")) {
+            JsonNode *cn = json_object_has_member(d, "completa") ? json_object_get_member(d, "completa") : NULL;
+            if (!cn || json_node_get_boolean(cn)) ev = strv_acrescentar(ev, "arquivo_alterado");
+            else lim = strv_acrescentar(lim, "a alteração parou no meio; veja o que foi feito no resultado");
+        }
     } else if (strcmp(f, "web.abrir") == 0) {
         const char *conteudo = d ? jstr(d, "conteudo") : NULL;
         if (conteudo && *conteudo) ev = strv_acrescentar(ev, "conteudo_web");

@@ -1,0 +1,3876 @@
+{
+ "schema_version": 2,
+ "idioma": "pt-BR",
+ "origem": "redação original para o projeto Lia: princípios gerais de engenharia de software escritos com palavras próprias, sem transcrição de trechos dos livros citados em 'referencias' (que indicam onde o tema é discutido em profundidade)",
+ "licenca": "mesma licença do repositório Lia",
+ "aviso": "orientação para o agente; não são instruções de sistema e nunca sobrepõem as regras do repositório, os testes e o código existente",
+ "praticas": [
+  {
+   "id": "raciocinio.criterios-de-aceite",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "tarefa",
+    "pedido",
+    "implementar",
+    "implemente",
+    "criar",
+    "crie",
+    "programa",
+    "corrigir",
+    "corrija",
+    "funcionalidade",
+    "feature",
+    "bug"
+   ],
+   "regra": "Antes de escrever código, transforme o pedido em comportamentos observáveis e critérios de aceite verificáveis.",
+   "passos": [
+    "liste entradas, saídas e efeitos colaterais esperados",
+    "escreva 2 a 5 critérios do tipo 'dado X, quando Y, então Z'",
+    "separe o que foi pedido do que você está supondo",
+    "decida como cada critério será verificado (teste, comando, leitura)"
+   ],
+   "checagens": [
+    "cada critério pode ser checado por um teste ou comando",
+    "as suposições estão escritas",
+    "nenhum critério depende de 'parecer certo'"
+   ],
+   "anti_padroes": [
+    "começar a editar com base numa interpretação não verificada",
+    "critério vago como 'funcionar bem'"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "The Clean Coder (Martin)"
+   ]
+  },
+  {
+   "id": "raciocinio.decompor",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "complexo",
+    "grande",
+    "vários passos",
+    "arquitetura",
+    "projeto",
+    "planejar",
+    "dividir"
+   ],
+   "regra": "Divida um problema grande em partes pequenas, cada uma com entrada, saída e um jeito de verificar isoladamente.",
+   "passos": [
+    "identifique as partes independentes",
+    "ordene pela dependência entre elas",
+    "resolva e verifique uma parte de cada vez",
+    "integre só o que já foi verificado"
+   ],
+   "checagens": [
+    "cada parte tem um teste ou verificação própria",
+    "a ordem de execução respeita as dependências"
+   ],
+   "anti_padroes": [
+    "escrever tudo de uma vez e testar só no fim"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 95,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "raciocinio.invariantes",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "laço",
+    "loop",
+    "algoritmo",
+    "estrutura de dados",
+    "invariante",
+    "correção",
+    "prova"
+   ],
+   "regra": "Para laços e estruturas de dados, escreva a invariante: o que é sempre verdade antes e depois de cada passo.",
+   "passos": [
+    "enuncie a invariante em uma frase",
+    "confira que ela vale antes da primeira iteração",
+    "confira que cada iteração a preserva",
+    "confira que, ao terminar, invariante + condição de saída implicam o resultado"
+   ],
+   "checagens": [
+    "a invariante está escrita num comentário ou assert",
+    "há teste para 0, 1 e muitos elementos"
+   ],
+   "anti_padroes": [
+    "ajustar índices ('+1', '-1') por tentativa e erro"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Code Complete (McConnell)",
+    "Concepts, Techniques, and Models of Computer Programming (Van Roy, Haridi)"
+   ]
+  },
+  {
+   "id": "raciocinio.pre-pos-condicoes",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "função",
+    "rotina",
+    "contrato",
+    "parâmetro",
+    "retorno",
+    "api"
+   ],
+   "regra": "Defina pré-condições (o que a função exige) e pós-condições (o que ela garante) e verifique-as nas fronteiras.",
+   "passos": [
+    "escreva o que cada parâmetro aceita (faixa, nulo, tamanho)",
+    "escreva o que o retorno garante em sucesso e em erro",
+    "valide as pré-condições na entrada pública",
+    "use asserts para o que só pode falhar por bug interno"
+   ],
+   "checagens": [
+    "o contrato está documentado junto da declaração",
+    "entradas inválidas têm teste"
+   ],
+   "anti_padroes": [
+    "validar a mesma coisa em todas as camadas internas",
+    "não validar nada na fronteira pública"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "raciocinio.casos-limite",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "limite",
+    "borda",
+    "vazio",
+    "zero",
+    "nulo",
+    "máximo",
+    "overflow",
+    "teste"
+   ],
+   "regra": "Enumere os casos-limite antes de implementar: vazio, um elemento, máximo, negativo, nulo, repetido, inválido.",
+   "passos": [
+    "liste os casos-limite do domínio",
+    "decida o comportamento esperado em cada um",
+    "transforme cada caso em teste"
+   ],
+   "checagens": [
+    "existe teste para entrada vazia e para o máximo permitido",
+    "o comportamento com entrada inválida é definido"
+   ],
+   "anti_padroes": [
+    "testar só o caminho feliz"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 95,
+   "referencias": [
+    "Code Complete (McConnell)",
+    "C How to Program (Deitel)"
+   ]
+  },
+  {
+   "id": "raciocinio.hipotese-antes-de-mudar",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "erro",
+    "falha",
+    "bug",
+    "não funciona",
+    "investigar",
+    "depurar",
+    "debug"
+   ],
+   "regra": "Diante de uma falha, formule uma hipótese testável antes de mudar código; mude uma coisa por vez.",
+   "passos": [
+    "reproduza a falha de forma confiável",
+    "escreva a hipótese da causa",
+    "faça o menor experimento que a confirme ou refute",
+    "só então corrija, e mantenha o teste que reproduzia a falha"
+   ],
+   "checagens": [
+    "a falha foi reproduzida antes da correção",
+    "o teste de reprodução passa depois da correção"
+   ],
+   "anti_padroes": [
+    "mudar várias coisas ao mesmo tempo para 'ver se resolve'",
+    "corrigir o sintoma sem entender a causa"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "raciocinio.suposicoes-explicitas",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "suposição",
+    "assumir",
+    "ambíguo",
+    "dúvida",
+    "não sei",
+    "requisito"
+   ],
+   "regra": "Torne explícitas as suposições; se uma delas mudaria a arquitetura, pergunte antes de implementar.",
+   "passos": [
+    "liste as suposições feitas",
+    "classifique: baratas de mudar depois ou caras",
+    "pergunte sobre as caras"
+   ],
+   "checagens": [
+    "nenhuma suposição cara ficou implícita"
+   ],
+   "anti_padroes": [
+    "descobrir no fim que o requisito era outro"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "The Mythical Man-Month (Brooks)"
+   ]
+  },
+  {
+   "id": "raciocinio.exemplos-trabalhados",
+   "versao": 1,
+   "categoria": "raciocinio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "algoritmo",
+    "cálculo",
+    "transformação",
+    "fórmula",
+    "parser",
+    "conversão"
+   ],
+   "regra": "Resolva dois ou três exemplos concretos à mão antes de generalizar em código; eles viram os primeiros testes.",
+   "passos": [
+    "escolha exemplos simples, típicos e de borda",
+    "calcule a saída esperada manualmente",
+    "codifique-os como testes"
+   ],
+   "checagens": [
+    "os exemplos manuais estão nos testes"
+   ],
+   "anti_padroes": [
+    "escrever o algoritmo geral sem nenhum exemplo verificado"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Concepts, Techniques, and Models of Computer Programming (Van Roy, Haridi)"
+   ]
+  },
+  {
+   "id": "repo.estado-antes",
+   "versao": 1,
+   "categoria": "repositorio",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "repositório",
+    "editar",
+    "alterar",
+    "modificar",
+    "commit",
+    "git",
+    "projeto"
+   ],
+   "regra": "Antes de modificar, descubra o estado e as convenções do repositório e preserve o trabalho já existente.",
+   "passos": [
+    "rode git status e note arquivos modificados que não são seus",
+    "leia README/CONTRIBUTING e o estilo dos arquivos vizinhos",
+    "descubra como compilar e testar",
+    "não toque em mudanças alheias"
+   ],
+   "checagens": [
+    "o estado inicial foi registrado",
+    "mudanças preexistentes continuam intactas no fim"
+   ],
+   "anti_padroes": [
+    "sobrescrever ou reverter alterações que não são suas",
+    "reformatar arquivos inteiros sem pedido"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "Pro Git (Chacon, Straub)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "repo.leitura-focalizada",
+   "versao": 1,
+   "categoria": "contexto",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "arquivo grande",
+    "ler",
+    "procurar",
+    "onde",
+    "símbolo",
+    "função",
+    "contexto"
+   ],
+   "regra": "Leia de forma focalizada: procure o símbolo, abra só o trecho relevante e siga chamadas até o consumidor.",
+   "passos": [
+    "busque o nome da função/tipo",
+    "abra a definição e os usos principais",
+    "leia intervalos de linhas, não arquivos inteiros sem motivo"
+   ],
+   "checagens": [
+    "cada leitura responde a uma pergunta específica",
+    "não há leitura repetida sem informação nova"
+   ],
+   "anti_padroes": [
+    "despejar o repositório inteiro no contexto",
+    "concluir pelo nome do arquivo sem ler o código"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 95,
+   "referencias": [
+    "Working Effectively with Legacy Code (Feathers)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "contexto.orcamento",
+   "versao": 1,
+   "categoria": "contexto",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "contexto",
+    "tokens",
+    "resumo",
+    "grande",
+    "muitos arquivos",
+    "memória"
+   ],
+   "regra": "Mantenha o contexto proporcional à tarefa: recupere sob demanda e resuma o que já foi entendido.",
+   "passos": [
+    "defina o que precisa saber para o próximo passo",
+    "resuma descobertas em poucas linhas com caminho:linha",
+    "descarte detalhes que não afetam a decisão"
+   ],
+   "checagens": [
+    "o resumo cita arquivos e linhas verificáveis"
+   ],
+   "anti_padroes": [
+    "carregar o catálogo inteiro ou livros inteiros no prompt"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "contexto.checkpoint",
+   "versao": 1,
+   "categoria": "contexto",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "tarefa longa",
+    "checkpoint",
+    "progresso",
+    "retomar",
+    "interrupção"
+   ],
+   "regra": "Em tarefas longas, registre checkpoints: o que foi feito, o que foi verificado e o próximo passo.",
+   "passos": [
+    "após cada etapa verificada, anote resultado e evidência",
+    "guarde o próximo passo concreto",
+    "retome a partir do último checkpoint verificado"
+   ],
+   "checagens": [
+    "dá para retomar sem refazer o que já estava verificado"
+   ],
+   "anti_padroes": [
+    "perder o fio e repetir trabalho"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "The Mythical Man-Month (Brooks)"
+   ]
+  },
+  {
+   "id": "agente.progresso",
+   "versao": 1,
+   "categoria": "agente",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "agente",
+    "ferramenta",
+    "loop",
+    "repetir",
+    "tentativa",
+    "próximo passo"
+   ],
+   "regra": "Cada ação deve reduzir uma incerteza, produzir uma mudança ou verificar um critério; não repita a mesma ação esperando outro resultado.",
+   "passos": [
+    "antes de agir, diga que informação ou mudança a ação produz",
+    "se uma ação repetida não trouxe nada novo, mude de estratégia",
+    "pare e explique o bloqueio quando não houver ação útil"
+   ],
+   "checagens": [
+    "não há chamadas idênticas consecutivas sem ganho"
+   ],
+   "anti_padroes": [
+    "ler o mesmo arquivo várias vezes",
+    "declarar progresso sem evidência"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 95,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "conclusao.evidencias",
+   "versao": 1,
+   "categoria": "conclusao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "concluído",
+    "pronto",
+    "feito",
+    "terminar",
+    "entregar",
+    "finalizar"
+   ],
+   "regra": "Só declare concluído com evidências: o diff real, o build e os testes executados depois da mudança e os critérios conferidos.",
+   "passos": [
+    "mostre o diff da mudança",
+    "rode build e testes depois da última edição",
+    "confira cada critério de aceite",
+    "diga o que não foi verificado"
+   ],
+   "checagens": [
+    "existe saída de teste posterior à última edição",
+    "o diff contém a mudança pedida"
+   ],
+   "anti_padroes": [
+    "dizer 'feito' sem rodar nada",
+    "contar um binário antigo como prova"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "The Clean Coder (Martin)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "design.mudanca-pequena",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "alterar",
+    "mudar",
+    "corrigir",
+    "implementar",
+    "refatorar",
+    "diff"
+   ],
+   "regra": "Faça a menor mudança coerente que satisfaz o pedido; mantenha interfaces e estilo do código vizinho.",
+   "passos": [
+    "identifique o ponto mínimo de mudança",
+    "evite reformatar ou renomear o que não é necessário",
+    "separe refatoração de mudança de comportamento"
+   ],
+   "checagens": [
+    "o diff só toca o necessário",
+    "não há mudanças de estilo misturadas com lógica"
+   ],
+   "anti_padroes": [
+    "reescrever um módulo inteiro para mudar uma linha"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 95,
+   "referencias": [
+    "Refactoring (Fowler)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "design.responsabilidade-unica",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "classe",
+    "módulo",
+    "função",
+    "responsabilidade",
+    "coesão",
+    "organizar"
+   ],
+   "regra": "Cada função ou módulo deve ter um único motivo para mudar; se a descrição precisa de 'e', divida.",
+   "passos": [
+    "descreva a unidade em uma frase",
+    "se houver dois motivos de mudança, separe",
+    "agrupe o que muda junto"
+   ],
+   "checagens": [
+    "cada função cabe numa descrição curta sem 'e'"
+   ],
+   "anti_padroes": [
+    "módulo 'utilitários' com tudo",
+    "função que valida, calcula, grava e imprime"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Clean Code (Martin)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "design.dry",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "duplicação",
+    "repetido",
+    "copiar",
+    "colar",
+    "mesma lógica",
+    "dry"
+   ],
+   "regra": "Cada conhecimento deve ter uma representação única e autoritativa; duplicar a mesma regra em vários lugares gera inconsistência.",
+   "passos": [
+    "encontre a regra duplicada (não só texto parecido)",
+    "extraia para uma função/constante única",
+    "faça os usos chamarem a fonte única"
+   ],
+   "checagens": [
+    "uma mudança na regra exige editar um só lugar"
+   ],
+   "anti_padroes": [
+    "copiar e colar lógica de negócio",
+    "abstrair código que só é parecido por acaso"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Refactoring (Fowler)"
+   ]
+  },
+  {
+   "id": "design.ortogonalidade",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "acoplamento",
+    "dependência",
+    "independente",
+    "módulo",
+    "efeito colateral"
+   ],
+   "regra": "Mantenha componentes ortogonais: mudar um não deve exigir mudar outros não relacionados.",
+   "passos": [
+    "liste o que cada componente sabe dos outros",
+    "remova dependências de detalhes internos",
+    "comunique por interfaces pequenas"
+   ],
+   "checagens": [
+    "dá para testar o componente isolado"
+   ],
+   "anti_padroes": [
+    "estado global compartilhado",
+    "módulos que conhecem a estrutura interna uns dos outros"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "design.nomes",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "nome",
+    "variável",
+    "função",
+    "renomear",
+    "legibilidade",
+    "clareza"
+   ],
+   "regra": "Use nomes que revelam intenção e domínio; o nome deve dispensar comentário sobre o que a coisa é.",
+   "passos": [
+    "nomeie pelo papel no domínio, não pelo tipo",
+    "use verbos para funções e substantivos para dados",
+    "seja consistente com o vocabulário do projeto"
+   ],
+   "checagens": [
+    "um leitor entende o que é sem abrir a definição"
+   ],
+   "anti_padroes": [
+    "nomes como tmp, data2, fazCoisa",
+    "abreviações inventadas"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "Clean Code (Martin)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "design.funcoes-curtas",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "função longa",
+    "rotina",
+    "método",
+    "complexidade",
+    "aninhamento"
+   ],
+   "regra": "Funções devem ser curtas, fazer uma coisa e ter um só nível de abstração; reduza aninhamento com retornos antecipados.",
+   "passos": [
+    "extraia blocos com propósito próprio para funções nomeadas",
+    "trate erros cedo e retorne",
+    "limite parâmetros (agrupe os que andam juntos)"
+   ],
+   "checagens": [
+    "a função cabe na tela",
+    "o aninhamento máximo é baixo"
+   ],
+   "anti_padroes": [
+    "funções de centenas de linhas",
+    "flags booleanas que mudam o comportamento inteiro"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Clean Code (Martin)",
+    "Code Complete (McConnell)",
+    "Refactoring (Fowler)"
+   ]
+  },
+  {
+   "id": "design.comentarios",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "comentário",
+    "documentação",
+    "explicar",
+    "docstring"
+   ],
+   "regra": "Comente o porquê (decisões, restrições, armadilhas), não o que o código já diz; código confuso se reescreve, não se comenta.",
+   "passos": [
+    "remova comentários que repetem o código",
+    "explique decisões não óbvias e limites",
+    "mantenha comentários junto do código que mudam"
+   ],
+   "checagens": [
+    "nenhum comentário contradiz o código"
+   ],
+   "anti_padroes": [
+    "comentário desatualizado",
+    "código comentado deixado para trás"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Clean Code (Martin)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "design.contratos-explicitos",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "interface",
+    "api",
+    "módulo",
+    "ownership",
+    "erro",
+    "contrato",
+    "header"
+   ],
+   "regra": "Defina contratos explícitos entre módulos: formato dos dados, quem é dono da memória, como erros são sinalizados e quais efeitos existem.",
+   "passos": [
+    "documente propriedade de cada ponteiro/recurso",
+    "documente códigos de erro e estados após falha",
+    "documente efeitos colaterais"
+   ],
+   "checagens": [
+    "o header/interface responde 'quem libera?' e 'o que acontece em erro?'"
+   ],
+   "anti_padroes": [
+    "contrato implícito descoberto só lendo a implementação"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 95,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Code Complete (McConnell)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "design.encapsular-o-que-varia",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "variação",
+    "mudança frequente",
+    "extensível",
+    "flexível",
+    "configurável"
+   ],
+   "regra": "Isole o que muda com frequência atrás de uma interface estável; o resto do código não deve depender do detalhe que varia.",
+   "passos": [
+    "identifique o que mudou mais no histórico",
+    "crie uma fronteira (função, tabela, interface) em volta disso",
+    "faça os clientes dependerem da fronteira"
+   ],
+   "checagens": [
+    "acrescentar uma variação não exige mexer nos clientes"
+   ],
+   "anti_padroes": [
+    "if/switch espalhado pelo código para a mesma variação"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)",
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)"
+   ]
+  },
+  {
+   "id": "design.composicao",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "herança",
+    "composição",
+    "reutilizar",
+    "classe base",
+    "hierarquia"
+   ],
+   "regra": "Prefira compor comportamentos a herdar; herança só quando a relação 'é um' for estável e substituível.",
+   "passos": [
+    "verifique se o subtipo pode substituir o tipo base em todo uso",
+    "se não puder, use composição/delegação"
+   ],
+   "checagens": [
+    "nenhum subtipo sobrescreve para 'desligar' comportamento herdado"
+   ],
+   "anti_padroes": [
+    "hierarquias profundas para reaproveitar uma função"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)",
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)"
+   ]
+  },
+  {
+   "id": "design.lei-de-demeter",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "acoplamento",
+    "cadeia",
+    "objeto",
+    "a.b.c",
+    "navegar"
+   ],
+   "regra": "Fale só com vizinhos imediatos: evite cadeias que atravessam a estrutura interna de outros objetos.",
+   "passos": [
+    "troque cadeias a->b->c por uma operação no dono do dado",
+    "exponha intenções, não estruturas"
+   ],
+   "checagens": [
+    "mudar a estrutura interna de um tipo não quebra clientes distantes"
+   ],
+   "anti_padroes": [
+    "x->config->rede->proxy->porta em vários lugares"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 65,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Clean Code (Martin)"
+   ]
+  },
+  {
+   "id": "design.yagni",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "genérico",
+    "futuro",
+    "talvez",
+    "flexibilidade",
+    "abstração",
+    "framework"
+   ],
+   "regra": "Não construa generalidade para necessidades hipotéticas; implemente o necessário hoje de forma fácil de mudar amanhã.",
+   "passos": [
+    "pergunte qual uso real exige a abstração",
+    "remova parâmetros, ganchos e camadas sem uso"
+   ],
+   "checagens": [
+    "toda abstração tem pelo menos dois usos reais ou um requisito explícito"
+   ],
+   "anti_padroes": [
+    "generalidade especulativa",
+    "plugins sem nenhum plugin"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "Refactoring (Fowler)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "design.integridade-conceitual",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "arquitetura",
+    "consistência",
+    "padrão do projeto",
+    "estilo",
+    "convenção"
+   ],
+   "regra": "Mantenha integridade conceitual: o sistema deve parecer obra de uma só mente, com as mesmas ideias aplicadas do mesmo jeito.",
+   "passos": [
+    "siga as convenções e abstrações já usadas no projeto",
+    "não introduza um segundo jeito de fazer a mesma coisa sem migrar o primeiro"
+   ],
+   "checagens": [
+    "a solução usa os mesmos padrões que o código vizinho"
+   ],
+   "anti_padroes": [
+    "três bibliotecas diferentes para a mesma tarefa"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "The Mythical Man-Month (Brooks)"
+   ]
+  },
+  {
+   "id": "design.dados-antes",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "estrutura de dados",
+    "modelo",
+    "representação",
+    "schema",
+    "fila",
+    "pilha",
+    "lista",
+    "árvore",
+    "hash",
+    "grafo",
+    "dicionário",
+    "mapa"
+   ],
+   "regra": "Escolha bem a representação dos dados; com a estrutura certa, o código fica óbvio.",
+   "passos": [
+    "liste as operações mais frequentes",
+    "escolha a estrutura que as torna simples e eficientes",
+    "esconda a representação atrás de operações"
+   ],
+   "checagens": [
+    "as operações principais são diretas sobre a estrutura"
+   ],
+   "anti_padroes": [
+    "código complicado compensando estrutura inadequada"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "The Mythical Man-Month (Brooks)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "design.abstracao-por-barreiras",
+   "versao": 1,
+   "categoria": "design",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "camada",
+    "abstração",
+    "interface",
+    "separar",
+    "nível"
+   ],
+   "regra": "Construa barreiras de abstração: cada camada usa só as operações da camada de baixo, nunca sua representação.",
+   "passos": [
+    "defina construtores, seletores e operações para cada tipo",
+    "proíba acesso direto aos campos fora do módulo"
+   ],
+   "checagens": [
+    "trocar a representação interna não exige mudar os clientes"
+   ],
+   "anti_padroes": [
+    "campos de struct acessados no programa inteiro"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Concepts, Techniques, and Models of Computer Programming (Van Roy, Haridi)"
+   ]
+  },
+  {
+   "id": "funcional.funcoes-puras",
+   "versao": 1,
+   "categoria": "funcional",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "função pura",
+    "efeito colateral",
+    "estado",
+    "testável",
+    "determinístico"
+   ],
+   "regra": "Separe cálculo de efeitos: escreva o núcleo como funções puras (mesma entrada, mesma saída, sem efeitos) e empurre E/S para as bordas.",
+   "passos": [
+    "identifique o cálculo dentro da rotina com E/S",
+    "extraia o cálculo para uma função pura",
+    "deixe a leitura/escrita numa camada fina"
+   ],
+   "checagens": [
+    "o núcleo é testável sem arquivos, rede ou relógio"
+   ],
+   "anti_padroes": [
+    "lógica de negócio misturada com printf/arquivos/globals"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "Functional Thinking (Ford)",
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Concepts, Techniques, and Models of Computer Programming (Van Roy, Haridi)"
+   ]
+  },
+  {
+   "id": "funcional.imutabilidade",
+   "versao": 1,
+   "categoria": "funcional",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "imutável",
+    "mutação",
+    "estado compartilhado",
+    "const",
+    "concorrência",
+    "thread"
+   ],
+   "regra": "Prefira valores imutáveis; mutação só onde necessária e com dono claro. Estado compartilhado mutável é a maior fonte de bugs concorrentes.",
+   "passos": [
+    "marque como const o que não muda",
+    "retorne valores novos em vez de alterar argumentos quando for barato",
+    "concentre a mutação num ponto explícito"
+   ],
+   "checagens": [
+    "parâmetros de entrada não são modificados sem estar documentado"
+   ],
+   "anti_padroes": [
+    "funções que alteram silenciosamente os argumentos"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Functional Thinking (Ford)",
+    "Purely Functional Data Structures (Okasaki)",
+    "Concepts, Techniques, and Models of Computer Programming (Van Roy, Haridi)"
+   ]
+  },
+  {
+   "id": "funcional.alta-ordem",
+   "versao": 1,
+   "categoria": "funcional",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "map",
+    "filter",
+    "reduce",
+    "callback",
+    "função como parâmetro",
+    "iterar"
+   ],
+   "regra": "Use funções de alta ordem para separar o 'o que fazer com cada item' do 'como percorrer'.",
+   "passos": [
+    "identifique laços com a mesma forma",
+    "abstraia o percurso numa função que recebe a operação"
+   ],
+   "checagens": [
+    "laços idênticos em forma não estão duplicados"
+   ],
+   "anti_padroes": [
+    "copiar o mesmo laço trocando só o corpo"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Functional Thinking (Ford)"
+   ]
+  },
+  {
+   "id": "funcional.recursao",
+   "versao": 1,
+   "categoria": "funcional",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "recursão",
+    "recursivo",
+    "árvore",
+    "pilha",
+    "acumulador"
+   ],
+   "regra": "Em recursão, garanta caso base, progresso para ele e profundidade limitada; use acumulador (cauda) ou iteração quando a profundidade puder ser grande.",
+   "passos": [
+    "escreva o caso base primeiro",
+    "mostre que cada chamada se aproxima dele",
+    "estime a profundidade máxima"
+   ],
+   "checagens": [
+    "há teste com a maior profundidade esperada"
+   ],
+   "anti_padroes": [
+    "recursão sem limite sobre entrada externa (estouro de pilha)"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Concepts, Techniques, and Models of Computer Programming (Van Roy, Haridi)",
+    "Purely Functional Data Structures (Okasaki)"
+   ]
+  },
+  {
+   "id": "funcional.estruturas-persistentes",
+   "versao": 1,
+   "categoria": "funcional",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "versão",
+    "histórico",
+    "desfazer",
+    "persistente",
+    "cópia"
+   ],
+   "regra": "Quando precisar de várias versões de um dado (desfazer, histórico), considere estruturas persistentes que compartilham partes em vez de copiar tudo.",
+   "passos": [
+    "avalie o custo de copiar a cada versão",
+    "use compartilhamento estrutural quando as versões diferem pouco"
+   ],
+   "checagens": [
+    "o custo por versão é proporcional à mudança, não ao tamanho total"
+   ],
+   "anti_padroes": [
+    "copiar o estado inteiro a cada operação"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 55,
+   "referencias": [
+    "Purely Functional Data Structures (Okasaki)"
+   ]
+  },
+  {
+   "id": "c.limites",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "array",
+    "buffer",
+    "índice",
+    "tamanho",
+    "memcpy",
+    "strcpy",
+    "ponteiro",
+    "string"
+   ],
+   "regra": "Em C, valide tamanhos e índices antes de todo acesso à memória; o tamanho do buffer viaja junto com o ponteiro.",
+   "passos": [
+    "passe (ponteiro, tamanho) juntos",
+    "confira índice < tamanho antes de acessar",
+    "use funções com limite (snprintf, memcpy com tamanho conferido)",
+    "reserve espaço para o terminador de string"
+   ],
+   "checagens": [
+    "nenhum acesso depende de 'o chamador sabe o tamanho'",
+    "há teste com entrada no tamanho máximo"
+   ],
+   "anti_padroes": [
+    "strcpy/strcat/sprintf/gets",
+    "buffer de tamanho fixo com entrada externa"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "C How to Program (Deitel)",
+    "GNU C Language Manual / GNU C Library Manual",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "c.dono-da-memoria",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "malloc",
+    "free",
+    "alocação",
+    "memória",
+    "vazamento",
+    "leak",
+    "recurso"
+   ],
+   "regra": "Toda alocação ou recurso (memória, fd, FILE*, mutex) tem um dono e um caminho de liberação, inclusive nos caminhos de erro.",
+   "passos": [
+    "documente quem libera cada retorno",
+    "use um único ponto de limpeza (goto fim) nas funções com vários recursos",
+    "anule ponteiros após liberar quando forem reutilizados"
+   ],
+   "checagens": [
+    "ASan/valgrind sem vazamentos nos testes",
+    "cada caminho de erro libera o que adquiriu"
+   ],
+   "anti_padroes": [
+    "double free",
+    "liberar memória que não é sua",
+    "vazar no caminho de erro"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "C How to Program (Deitel)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "c.overflow-inteiro",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "inteiro",
+    "overflow",
+    "multiplicação",
+    "tamanho",
+    "size_t",
+    "soma",
+    "alocação"
+   ],
+   "regra": "Confira overflow em aritmética com tamanhos antes de alocar ou indexar (n * tamanho, a + b); use size_t para tamanhos.",
+   "passos": [
+    "teste n > SIZE_MAX / tamanho antes de multiplicar",
+    "use __builtin_*_overflow ou checagem explícita",
+    "não misture signed e unsigned em comparações"
+   ],
+   "checagens": [
+    "compilação com -Wall -Wextra sem avisos de conversão de sinal relevantes",
+    "há teste com valores no limite"
+   ],
+   "anti_padroes": [
+    "malloc(n * sizeof x) com n vindo de fora sem checagem"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual",
+    "C How to Program (Deitel)"
+   ]
+  },
+  {
+   "id": "c.erros-e-errno",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "erro",
+    "errno",
+    "retorno",
+    "falha",
+    "perror",
+    "-1",
+    "NULL"
+   ],
+   "regra": "Verifique o retorno de toda chamada que pode falhar; leia errno logo após a falha e propague o erro com contexto.",
+   "passos": [
+    "teste o retorno de open/read/write/malloc/fopen etc.",
+    "salve errno antes de chamar outra função",
+    "devolva um erro com o que falhou e onde"
+   ],
+   "checagens": [
+    "nenhuma chamada de sistema tem o retorno ignorado",
+    "mensagens de erro dizem a operação e o motivo"
+   ],
+   "anti_padroes": [
+    "ignorar o retorno de write/close",
+    "usar errno sem ter havido falha"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 95,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual",
+    "Modern Operating Systems (Tanenbaum)"
+   ]
+  },
+  {
+   "id": "c.comportamento-indefinido",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "undefined",
+    "indefinido",
+    "ub",
+    "ponteiro",
+    "alias",
+    "shift",
+    "sinal",
+    "não inicializado"
+   ],
+   "regra": "Evite comportamento indefinido: variáveis não inicializadas, overflow de signed, shift fora da faixa, aliasing inválido, ponteiro pendurado.",
+   "passos": [
+    "inicialize tudo na declaração",
+    "rode testes com -fsanitize=address,undefined",
+    "compile com -Wall -Wextra -Werror"
+   ],
+   "checagens": [
+    "UBSan/ASan limpos nos testes"
+   ],
+   "anti_padroes": [
+    "confiar que 'funciona na minha máquina'"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual",
+    "C How to Program (Deitel)"
+   ]
+  },
+  {
+   "id": "c.strings",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "string",
+    "char",
+    "texto",
+    "utf-8",
+    "terminador",
+    "strlen"
+   ],
+   "regra": "Strings em C precisam de terminador e tamanho conhecido; texto externo pode não ser UTF-8 válido nem ter terminador.",
+   "passos": [
+    "use funções que recebem tamanho",
+    "valide UTF-8 quando o texto vier de fora",
+    "trate strings vindas de fora como bytes até validar"
+   ],
+   "checagens": [
+    "nenhum strlen em buffer que pode não ter terminador"
+   ],
+   "anti_padroes": [
+    "confiar que a entrada termina em \\0"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual",
+    "C How to Program (Deitel)"
+   ]
+  },
+  {
+   "id": "c.format-string",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "printf",
+    "format",
+    "log",
+    "mensagem",
+    "string de formato"
+   ],
+   "regra": "Nunca use dado externo como string de formato; sempre printf(\"%s\", texto).",
+   "passos": [
+    "procure printf/fprintf/syslog com um só argumento variável",
+    "corrija para formato fixo"
+   ],
+   "checagens": [
+    "compilação com -Wformat-security sem avisos"
+   ],
+   "anti_padroes": [
+    "printf(entrada_do_usuario)"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "c.const-e-escopo",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "const",
+    "static",
+    "escopo",
+    "global",
+    "variável",
+    "header"
+   ],
+   "regra": "Use const para o que não muda, static para o que não precisa sair do arquivo e declare variáveis no menor escopo possível.",
+   "passos": [
+    "marque parâmetros de leitura como const",
+    "torne static funções internas",
+    "declare a variável perto do primeiro uso"
+   ],
+   "checagens": [
+    "o header só expõe a interface pública"
+   ],
+   "anti_padroes": [
+    "globais mutáveis compartilhadas entre arquivos"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "Code Complete (McConnell)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "c.chamadas-de-sistema",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "read",
+    "write",
+    "EINTR",
+    "parcial",
+    "descritor",
+    "fd",
+    "socket"
+   ],
+   "regra": "read/write podem transferir menos bytes que o pedido ou ser interrompidos (EINTR); trate os dois casos em laço.",
+   "passos": [
+    "repita até transferir tudo ou erro real",
+    "trate EINTR repetindo",
+    "feche descritores em todos os caminhos e use O_CLOEXEC"
+   ],
+   "checagens": [
+    "há teste com escrita/leitura parcial ou pipe pequeno"
+   ],
+   "anti_padroes": [
+    "assumir que write escreveu tudo"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "c.realloc",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "realloc",
+    "crescer",
+    "buffer dinâmico",
+    "vetor"
+   ],
+   "regra": "Use realloc com ponteiro temporário: se falhar, o bloco antigo continua válido e precisa ser liberado.",
+   "passos": [
+    "tmp = realloc(p, novo); if (!tmp) { tratar; } p = tmp;",
+    "cresça geometricamente com checagem de overflow"
+   ],
+   "checagens": [
+    "nenhum p = realloc(p, ...)"
+   ],
+   "anti_padroes": [
+    "perder o ponteiro original quando realloc falha"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual",
+    "C How to Program (Deitel)"
+   ]
+  },
+  {
+   "id": "c.macros",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "macro",
+    "define",
+    "pré-processador",
+    "#define"
+   ],
+   "regra": "Prefira funções static inline e constantes a macros; quando usar macro, parentetize argumentos e o corpo e evite efeitos colaterais duplicados.",
+   "passos": [
+    "troque macros de expressão por funções inline",
+    "parentetize cada uso de argumento",
+    "use do { } while (0) para macros de comando"
+   ],
+   "checagens": [
+    "nenhuma macro avalia argumento com efeito colateral duas vezes"
+   ],
+   "anti_padroes": [
+    "MAX(i++, j)"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "c.threads",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "thread",
+    "mutex",
+    "concorrência",
+    "corrida",
+    "lock",
+    "atomic"
+   ],
+   "regra": "Em código com threads, todo dado compartilhado tem um lock dono (ou é atômico); adquira locks sempre na mesma ordem.",
+   "passos": [
+    "liste os dados compartilhados e quem os protege",
+    "defina uma ordem global de locks",
+    "não chame código desconhecido segurando lock"
+   ],
+   "checagens": [
+    "testes com -fsanitize=thread quando houver threads"
+   ],
+   "anti_padroes": [
+    "volatile como sincronização",
+    "lock em ordens diferentes (deadlock)"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "c.compilacao-estrita",
+   "versao": 1,
+   "categoria": "c",
+   "linguagens": [
+    "c"
+   ],
+   "ativacao": [
+    "compilar",
+    "warning",
+    "aviso",
+    "gcc",
+    "clang",
+    "makefile",
+    "flags"
+   ],
+   "regra": "Compile com avisos no máximo (-Wall -Wextra) tratados como erro e rode os testes com sanitizers.",
+   "passos": [
+    "use -Wall -Wextra -Werror",
+    "tenha um alvo de teste com -fsanitize=address,undefined",
+    "não silencie avisos sem entender"
+   ],
+   "checagens": [
+    "build limpo, sem avisos"
+   ],
+   "anti_padroes": [
+    "desligar avisos para fazer compilar"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "GNU C Language Manual / GNU C Library Manual",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "testes.regressao",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "bug",
+    "correção",
+    "regressão",
+    "corrigir",
+    "falha"
+   ],
+   "regra": "Todo bug corrigido ganha um teste que falhava antes da correção e passa depois.",
+   "passos": [
+    "escreva o teste que reproduz o bug",
+    "confirme que ele falha",
+    "corrija",
+    "confirme que passa e mantenha-o na suíte"
+   ],
+   "checagens": [
+    "o teste falha se a correção for revertida"
+   ],
+   "anti_padroes": [
+    "corrigir sem teste",
+    "teste escrito depois que nunca falhou"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "The Clean Coder (Martin)",
+    "Working Effectively with Legacy Code (Feathers)"
+   ]
+  },
+  {
+   "id": "testes.camadas",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "teste",
+    "unitário",
+    "integração",
+    "ponta a ponta",
+    "e2e",
+    "cobertura"
+   ],
+   "regra": "Teste na camada adequada ao risco: lógica pura em unitários rápidos, contratos entre partes em integração, fluxo crítico de ponta a ponta.",
+   "passos": [
+    "classifique o risco da mudança",
+    "cubra a lógica com unitários",
+    "cubra a fronteira alterada com integração",
+    "mantenha poucos e-2-e para fluxos críticos"
+   ],
+   "checagens": [
+    "a mudança tem teste na camada onde pode quebrar"
+   ],
+   "anti_padroes": [
+    "só testes ponta a ponta lentos e frágeis",
+    "nenhum teste de integração na fronteira mudada"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "The Clean Coder (Martin)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "testes.ciclo-curto",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "tdd",
+    "teste primeiro",
+    "vermelho",
+    "verde",
+    "ciclo"
+   ],
+   "regra": "Trabalhe em ciclos curtos: escreva um teste pequeno que falha, faça passar com o mínimo, refatore com a suíte verde.",
+   "passos": [
+    "um comportamento por ciclo",
+    "rode a suíte a cada passo",
+    "refatore só com testes verdes"
+   ],
+   "checagens": [
+    "a suíte roda rápido o suficiente para ser usada a cada mudança"
+   ],
+   "anti_padroes": [
+    "escrever muito código sem rodar nada"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "The Clean Coder (Martin)",
+    "Refactoring (Fowler)"
+   ]
+  },
+  {
+   "id": "testes.independentes",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "teste instável",
+    "flaky",
+    "ordem",
+    "fixture",
+    "estado compartilhado"
+   ],
+   "regra": "Testes devem ser independentes, repetíveis e determinísticos: sem ordem, sem rede real, sem relógio ou dados aleatórios não controlados.",
+   "passos": [
+    "cada teste cria e limpa o próprio estado",
+    "use diretórios temporários",
+    "fixe sementes e relógio",
+    "simule rede e serviços"
+   ],
+   "checagens": [
+    "a suíte passa em qualquer ordem e repetida"
+   ],
+   "anti_padroes": [
+    "teste que depende de outro ter rodado antes",
+    "teste que usa internet"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Clean Code (Martin)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "testes.nomes-e-falhas",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "nome de teste",
+    "mensagem",
+    "assert",
+    "diagnóstico"
+   ],
+   "regra": "O nome do teste descreve o comportamento; a falha deve dizer o que se esperava e o que veio.",
+   "passos": [
+    "nomeie como 'dado/quando/então' ou frase de comportamento",
+    "imprima esperado e obtido na falha"
+   ],
+   "checagens": [
+    "uma falha é entendida sem abrir o código do teste"
+   ],
+   "anti_padroes": [
+    "test1, test2",
+    "assert sem mensagem"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Clean Code (Martin)"
+   ]
+  },
+  {
+   "id": "testes.valores-limite",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "partição",
+    "limite",
+    "borda",
+    "valores de teste",
+    "classes de equivalência"
+   ],
+   "regra": "Escolha dados de teste por classes de equivalência e valores-limite (mínimo, máximo, logo abaixo, logo acima, vazio, inválido).",
+   "passos": [
+    "identifique as classes de entrada",
+    "teste um representante de cada classe",
+    "teste as bordas de cada uma"
+   ],
+   "checagens": [
+    "cada borda tem um teste"
+   ],
+   "anti_padroes": [
+    "muitos testes do mesmo caso típico"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "testes.caracterizacao",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "legado",
+    "sem testes",
+    "código antigo",
+    "entender comportamento"
+   ],
+   "regra": "Em código legado sem testes, escreva testes de caracterização que registram o comportamento atual antes de mudar qualquer coisa.",
+   "passos": [
+    "execute o código com entradas representativas",
+    "registre as saídas atuais como esperadas",
+    "só então altere, com os testes protegendo"
+   ],
+   "checagens": [
+    "os testes de caracterização passam antes da mudança"
+   ],
+   "anti_padroes": [
+    "refatorar legado sem rede de segurança"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Working Effectively with Legacy Code (Feathers)"
+   ]
+  },
+  {
+   "id": "testes.falha-primeiro",
+   "versao": 1,
+   "categoria": "testes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "teste passa sempre",
+    "verificar teste",
+    "teste confiável"
+   ],
+   "regra": "Veja o teste falhar ao menos uma vez pelo motivo certo; um teste que nunca falhou pode não testar nada.",
+   "passos": [
+    "rode o teste antes da implementação ou quebre a implementação de propósito",
+    "confira que a mensagem de falha é a esperada"
+   ],
+   "checagens": [
+    "há registro do teste falhando antes de passar"
+   ],
+   "anti_padroes": [
+    "teste que passa mesmo com a função vazia"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "The Clean Coder (Martin)"
+   ]
+  },
+  {
+   "id": "refatoracao.comportamento",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "refatorar",
+    "refatoração",
+    "limpar código",
+    "reorganizar",
+    "melhorar código"
+   ],
+   "regra": "Refatorar é mudar a estrutura sem mudar o comportamento observável; faça em passos pequenos, com testes verdes a cada passo.",
+   "passos": [
+    "garanta testes que cubram o trecho",
+    "aplique uma transformação pequena",
+    "rode os testes",
+    "repita; não misture com mudança de comportamento"
+   ],
+   "checagens": [
+    "os testes passam após cada passo",
+    "o comportamento externo é idêntico"
+   ],
+   "anti_padroes": [
+    "refatoração grande de uma vez",
+    "refatorar e corrigir bug no mesmo commit"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 95,
+   "referencias": [
+    "Refactoring (Fowler)",
+    "Working Effectively with Legacy Code (Feathers)"
+   ]
+  },
+  {
+   "id": "refatoracao.cheiros",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "code smell",
+    "cheiro",
+    "código ruim",
+    "difícil de mudar",
+    "revisão"
+   ],
+   "regra": "Reconheça sinais de que a estrutura precisa melhorar: função longa, lista longa de parâmetros, duplicação, mudança espalhada, inveja de dados, obsessão por primitivos, generalidade especulativa, código morto.",
+   "passos": [
+    "nomeie o cheiro encontrado",
+    "escolha a refatoração correspondente",
+    "aplique só se houver benefício para a mudança atual"
+   ],
+   "checagens": [
+    "cada refatoração resolve um cheiro identificado"
+   ],
+   "anti_padroes": [
+    "refatorar por gosto, sem motivo ligado à tarefa"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "Refactoring (Fowler)",
+    "Clean Code (Martin)"
+   ]
+  },
+  {
+   "id": "refatoracao.extrair-funcao",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "extrair",
+    "função",
+    "método",
+    "trecho",
+    "bloco",
+    "comentário explicando"
+   ],
+   "regra": "Quando um trecho precisa de comentário para explicar o que faz, extraia-o para uma função cujo nome diga isso.",
+   "passos": [
+    "identifique o bloco e suas entradas/saídas",
+    "crie a função com nome de intenção",
+    "substitua o bloco pela chamada",
+    "rode os testes"
+   ],
+   "checagens": [
+    "o chamador ficou legível como uma lista de passos"
+   ],
+   "anti_padroes": [
+    "extrair com nomes genéricos (helper1)"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Refactoring (Fowler)"
+   ]
+  },
+  {
+   "id": "refatoracao.renomear",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "renomear",
+    "nome ruim",
+    "rename"
+   ],
+   "regra": "Renomeie assim que um nome melhor ficar claro, atualizando todos os usos de uma vez e rodando os testes.",
+   "passos": [
+    "encontre todas as referências (busca no projeto)",
+    "renomeie de uma vez",
+    "compile e rode os testes"
+   ],
+   "checagens": [
+    "nenhuma referência antiga sobrou"
+   ],
+   "anti_padroes": [
+    "renomear à mão e esquecer usos"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "Refactoring (Fowler)",
+    "Clean Code (Martin)"
+   ]
+  },
+  {
+   "id": "refatoracao.condicional-para-polimorfismo",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "switch",
+    "if encadeado",
+    "variante",
+    "polimorfismo",
+    "tabela de funções",
+    "tipo de objeto"
+   ],
+   "regra": "Um switch sobre o mesmo 'tipo' repetido em vários lugares pede tabela de funções ou polimorfismo.",
+   "passos": [
+    "encontre os switches sobre a mesma variante",
+    "crie uma estrutura (tabela/interface) com uma entrada por variante",
+    "mova cada ramo para sua variante"
+   ],
+   "checagens": [
+    "acrescentar uma variante exige mudar um só lugar"
+   ],
+   "anti_padroes": [
+    "o mesmo switch copiado em cinco arquivos"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 65,
+   "referencias": [
+    "Refactoring (Fowler)",
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)"
+   ]
+  },
+  {
+   "id": "refatoracao.objeto-parametro",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "muitos parâmetros",
+    "parâmetros juntos",
+    "struct",
+    "agrupar"
+   ],
+   "regra": "Parâmetros que sempre andam juntos viram um tipo próprio (struct/objeto) com nome do conceito.",
+   "passos": [
+    "identifique o grupo recorrente",
+    "crie o tipo",
+    "substitua nas assinaturas",
+    "mova comportamento relacionado para perto do tipo"
+   ],
+   "checagens": [
+    "as assinaturas ficaram menores e mais claras"
+   ],
+   "anti_padroes": [
+    "funções com 8 parâmetros posicionais"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 55,
+   "referencias": [
+    "Refactoring (Fowler)"
+   ]
+  },
+  {
+   "id": "legado.costuras",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "legado",
+    "dependência",
+    "testar difícil",
+    "isolar",
+    "mock",
+    "seam",
+    "costura"
+   ],
+   "regra": "Para testar código preso a dependências, encontre ou crie uma costura: um ponto onde dá para trocar o comportamento sem editar o código que usa.",
+   "passos": [
+    "identifique a dependência que impede o teste (rede, disco, relógio, global)",
+    "introduza um parâmetro, ponteiro de função ou interface nesse ponto",
+    "no teste, injete uma versão controlada"
+   ],
+   "checagens": [
+    "o código sob teste roda sem a dependência real"
+   ],
+   "anti_padroes": [
+    "reescrever tudo para conseguir testar"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "Working Effectively with Legacy Code (Feathers)"
+   ]
+  },
+  {
+   "id": "legado.brotar-e-envolver",
+   "versao": 1,
+   "categoria": "refatoracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "legado",
+    "acrescentar funcionalidade",
+    "código sem teste",
+    "sprout",
+    "wrap"
+   ],
+   "regra": "Para acrescentar funcionalidade a código sem testes, escreva o novo comportamento numa função nova e testada (brotar) ou envolva a antiga (envolver), em vez de misturar dentro dela.",
+   "passos": [
+    "escreva a lógica nova numa função isolada com testes",
+    "chame-a do ponto mínimo no código antigo"
+   ],
+   "checagens": [
+    "o código novo está todo coberto"
+   ],
+   "anti_padroes": [
+    "enfiar lógica nova no meio de uma função legada gigante"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "Working Effectively with Legacy Code (Feathers)"
+   ]
+  },
+  {
+   "id": "padroes.estrategia",
+   "versao": 1,
+   "categoria": "padroes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "algoritmo variável",
+    "estratégia",
+    "strategy",
+    "trocar comportamento",
+    "política"
+   ],
+   "regra": "Quando há famílias de algoritmos intercambiáveis, defina uma interface comum e escolha a implementação por configuração (Strategy).",
+   "passos": [
+    "defina a interface mínima (ex.: ponteiro de função)",
+    "implemente cada variante",
+    "injete a escolhida"
+   ],
+   "checagens": [
+    "acrescentar um algoritmo não muda o cliente"
+   ],
+   "anti_padroes": [
+    "usar o padrão para um único algoritmo fixo"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)",
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)"
+   ]
+  },
+  {
+   "id": "padroes.observador",
+   "versao": 1,
+   "categoria": "padroes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "evento",
+    "notificar",
+    "callback",
+    "observer",
+    "assinatura",
+    "listener"
+   ],
+   "regra": "Para avisar vários interessados sobre mudanças sem acoplar o emissor a eles, use assinatura de eventos (Observer), com regras claras de ciclo de vida.",
+   "passos": [
+    "defina o evento e os dados",
+    "registre/remova assinantes explicitamente",
+    "garanta que assinante removido não recebe mais nada"
+   ],
+   "checagens": [
+    "não há callback para objeto já liberado"
+   ],
+   "anti_padroes": [
+    "callbacks sem desregistro (uso após liberação)"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 55,
+   "referencias": [
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)",
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)"
+   ]
+  },
+  {
+   "id": "padroes.adaptador-fachada",
+   "versao": 1,
+   "categoria": "padroes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "biblioteca externa",
+    "api externa",
+    "adaptar",
+    "simplificar",
+    "fachada",
+    "adapter",
+    "facade"
+   ],
+   "regra": "Isole bibliotecas e APIs externas atrás de um adaptador/fachada do seu domínio; o resto do código não conhece a biblioteca.",
+   "passos": [
+    "defina as operações de que o domínio precisa",
+    "implemente-as sobre a biblioteca num só módulo"
+   ],
+   "checagens": [
+    "trocar a biblioteca exige mudar um módulo"
+   ],
+   "anti_padroes": [
+    "chamadas da biblioteca espalhadas pelo projeto"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 65,
+   "referencias": [
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)",
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)"
+   ]
+  },
+  {
+   "id": "padroes.comando",
+   "versao": 1,
+   "categoria": "padroes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "desfazer",
+    "histórico de ações",
+    "comando",
+    "undo",
+    "refazer",
+    "redo"
+   ],
+   "regra": "Represente ações como objetos/dados (Command) quando precisar enfileirar, registrar, refazer ou desfazer.",
+   "passos": [
+    "modele a ação com os dados necessários para executá-la e revertê-la",
+    "guarde o histórico"
+   ],
+   "checagens": [
+    "cada ação registrada pode ser desfeita ou auditada"
+   ],
+   "anti_padroes": [
+    "desfazer implementado com casos especiais espalhados"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 55,
+   "referencias": [
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)",
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)"
+   ]
+  },
+  {
+   "id": "padroes.estado",
+   "versao": 1,
+   "categoria": "padroes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "máquina de estados",
+    "estado",
+    "transição",
+    "state",
+    "fluxo"
+   ],
+   "regra": "Comportamento que depende de estado deve ser modelado como máquina de estados explícita, com transições válidas listadas.",
+   "passos": [
+    "enumere os estados",
+    "liste as transições permitidas e os eventos",
+    "rejeite transições inválidas explicitamente"
+   ],
+   "checagens": [
+    "há teste para cada transição inválida"
+   ],
+   "anti_padroes": [
+    "flags booleanas combinadas formando estados implícitos"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)",
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)"
+   ]
+  },
+  {
+   "id": "padroes.quando-nao-usar",
+   "versao": 1,
+   "categoria": "padroes",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "padrão de projeto",
+    "design pattern",
+    "arquitetura",
+    "abstração"
+   ],
+   "regra": "Padrões resolvem problemas específicos; aplique-os quando o problema aparecer de fato, não para parecer sofisticado.",
+   "passos": [
+    "descreva o problema concreto",
+    "verifique se um padrão o resolve com menos complexidade do que a alternativa direta"
+   ],
+   "checagens": [
+    "cada padrão usado resolve um problema nomeado"
+   ],
+   "anti_padroes": [
+    "singletons globais por hábito",
+    "fábricas de fábricas sem necessidade"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Head First Design Patterns (Freeman, Robson, Bates, Sierra)",
+    "Design Patterns (Gamma, Helm, Johnson, Vlissides)",
+    "Refactoring (Fowler)"
+   ]
+  },
+  {
+   "id": "git.estado-e-diff",
+   "versao": 1,
+   "categoria": "git",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "git",
+    "commit",
+    "status",
+    "diff",
+    "alteração",
+    "revisar"
+   ],
+   "regra": "Antes de qualquer commit, veja git status e revise o diff inteiro; commite só o que pertence à mudança.",
+   "passos": [
+    "git status",
+    "git diff (e git diff --staged)",
+    "adicione arquivos explicitamente, não com 'git add .' às cegas",
+    "rode git diff --check"
+   ],
+   "checagens": [
+    "o commit não inclui arquivos alheios, segredos ou lixo de build"
+   ],
+   "anti_padroes": [
+    "git add -A sem olhar",
+    "commitar arquivos temporários"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 95,
+   "referencias": [
+    "Pro Git (Chacon, Straub)"
+   ]
+  },
+  {
+   "id": "git.commits-pequenos",
+   "versao": 1,
+   "categoria": "git",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "commit",
+    "mensagem",
+    "histórico",
+    "atômico"
+   ],
+   "regra": "Faça commits pequenos e coerentes, cada um compilando e passando nos testes, com mensagem que explica o porquê.",
+   "passos": [
+    "um assunto por commit",
+    "primeira linha curta e no imperativo",
+    "corpo com o motivo e o impacto"
+   ],
+   "checagens": [
+    "cada commit compila e passa nos testes"
+   ],
+   "anti_padroes": [
+    "commit gigante 'várias correções'",
+    "mensagem 'wip'"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Pro Git (Chacon, Straub)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "git.nao-destrutivo",
+   "versao": 1,
+   "categoria": "git",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "reset",
+    "force",
+    "push",
+    "rebase",
+    "checkout",
+    "apagar",
+    "clean",
+    "stash"
+   ],
+   "regra": "Nunca destrua trabalho: sem reset --hard, push --force, clean -fd ou checkout de arquivos com alterações sem pedido explícito e confirmação.",
+   "passos": [
+    "verifique se há mudanças não commitadas antes de qualquer operação que reescreva arquivos",
+    "prefira criar branch a reescrever",
+    "peça confirmação para qualquer operação irreversível"
+   ],
+   "checagens": [
+    "nenhum trabalho não commitado foi perdido"
+   ],
+   "anti_padroes": [
+    "git reset --hard para 'limpar'",
+    "reescrever histórico já publicado"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "Pro Git (Chacon, Straub)"
+   ]
+  },
+  {
+   "id": "git.segredos",
+   "versao": 1,
+   "categoria": "git",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "senha",
+    "token",
+    "chave",
+    "segredo",
+    ".env",
+    "credencial",
+    "api key"
+   ],
+   "regra": "Nunca coloque segredos no repositório; use variáveis de ambiente ou arquivos ignorados, e confira o diff antes do commit.",
+   "passos": [
+    "procure padrões de segredo no diff",
+    "mantenha .env e credenciais no .gitignore",
+    "se um segredo vazou, troque-o (remover do histórico não basta)"
+   ],
+   "checagens": [
+    "nenhum segredo no diff"
+   ],
+   "anti_padroes": [
+    "commitar .env",
+    "chave de API em código"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "Pro Git (Chacon, Straub)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "git.branch-e-integracao",
+   "versao": 1,
+   "categoria": "git",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "branch",
+    "merge",
+    "conflito",
+    "integrar",
+    "main",
+    "master"
+   ],
+   "regra": "Trabalhe em branch quando a mudança for grande; integre com frequência e resolva conflitos entendendo as duas versões.",
+   "passos": [
+    "crie branch descritiva",
+    "traga a base com frequência",
+    "em conflito, leia ambos os lados e rode os testes depois"
+   ],
+   "checagens": [
+    "após o merge, build e testes passam"
+   ],
+   "anti_padroes": [
+    "resolver conflito escolhendo um lado sem ler"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Pro Git (Chacon, Straub)"
+   ]
+  },
+  {
+   "id": "git.bisect",
+   "versao": 1,
+   "categoria": "git",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "regressão",
+    "quando quebrou",
+    "qual commit",
+    "bisect"
+   ],
+   "regra": "Para achar o commit que introduziu uma regressão, use busca binária no histórico (git bisect) com um teste automático.",
+   "passos": [
+    "escreva um script que retorna 0 quando está bom",
+    "git bisect start/bad/good",
+    "git bisect run script"
+   ],
+   "checagens": [
+    "o commit culpado foi identificado por teste, não por palpite"
+   ],
+   "anti_padroes": [
+    "olhar commit por commit à mão"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "Pro Git (Chacon, Straub)"
+   ]
+  },
+  {
+   "id": "shell.aspas",
+   "versao": 1,
+   "categoria": "shell",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "shell",
+    "bash",
+    "sh",
+    "script",
+    "variável",
+    "aspas",
+    "espaço"
+   ],
+   "regra": "Em shell, coloque variáveis entre aspas (\"$var\") e trate nomes de arquivo como dados: podem ter espaço, '-' no início e quebras de linha.",
+   "passos": [
+    "cite toda expansão: \"$var\", \"$@\"",
+    "use -- antes de argumentos vindos de fora",
+    "use find -print0 | xargs -0 ou laços while read -r"
+   ],
+   "checagens": [
+    "shellcheck sem avisos",
+    "teste com nomes com espaço"
+   ],
+   "anti_padroes": [
+    "for f in $(ls)",
+    "rm $arquivo sem aspas"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "Linux Command Line and Shell Scripting Bible (Blum, Bresnahan)"
+   ]
+  },
+  {
+   "id": "shell.erros",
+   "versao": 1,
+   "categoria": "shell",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "script",
+    "set -e",
+    "exit",
+    "status",
+    "erro",
+    "pipefail"
+   ],
+   "regra": "Scripts devem falhar cedo e de forma visível: confira status de saída, use set -eu (e pipefail no bash) e mensagens de erro para stderr.",
+   "passos": [
+    "comece com set -eu",
+    "confira comandos críticos explicitamente",
+    "use exit codes diferentes de zero em falha"
+   ],
+   "checagens": [
+    "o script para no primeiro erro"
+   ],
+   "anti_padroes": [
+    "seguir adiante depois de um comando que falhou"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 95,
+   "referencias": [
+    "Linux Command Line and Shell Scripting Bible (Blum, Bresnahan)"
+   ]
+  },
+  {
+   "id": "shell.temporarios",
+   "versao": 1,
+   "categoria": "shell",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "temporário",
+    "tmp",
+    "mktemp",
+    "limpeza",
+    "trap"
+   ],
+   "regra": "Use mktemp para arquivos/pastas temporários e trap para limpar ao sair, inclusive em erro.",
+   "passos": [
+    "d=$(mktemp -d)",
+    "trap 'rm -rf -- \"$d\"' EXIT",
+    "nunca nomes fixos em /tmp"
+   ],
+   "checagens": [
+    "nenhum arquivo temporário fica para trás"
+   ],
+   "anti_padroes": [
+    "/tmp/arquivo fixo (corrida e colisão)"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "Linux Command Line and Shell Scripting Bible (Blum, Bresnahan)"
+   ]
+  },
+  {
+   "id": "shell.operacoes-destrutivas",
+   "versao": 1,
+   "categoria": "shell",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "rm",
+    "apagar",
+    "mover",
+    "sobrescrever",
+    "destrutivo",
+    "-rf"
+   ],
+   "regra": "Antes de operações destrutivas, mostre o que será afetado, limite o escopo a um caminho validado e peça confirmação.",
+   "passos": [
+    "valide que a variável do caminho não está vazia",
+    "liste os alvos antes de apagar",
+    "prefira mover para lixeira/backup"
+   ],
+   "checagens": [
+    "nenhum rm -rf com variável que pode estar vazia"
+   ],
+   "anti_padroes": [
+    "rm -rf \"$dir\"/ com dir vazio",
+    "apagar por padrão amplo"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "Linux Command Line and Shell Scripting Bible (Blum, Bresnahan)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "shell.portabilidade",
+   "versao": 1,
+   "categoria": "shell",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "posix",
+    "portável",
+    "bash",
+    "sh",
+    "dash"
+   ],
+   "regra": "Decida se o script é POSIX sh ou bash e seja coerente: o shebang deve corresponder às funcionalidades usadas.",
+   "passos": [
+    "#!/bin/sh só com recursos POSIX",
+    "use #!/usr/bin/env bash para recursos do bash",
+    "teste com o shell declarado"
+   ],
+   "checagens": [
+    "o script roda com o interpretador do shebang"
+   ],
+   "anti_padroes": [
+    "arrays do bash em script #!/bin/sh"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "Linux Command Line and Shell Scripting Bible (Blum, Bresnahan)"
+   ]
+  },
+  {
+   "id": "so.processos",
+   "versao": 1,
+   "categoria": "sistemas-operacionais",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "fork",
+    "exec",
+    "processo",
+    "filho",
+    "spawn",
+    "wait",
+    "zumbi"
+   ],
+   "regra": "Ao criar processos, trate todos os retornos de fork/exec/wait, feche descritores herdados e colete filhos para não deixar zumbis.",
+   "passos": [
+    "use posix_spawn ou fork+exec com tratamento de erro",
+    "use O_CLOEXEC",
+    "waitpid em todos os filhos",
+    "propague o status de saída"
+   ],
+   "checagens": [
+    "nenhum processo zumbi nos testes"
+   ],
+   "anti_padroes": [
+    "ignorar o status do filho",
+    "vazar descritores para o filho"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "so.sinais",
+   "versao": 1,
+   "categoria": "sistemas-operacionais",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "sinal",
+    "signal",
+    "SIGINT",
+    "SIGTERM",
+    "handler",
+    "interrupção"
+   ],
+   "regra": "Handlers de sinal só podem fazer o mínimo e async-signal-safe (ex.: marcar uma flag sig_atomic_t); o trabalho real fica no laço principal.",
+   "passos": [
+    "no handler, só defina uma flag ou escreva num pipe",
+    "trate a flag no laço principal",
+    "use sigaction"
+   ],
+   "checagens": [
+    "o handler não chama malloc/printf"
+   ],
+   "anti_padroes": [
+    "printf dentro do handler"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "so.corridas-toctou",
+   "versao": 1,
+   "categoria": "sistemas-operacionais",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "arquivo",
+    "permissão",
+    "verificar e usar",
+    "toctou",
+    "corrida",
+    "race",
+    "link simbólico"
+   ],
+   "regra": "Evite checar-e-usar separados sobre arquivos (TOCTOU): abra primeiro e verifique o descritor aberto; use O_NOFOLLOW/O_EXCL quando couber.",
+   "passos": [
+    "prefira open com flags que garantem a propriedade",
+    "faça fstat no descritor aberto",
+    "crie arquivos com O_CREAT|O_EXCL"
+   ],
+   "checagens": [
+    "nenhum access() seguido de open() para decisão de segurança"
+   ],
+   "anti_padroes": [
+    "stat → open em diretório gravável por outros"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)"
+   ]
+  },
+  {
+   "id": "so.escrita-atomica",
+   "versao": 1,
+   "categoria": "sistemas-operacionais",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "salvar",
+    "gravar",
+    "arquivo",
+    "atômico",
+    "corromper",
+    "configuração"
+   ],
+   "regra": "Grave arquivos importantes de forma atômica: escreva num temporário no mesmo diretório, faça fsync e renomeie por cima.",
+   "passos": [
+    "temporário no mesmo sistema de arquivos",
+    "fsync no arquivo",
+    "rename para o nome final",
+    "preserve permissões"
+   ],
+   "checagens": [
+    "uma queda no meio não deixa arquivo truncado"
+   ],
+   "anti_padroes": [
+    "abrir com O_TRUNC e escrever direto no arquivo final"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)",
+    "GNU C Language Manual / GNU C Library Manual"
+   ]
+  },
+  {
+   "id": "so.impasse",
+   "versao": 1,
+   "categoria": "sistemas-operacionais",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "deadlock",
+    "impasse",
+    "lock",
+    "mutex",
+    "thread",
+    "trava",
+    "travando",
+    "congela",
+    "ao mesmo tempo",
+    "simultâneo",
+    "concorrência",
+    "concorrente",
+    "paralelo"
+   ],
+   "regra": "Para evitar impasse, quebre ao menos uma das condições: imponha ordem global de aquisição, use tempo limite ou adquira tudo de uma vez.",
+   "passos": [
+    "documente a ordem de locks",
+    "evite segurar lock durante E/S lenta",
+    "use trylock com recuo quando a ordem não puder ser garantida"
+   ],
+   "checagens": [
+    "não há dois caminhos que adquiram os mesmos locks em ordens diferentes"
+   ],
+   "anti_padroes": [
+    "lock aninhado sem ordem definida"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 80,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)"
+   ]
+  },
+  {
+   "id": "so.buffers-e-io",
+   "versao": 1,
+   "categoria": "sistemas-operacionais",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "desempenho",
+    "io",
+    "leitura",
+    "escrita",
+    "buffer",
+    "chamada de sistema"
+   ],
+   "regra": "Leia e escreva em blocos com buffer; uma chamada de sistema por byte é ordens de grandeza mais lenta.",
+   "passos": [
+    "use buffers de alguns KiB",
+    "agrupe escritas pequenas",
+    "meça antes e depois"
+   ],
+   "checagens": [
+    "número de syscalls proporcional aos blocos, não aos bytes"
+   ],
+   "anti_padroes": [
+    "read de 1 byte em laço sem buffer"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)"
+   ]
+  },
+  {
+   "id": "seguranca.entrada-nao-confiavel",
+   "versao": 1,
+   "categoria": "seguranca",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "entrada",
+    "usuário",
+    "rede",
+    "arquivo",
+    "parse",
+    "validação",
+    "modelo",
+    "externo"
+   ],
+   "regra": "Trate toda entrada externa (usuário, arquivo, rede, ambiente, saída de modelo, texto recuperado) como não confiável: valide forma, tamanho e faixa na fronteira.",
+   "passos": [
+    "defina o formato aceito (lista do que é permitido)",
+    "limite tamanhos",
+    "rejeite o resto com erro claro",
+    "nunca execute texto recebido como instrução"
+   ],
+   "checagens": [
+    "há testes com entradas malformadas e enormes"
+   ],
+   "anti_padroes": [
+    "confiar que o cliente sempre manda dados válidos"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Modern Operating Systems (Tanenbaum)"
+   ]
+  },
+  {
+   "id": "seguranca.injecao",
+   "versao": 1,
+   "categoria": "seguranca",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "sql",
+    "shell",
+    "comando",
+    "injeção",
+    "concatenar",
+    "query",
+    "system",
+    "popen"
+   ],
+   "regra": "Nunca monte comandos, consultas SQL ou caminhos concatenando dados externos; use parâmetros, listas de argumentos e APIs sem shell.",
+   "passos": [
+    "use consultas parametrizadas",
+    "use execv com argv em vez de system()",
+    "valide caminhos contra uma raiz permitida"
+   ],
+   "checagens": [
+    "nenhuma string de comando/SQL é montada com entrada externa"
+   ],
+   "anti_padroes": [
+    "system(\"rm \" + nome)",
+    "\"SELECT ... '\" + valor + \"'\""
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "An Introduction to Database Systems (Date)",
+    "Linux Command Line and Shell Scripting Bible (Blum, Bresnahan)"
+   ]
+  },
+  {
+   "id": "seguranca.menor-privilegio",
+   "versao": 1,
+   "categoria": "seguranca",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "permissão",
+    "root",
+    "sudo",
+    "privilégio",
+    "capacidade",
+    "acesso"
+   ],
+   "regra": "Use a menor capacidade necessária: nada de root por conveniência, credenciais salvas ou permissões amplas; efeitos destrutivos exigem confirmação.",
+   "passos": [
+    "identifique a permissão mínima",
+    "solicite elevação só pontualmente e com confirmação",
+    "registre ações privilegiadas"
+   ],
+   "checagens": [
+    "o programa funciona sem root no caso comum"
+   ],
+   "anti_padroes": [
+    "chmod 777",
+    "rodar tudo como root",
+    "senha em arquivo"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "seguranca.caminhos",
+   "versao": 1,
+   "categoria": "seguranca",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "caminho",
+    "path",
+    "diretório",
+    "..",
+    "traversal",
+    "link simbólico",
+    "upload"
+   ],
+   "regra": "Normalize e confine caminhos vindos de fora a uma raiz permitida, resolvendo links simbólicos; recuse '..' que escape.",
+   "passos": [
+    "canonicalize o caminho",
+    "resolva links (realpath)",
+    "verifique o prefixo da raiz",
+    "recuse arquivos especiais"
+   ],
+   "checagens": [
+    "há testes com '../', caminhos absolutos e links para fora"
+   ],
+   "anti_padroes": [
+    "juntar strings de caminho e abrir direto"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 95,
+   "referencias": [
+    "Modern Operating Systems (Tanenbaum)"
+   ]
+  },
+  {
+   "id": "seguranca.cripto",
+   "versao": 1,
+   "categoria": "seguranca",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "criptografia",
+    "hash",
+    "senha",
+    "token",
+    "aleatório",
+    "cripto"
+   ],
+   "regra": "Não invente criptografia: use bibliotecas consolidadas, hash de senha próprio para senhas (argon2/bcrypt/scrypt) e gerador aleatório criptográfico.",
+   "passos": [
+    "use a API de alto nível da biblioteca",
+    "nunca rand() para segredos",
+    "compare segredos em tempo constante"
+   ],
+   "checagens": [
+    "nenhum algoritmo criptográfico caseiro"
+   ],
+   "anti_padroes": [
+    "md5/sha1 para senha",
+    "rand() para token"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "bd.restricoes",
+   "versao": 1,
+   "categoria": "bancos-de-dados",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "banco",
+    "tabela",
+    "schema",
+    "constraint",
+    "chave",
+    "integridade",
+    "sql"
+   ],
+   "regra": "Declare as regras de integridade no banco (chaves primárias/estrangeiras, NOT NULL, UNIQUE, CHECK) em vez de confiar só na aplicação.",
+   "passos": [
+    "identifique as invariantes dos dados",
+    "expresse cada uma como restrição",
+    "teste a violação"
+   ],
+   "checagens": [
+    "inserir dado inválido falha no banco"
+   ],
+   "anti_padroes": [
+    "integridade só no código da aplicação"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "An Introduction to Database Systems (Date)"
+   ]
+  },
+  {
+   "id": "bd.transacoes",
+   "versao": 1,
+   "categoria": "bancos-de-dados",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "transação",
+    "atômico",
+    "rollback",
+    "consistência",
+    "banco",
+    "sql"
+   ],
+   "regra": "Agrupe em transação as mudanças que precisam ser atômicas; em erro, rollback; escolha o nível de isolamento conscientemente.",
+   "passos": [
+    "delimite a transação pela unidade de negócio",
+    "trate erro com rollback",
+    "mantenha transações curtas"
+   ],
+   "checagens": [
+    "falha no meio não deixa dados parciais"
+   ],
+   "anti_padroes": [
+    "várias escritas relacionadas sem transação",
+    "transação aberta esperando o usuário"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 95,
+   "referencias": [
+    "An Introduction to Database Systems (Date)"
+   ]
+  },
+  {
+   "id": "bd.consultas-parametrizadas",
+   "versao": 1,
+   "categoria": "bancos-de-dados",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "sql",
+    "consulta",
+    "query",
+    "parâmetro",
+    "prepared"
+   ],
+   "regra": "Use sempre consultas parametrizadas (prepared statements); nunca interpole valores na string SQL.",
+   "passos": [
+    "troque concatenação por placeholders",
+    "passe valores pela API de bind"
+   ],
+   "checagens": [
+    "nenhum SQL montado com valores externos"
+   ],
+   "anti_padroes": [
+    "f-string/concat em SQL"
+   ],
+   "severidade": "obrigatoria",
+   "prioridade": 100,
+   "referencias": [
+    "An Introduction to Database Systems (Date)"
+   ]
+  },
+  {
+   "id": "bd.normalizacao",
+   "versao": 1,
+   "categoria": "bancos-de-dados",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "modelagem",
+    "normalização",
+    "redundância",
+    "tabela",
+    "esquema"
+   ],
+   "regra": "Modele os dados normalizados (cada fato num lugar só); desnormalize só por desempenho medido e com a regra de sincronia explícita.",
+   "passos": [
+    "identifique dependências funcionais",
+    "separe fatos independentes em tabelas",
+    "documente desnormalizações"
+   ],
+   "checagens": [
+    "atualizar um fato exige mudar uma linha"
+   ],
+   "anti_padroes": [
+    "o mesmo dado copiado em várias tabelas sem controle"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "An Introduction to Database Systems (Date)"
+   ]
+  },
+  {
+   "id": "bd.migracoes",
+   "versao": 1,
+   "categoria": "bancos-de-dados",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "migração",
+    "alterar tabela",
+    "schema",
+    "versão do banco"
+   ],
+   "regra": "Mude o esquema por migrações versionadas, reversíveis quando possível e testadas com dados reais de exemplo.",
+   "passos": [
+    "escreva a migração e a reversão",
+    "teste numa cópia",
+    "faça backup antes em produção"
+   ],
+   "checagens": [
+    "a migração roda do zero e sobre a versão anterior"
+   ],
+   "anti_padroes": [
+    "alterar o banco à mão"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "An Introduction to Database Systems (Date)"
+   ]
+  },
+  {
+   "id": "bd.nulos",
+   "versao": 1,
+   "categoria": "bancos-de-dados",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "null",
+    "nulo",
+    "ausente",
+    "três valores"
+   ],
+   "regra": "Entenda a lógica de NULL (desconhecido): comparações com NULL não são verdadeiras nem falsas; use IS NULL e evite NULL onde o valor é obrigatório.",
+   "passos": [
+    "declare NOT NULL quando o valor sempre existe",
+    "use IS NULL / COALESCE conscientemente"
+   ],
+   "checagens": [
+    "há teste com valores ausentes"
+   ],
+   "anti_padroes": [
+    "WHERE coluna = NULL"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 65,
+   "referencias": [
+    "An Introduction to Database Systems (Date)"
+   ]
+  },
+  {
+   "id": "infra.reprodutivel",
+   "versao": 1,
+   "categoria": "infraestrutura",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "build",
+    "compilar",
+    "dependência",
+    "versão",
+    "ci",
+    "reproduzível",
+    "ambiente"
+   ],
+   "regra": "Builds e testes devem ser reproduzíveis: dependências e versões declaradas, um comando para compilar e outro para testar, sem passos manuais.",
+   "passos": [
+    "documente os pré-requisitos",
+    "fixe versões",
+    "um alvo 'make' (ou equivalente) para build e para teste"
+   ],
+   "checagens": [
+    "build limpo do zero funciona com os comandos documentados"
+   ],
+   "anti_padroes": [
+    "funciona só na máquina de quem escreveu"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "infra.timeouts",
+   "versao": 1,
+   "categoria": "infraestrutura",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "rede",
+    "serviço",
+    "chamada externa",
+    "timeout",
+    "retry",
+    "espera"
+   ],
+   "regra": "Toda espera externa tem tempo limite; repetições usam recuo exponencial com limite e só para operações idempotentes.",
+   "passos": [
+    "defina timeout em cada chamada externa",
+    "repita só o que é idempotente",
+    "registre falhas com contexto"
+   ],
+   "checagens": [
+    "nenhuma chamada pode travar para sempre"
+   ],
+   "anti_padroes": [
+    "retry infinito",
+    "repetir operação não idempotente (cobrança dupla)"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "infra.logs",
+   "versao": 1,
+   "categoria": "infraestrutura",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "log",
+    "registro",
+    "observabilidade",
+    "depurar produção",
+    "diagnóstico"
+   ],
+   "regra": "Registre eventos com contexto suficiente para diagnosticar (o quê, onde, com que dados não sensíveis, resultado), sem segredos.",
+   "passos": [
+    "um log por evento significativo",
+    "inclua identificadores de correlação",
+    "nunca registre senhas/tokens/conteúdo privado"
+   ],
+   "checagens": [
+    "dá para reconstruir o que aconteceu pelos logs"
+   ],
+   "anti_padroes": [
+    "log de segredo",
+    "log silencioso em erro"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "infra.configuracao",
+   "versao": 1,
+   "categoria": "infraestrutura",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "configuração",
+    "variável de ambiente",
+    "config",
+    "parâmetro",
+    "segredo"
+   ],
+   "regra": "Separe configuração do código: valores que mudam por ambiente vêm de configuração/ambiente, com padrão seguro e validação na partida.",
+   "passos": [
+    "liste o que varia por ambiente",
+    "leia de variáveis/arquivo",
+    "valide e falhe cedo se faltar algo obrigatório"
+   ],
+   "checagens": [
+    "o mesmo binário roda em ambientes diferentes"
+   ],
+   "anti_padroes": [
+    "caminhos e senhas fixos no código"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "infra.idempotencia",
+   "versao": 1,
+   "categoria": "infraestrutura",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "script de instalação",
+    "provisionar",
+    "deploy",
+    "idempotente",
+    "rodar de novo"
+   ],
+   "regra": "Scripts de instalação e implantação devem ser idempotentes: rodar duas vezes deixa o mesmo resultado que rodar uma.",
+   "passos": [
+    "verifique o estado antes de mudar",
+    "crie só o que não existe",
+    "teste rodando duas vezes"
+   ],
+   "checagens": [
+    "a segunda execução não muda nada"
+   ],
+   "anti_padroes": [
+    "script que duplica configuração a cada execução"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "Linux Command Line and Shell Scripting Bible (Blum, Bresnahan)"
+   ]
+  },
+  {
+   "id": "infra.backup",
+   "versao": 1,
+   "categoria": "infraestrutura",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "backup",
+    "dados",
+    "recuperação",
+    "restaurar",
+    "perda"
+   ],
+   "regra": "Backup que nunca foi restaurado não é backup: automatize e teste a restauração periodicamente.",
+   "passos": [
+    "automatize o backup",
+    "guarde fora da máquina",
+    "restaure numa cópia de teste regularmente"
+   ],
+   "checagens": [
+    "houve restauração testada recentemente"
+   ],
+   "anti_padroes": [
+    "backup sem teste de restauração"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "desempenho.medir-primeiro",
+   "versao": 1,
+   "categoria": "desempenho",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "lento",
+    "desempenho",
+    "otimizar",
+    "performance",
+    "rápido",
+    "gargalo"
+   ],
+   "regra": "Otimize só depois de medir: encontre o gargalo real com um perfilador ou medição, mude, e meça de novo.",
+   "passos": [
+    "crie uma medição reproduzível",
+    "encontre onde o tempo vai",
+    "otimize esse ponto",
+    "compare antes/depois"
+   ],
+   "checagens": [
+    "há números antes e depois"
+   ],
+   "anti_padroes": [
+    "otimização prematura sem medição",
+    "trocar legibilidade por ganho não medido"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 85,
+   "referencias": [
+    "Code Complete (McConnell)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "desempenho.complexidade",
+   "versao": 1,
+   "categoria": "desempenho",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "complexidade",
+    "big o",
+    "algoritmo",
+    "escala",
+    "muitos dados",
+    "n ao quadrado"
+   ],
+   "regra": "Estime a complexidade do algoritmo pelo tamanho esperado dos dados; um O(n²) escondido em laço aninhado domina qualquer micro-otimização.",
+   "passos": [
+    "identifique laços aninhados sobre os mesmos dados",
+    "troque buscas lineares repetidas por índice/tabela hash",
+    "teste com o volume esperado"
+   ],
+   "checagens": [
+    "há teste/benchmark com volume realista"
+   ],
+   "anti_padroes": [
+    "busca linear dentro de laço sobre milhares de itens"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 75,
+   "referencias": [
+    "Structure and Interpretation of Computer Programs (Abelson, Sussman)",
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "depuracao.metodo-cientifico",
+   "versao": 1,
+   "categoria": "depuracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "depurar",
+    "debug",
+    "bug",
+    "investigar",
+    "causa",
+    "erro intermitente",
+    "trava",
+    "travando",
+    "falha às vezes"
+   ],
+   "regra": "Depure com método: estabilize a falha, reduza o caso, formule hipóteses, teste uma por vez e registre o que foi descartado.",
+   "passos": [
+    "reproduza",
+    "reduza ao menor caso",
+    "busca binária no código ou no histórico",
+    "confirme a causa antes de corrigir"
+   ],
+   "checagens": [
+    "a correção vem com o teste que reproduzia a falha"
+   ],
+   "anti_padroes": [
+    "mudar código aleatoriamente",
+    "corrigir sem reproduzir"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 90,
+   "referencias": [
+    "Code Complete (McConnell)",
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "depuracao.ler-a-mensagem",
+   "versao": 1,
+   "categoria": "depuracao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "erro",
+    "mensagem",
+    "stack trace",
+    "compilador",
+    "exceção",
+    "warning"
+   ],
+   "regra": "Leia a mensagem de erro inteira e a primeira ocorrência; o primeiro erro do compilador costuma causar os seguintes.",
+   "passos": [
+    "vá ao primeiro erro",
+    "leia arquivo:linha indicados",
+    "corrija e recompile antes de olhar os demais"
+   ],
+   "checagens": [
+    "o erro foi entendido antes da correção"
+   ],
+   "anti_padroes": [
+    "tentar corrigir o último erro da lista primeiro"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "Code Complete (McConnell)"
+   ]
+  },
+  {
+   "id": "profissional.dizer-nao",
+   "versao": 1,
+   "categoria": "profissionalismo",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "prazo",
+    "estimativa",
+    "compromisso",
+    "urgente",
+    "pressa",
+    "qualidade"
+   ],
+   "regra": "Comprometa-se só com o que é verificável; diante de prazo impossível, diga claramente o que é viável em vez de prometer e entregar sem qualidade.",
+   "passos": [
+    "estime com faixa (otimista, provável, pessimista)",
+    "diga o que cabe e o que fica de fora",
+    "não pule testes para cumprir prazo"
+   ],
+   "checagens": [
+    "a estimativa tem faixa e premissas"
+   ],
+   "anti_padroes": [
+    "prometer 'vou tentar' sem plano",
+    "entregar sem testes por pressa"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "The Clean Coder (Martin)",
+    "The Mythical Man-Month (Brooks)"
+   ]
+  },
+  {
+   "id": "profissional.janelas-quebradas",
+   "versao": 1,
+   "categoria": "profissionalismo",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "qualidade",
+    "dívida técnica",
+    "gambiarra",
+    "hack",
+    "limpeza"
+   ],
+   "regra": "Não deixe 'janelas quebradas': corrija ou registre problemas pequenos assim que os vir, antes que normalizem a má qualidade.",
+   "passos": [
+    "corrija o que for rápido e seguro",
+    "registre o resto com contexto",
+    "não acrescente mais uma gambiarra ao lado da existente"
+   ],
+   "checagens": [
+    "nenhum aviso novo de compilação ou teste ignorado"
+   ],
+   "anti_padroes": [
+    "'já estava ruim, mais um hack não faz diferença'"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 70,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  },
+  {
+   "id": "projeto.lei-de-brooks",
+   "versao": 1,
+   "categoria": "projeto",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "equipe",
+    "atraso",
+    "mais pessoas",
+    "cronograma",
+    "projeto atrasado"
+   ],
+   "regra": "Acrescentar pessoas a um projeto atrasado tende a atrasá-lo mais: comunicação e treinamento crescem; reduza escopo ou divida trabalho de fato independente.",
+   "passos": [
+    "avalie se as tarefas são realmente paralelizáveis",
+    "considere reduzir escopo",
+    "conte o custo de comunicação"
+   ],
+   "checagens": [
+    "o plano considera o custo de integração de novas pessoas"
+   ],
+   "anti_padroes": [
+    "dobrar a equipe para dobrar a velocidade"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 50,
+   "referencias": [
+    "The Mythical Man-Month (Brooks)"
+   ]
+  },
+  {
+   "id": "projeto.prototipo-descartavel",
+   "versao": 1,
+   "categoria": "projeto",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "protótipo",
+    "spike",
+    "experimento",
+    "tracer",
+    "primeira versão",
+    "viabilidade"
+   ],
+   "regra": "Para reduzir incerteza, faça um protótipo descartável ou um 'tracer' fino de ponta a ponta; decida conscientemente se ele será jogado fora ou evoluído.",
+   "passos": [
+    "defina a pergunta que o protótipo responde",
+    "faça o mínimo para respondê-la",
+    "registre o aprendizado e a decisão"
+   ],
+   "checagens": [
+    "o protótipo respondeu uma pergunta explícita"
+   ],
+   "anti_padroes": [
+    "protótipo virando produção sem revisão"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)",
+    "The Mythical Man-Month (Brooks)"
+   ]
+  },
+  {
+   "id": "projeto.segundo-sistema",
+   "versao": 1,
+   "categoria": "projeto",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "reescrever",
+    "versão 2",
+    "redesenho",
+    "nova arquitetura"
+   ],
+   "regra": "Cuidado com o efeito do segundo sistema: a reescrita tende a incluir todo enfeite adiado; mantenha o escopo do que é necessário.",
+   "passos": [
+    "liste o que a nova versão precisa resolver de verdade",
+    "corte o resto",
+    "prefira evolução incremental quando possível"
+   ],
+   "checagens": [
+    "cada recurso novo tem justificativa"
+   ],
+   "anti_padroes": [
+    "reescrever tudo do zero por insatisfação geral"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 50,
+   "referencias": [
+    "The Mythical Man-Month (Brooks)",
+    "Working Effectively with Legacy Code (Feathers)"
+   ]
+  },
+  {
+   "id": "doc.leia-me",
+   "versao": 1,
+   "categoria": "documentacao",
+   "linguagens": [
+    "*"
+   ],
+   "ativacao": [
+    "readme",
+    "documentação",
+    "instalar",
+    "usar",
+    "como rodar"
+   ],
+   "regra": "Documente como compilar, testar, configurar e usar o projeto num lugar só, com comandos que funcionam se copiados.",
+   "passos": [
+    "pré-requisitos",
+    "comando de build",
+    "comando de teste",
+    "exemplo mínimo de uso"
+   ],
+   "checagens": [
+    "um recém-chegado consegue rodar seguindo o README"
+   ],
+   "anti_padroes": [
+    "documentação que descreve uma versão antiga"
+   ],
+   "severidade": "recomendada",
+   "prioridade": 60,
+   "referencias": [
+    "The Pragmatic Programmer (Thomas, Hunt)"
+   ]
+  }
+ ]
+}

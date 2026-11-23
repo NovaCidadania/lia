@@ -39,6 +39,7 @@
 # estiver pendente; duas vezes em menos de 2s força saída). Encerrar o
 # lia-chat (/sair) já encerra o daemon sozinho.
 set -u
+PWD_ORIGEM=$(pwd)
 RAIZ=$(cd "$(dirname "$0")/.." && pwd)
 TEST_HOME="${1:-${TEST_HOME:-/tmp/lia-chat-teste}}"
 EXECUTOR="${2:-${EXECUTOR:-real}}"
@@ -195,7 +196,23 @@ case "${LIA_WEB_AUTOMATICA:-sim}" in
     nao|não) echo "web automática: desligada — toda pesquisa web pede confirmação" ;;
     *) echo "LIA_WEB_AUTOMATICA deve ser sim ou nao" >&2; exit 2 ;;
 esac
-env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO $ENV_AQUECER $ENV_WEB "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
+# Projeto: a pasta onde a Lia lê arquivos livremente e cria/edita/apaga/
+# move SÓ com a sua confirmação, sempre depois de mostrar a prévia (diff).
+# Padrão: o repositório Git de onde você rodou este script (ou a própria
+# pasta, fora de um repositório). LIA_PROJETO=/outra/pasta escolhe outra;
+# LIA_PROJETO=nenhum desliga as ferramentas de arquivo.
+PROJETO="${LIA_PROJETO:-}"
+if [ -z "$PROJETO" ]; then
+    PROJETO=$(git -C "$PWD_ORIGEM" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD_ORIGEM")
+fi
+ENV_PROJETO=""
+if [ "$PROJETO" = nenhum ]; then
+    echo "projeto: nenhum — a Lia não lê nem altera arquivos"
+else
+    ENV_PROJETO="LIA_SESSIOND_PROJETO=$PROJETO"
+    echo "projeto: $PROJETO — leitura livre; criar/editar/apagar/mover só com a sua confirmação, depois de ver a prévia (LIA_PROJETO escolhe outra pasta)"
+fi
+env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO $ENV_AQUECER $ENV_WEB ${ENV_PROJETO:+"$ENV_PROJETO"} "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null' EXIT INT TERM
 

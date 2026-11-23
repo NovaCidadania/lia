@@ -179,7 +179,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
                   $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
                   $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o \
-                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o
+                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o $(B)/sessiond-projeto-arquivos.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-projeto-praticas.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -232,7 +232,7 @@ $(B)/sessiond-roteador.o: sessiond/roteador.c sessiond/roteador.h | $(B)
 $(B)/sessiond-apresentacao.o: sessiond/apresentacao.c sessiond/apresentacao.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/sessiond-agente.o: sessiond/agente.c sessiond/agente.h sessiond/roteador.h | $(B)
+$(B)/sessiond-agente.o: sessiond/agente.c sessiond/agente.h sessiond/roteador.h sessiond/intencao_arquivos.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-sintese-web.o: sessiond/sintese_web.c sessiond/sintese_web.h sessiond/apresentacao.h web/pesquisa.h | $(B)
@@ -252,12 +252,60 @@ teste-sintese-web: $(B)/teste-sintese-web
 $(B)/sessiond-web-pesquisa.o: web/pesquisa.c web/pesquisa.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
+# Arquivos do projeto (base da habilidade de codar): confinamento ao
+# projeto, codificações, leitura/busca, prévia em diff, escrita com desfazer.
+# uchardet (detector de codificação do Mozilla) é opcional: com ele, textos
+# legados sem BOM (Shift_JIS, GB18030, Windows-1251...) são reconhecidos
+# com muito mais acerto; sem ele, vale a heurística de projeto/arquivos.c.
+UCHARDET_OK := $(shell pkg-config --exists uchardet && echo sim)
+ifeq ($(UCHARDET_OK),sim)
+PROJ_CFLAGS := -DLIA_COM_UCHARDET $(shell pkg-config --cflags uchardet)
+PROJ_LIBS := $(shell pkg-config --libs uchardet)
+endif
+
+$(B)/sessiond-projeto-arquivos.o: projeto/arquivos.c projeto/arquivos.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) $(PROJ_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-intencao-arquivos.o: sessiond/intencao_arquivos.c sessiond/intencao_arquivos.h sessiond/agente.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-projeto-praticas.o: projeto/praticas.c projeto/praticas.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-praticas.o: testes/unit/teste_praticas.c projeto/praticas.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-praticas: $(B)/teste-praticas.o $(B)/sessiond-projeto-praticas.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+# catálogo de boas práticas: esquema, extensão por projeto, recuperação
+teste-praticas: $(B)/teste-praticas
+	$(B)/teste-praticas conhecimento/praticas/praticas.json
+
+$(B)/teste-arquivos.o: testes/unit/teste_arquivos.c projeto/arquivos.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-arquivos: $(B)/teste-arquivos.o $(B)/sessiond-projeto-arquivos.o
+	$(CC) $^ $(SESSIOND_LIBS) $(PROJ_LIBS) -o $@
+
+teste-arquivos: $(B)/teste-arquivos
+	$(B)/teste-arquivos
+
+$(B)/teste-intencao-arquivos.o: testes/unit/teste_intencao_arquivos.c sessiond/intencao_arquivos.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-intencao-arquivos: $(B)/teste-intencao-arquivos.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-agente.o $(B)/sessiond-roteador.o
+	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
+
+teste-intencao-arquivos: $(B)/teste-intencao-arquivos
+	$(B)/teste-intencao-arquivos
+
 # Testes unitários do Agent Runtime v2 (plano, validação, verificador,
 # replanejador, relatório): código puro, sem daemon nem modelo.
 $(B)/teste-agente.o: testes/unit/teste_agente.c sessiond/agente.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
-$(B)/teste-agente: $(B)/teste-agente.o $(B)/sessiond-agente.o $(B)/sessiond-roteador.o
+$(B)/teste-agente: $(B)/teste-agente.o $(B)/sessiond-agente.o $(B)/sessiond-roteador.o $(B)/sessiond-intencao-arquivos.o
 	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
 
 teste-agente: $(B)/teste-agente
@@ -287,7 +335,7 @@ $(B)/sessiond-pic-ferramentas.o: cli/ferramentas.c runtime/lia.h cli/cli.h | $(B
 	$(CC) $(SESSIOND_PIC_CFLAGS) -c $< -o $@
 
 $(B)/lia-sessiond: $(SESSIOND_OBJS)
-	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
+	$(CC) $^ $(SESSIOND_LIBS) $(PROJ_LIBS) -lm -o $@
 
 sessiond: $(B)/lia-sessiond
 
@@ -324,8 +372,13 @@ teste-web: sessiond
 
 # pesquisa web de ponta a ponta SEM rede (fixtures): consulta, aprovação,
 # abertura das fontes, resposta conclusiva conferida, falhas e cancelamento
-teste-web-resposta: sessiond teste-sintese-web
+teste-web-resposta: sessiond chat teste-sintese-web
 	python3 -I testes/integration/teste_web_resposta.py
+
+# arquivos do projeto de ponta a ponta: leitura, prévia, aprovação,
+# rejeição, arquivo alterado no meio, fora do projeto, .git/, desfazer, chat
+teste-arquivos-projeto: sessiond chat teste-arquivos teste-intencao-arquivos
+	python3 -I testes/integration/teste_arquivos_projeto.py
 
 # ---------------------------------------------------------------------------
 # lia-chat (chat/): primeiro cliente de chat interativo de terminal para o
@@ -357,4 +410,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-web-resposta teste-sintese-web teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
+.PHONY: teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run

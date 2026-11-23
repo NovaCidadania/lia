@@ -977,6 +977,50 @@ static void limpar_pendencias_de_execucao(LiaChat *c)
     g_free(c->execucao_id_pendente); c->execucao_id_pendente = NULL;
 }
 
+/* Prévia (diff unificado) de uma alteração de arquivo: é exatamente o que
+ * a pessoa aprova. Linhas removidas em vermelho, acrescentadas em verde. */
+static void imprimir_previa(LiaChat *c, const char *previa)
+{
+    if (!previa || !*previa) return;
+    char *segura = sanear(previa);
+    char **linhas = g_strsplit(segura, "\n", -1);
+    guint n = g_strv_length(linhas);
+    if (n && !*linhas[n - 1]) n--;
+    for (guint i = 0; i < n; i++) {
+        const char *l = linhas[i];
+        Estilo e = EST_NORMAL;
+        if (g_str_has_prefix(l, "+++ ") || g_str_has_prefix(l, "--- ")) e = EST_FRACO;
+        else if (g_str_has_prefix(l, "@@")) e = EST_AVISO;
+        else if (l[0] == '+') e = EST_OK;
+        else if (l[0] == '-') e = EST_ERRO;
+        else if (l[0] != ' ' && l[0] != '\\' && l[0] != 0) e = EST_FORTE; /* "editar x.c (…)": o que vai ser feito */
+        if (c->term) saida_linha(c, "    %s%s%s", sgr(c, e), l, sgr0(c));
+        else saida_linha(c, "[prévia] %s", l);
+    }
+    g_strfreev(linhas);
+    g_free(segura);
+}
+
+static void imprimir_previas_tarefa(LiaChat *c, JsonObject *dados)
+{
+    if (!dados || !json_object_has_member(dados, "previas")) return;
+    JsonNode *n = json_object_get_member(dados, "previas");
+    if (JSON_NODE_TYPE(n) != JSON_NODE_ARRAY) return;
+    JsonArray *a = json_node_get_array(n);
+    for (guint i = 0; i < json_array_get_length(a); i++) {
+        JsonNode *e = json_array_get_element(a, i);
+        if (JSON_NODE_TYPE(e) != JSON_NODE_OBJECT) continue;
+        JsonObject *o = json_node_get_object(e);
+        if (c->term) saida_linha(c, "%s  O que vai mudar nos arquivos:%s", sgr(c, EST_FORTE), sgr0(c));
+        imprimir_previa(c, campo_str(o, "previa"));
+        if (campo_str(o, "erro")) {
+            char *er = sanear(campo_str(o, "erro"));
+            saida_linha(c, "%s  ✗ prévia indisponível: %s%s", sgr(c, EST_ERRO), er, sgr0(c));
+            g_free(er);
+        }
+    }
+}
+
 static void tratar_msg_plano(LiaChat *c, const LiaMsg *m)
 {
     limpar_pendencias_de_execucao(c);
@@ -1020,6 +1064,7 @@ static void tratar_msg_plano(LiaChat *c, const LiaMsg *m)
                 saida_linha(c, "%s", l->str);
                 g_string_free(l, TRUE);
             }
+            imprimir_previas_tarefa(c, m->dados);
             saida_linha(c, "Aprovar este plano? [s/N] ");
         }
         tarefa_ui_painel(c);
@@ -1036,6 +1081,10 @@ static void tratar_msg_plano(LiaChat *c, const LiaMsg *m)
                     sgr(c, EST_FRACO), risco ? risco : "?", sgr0(c));
     } else {
         imprimir_plano(c, m->dados);
+        if (campo_str(m->dados, "previa")) {
+            if (c->term) saida_linha(c, "%s  O que vai mudar nos arquivos:%s", sgr(c, EST_FORTE), sgr0(c));
+            imprimir_previa(c, campo_str(m->dados, "previa"));
+        }
         if (!c->aguardando_decisao_plano)
             saida_linha(c, "[local] sem aprovação necessária — executando");
     }
@@ -1303,6 +1352,21 @@ static JsonObject *campo_obj(JsonObject *obj, const char *chave)
 
 static void enviar_solicitar_da_proposta(LiaChat *c, const char *modo);
 
+static gboolean plano_tem_prefixo(JsonObject *plano, const char *prefixo)
+{
+    if (!plano || !json_object_has_member(plano, "passos")) return FALSE;
+    JsonNode *n = json_object_get_member(plano, "passos");
+    if (JSON_NODE_TYPE(n) != JSON_NODE_ARRAY) return FALSE;
+    JsonArray *passos = json_node_get_array(n);
+    for (guint i = 0; i < json_array_get_length(passos); i++) {
+        JsonNode *p = json_array_get_element(passos, i);
+        if (JSON_NODE_TYPE(p) != JSON_NODE_OBJECT) continue;
+        const char *f = campo_str(json_node_get_object(p), "ferramenta");
+        if (f && g_str_has_prefix(f, prefixo)) return TRUE;
+    }
+    return FALSE;
+}
+
 static gboolean plano_tem_web(JsonObject *plano)
 {
     if (!plano || !json_object_has_member(plano, "passos")) return FALSE;
@@ -1382,7 +1446,10 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         tarefa_ui_limpar(c);
         tarefa_ui_carregar(c, pp);
         gboolean auto_tarefa = c->autopilot && auto_ok && !requer;
-        gboolean web_interativa = c->autopilot && requer && plano_tem_web(pp);
+        /* web ou alteração de arquivo: o plano é pedido na hora e a
+         * aprovação (com a prévia do diff, para arquivos) aparece ao vivo */
+        gboolean arquivo_interativo = c->autopilot && requer && plano_tem_prefixo(pp, "arquivo.");
+        gboolean web_interativa = (c->autopilot && requer && plano_tem_web(pp)) || arquivo_interativo;
         /* web automática: o DAEMON dispensou a confirmação (política
          * LIA_SESSIOND_WEB_AUTOMATICA) e o plano é só web — segue sozinho,
          * mas SEMPRE sinalizado na tela */
@@ -1403,6 +1470,8 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
             if (!auto_tarefa && !web_interativa && !web_auto)
                 saida_linha(c, "%s  ⏸ a tarefa não roda sozinha (%s) — /plano para solicitar, ou faça outra pergunta%s", sgr(c, EST_AVISO),
                             !c->autopilot ? "modo manual" : (requer ? "exige aprovação" : "não é leitura pura"), sgr0(c));
+            else if (arquivo_interativo)
+                saida_linha(c, "%s  ✓ alteração de arquivo pronta — mostrando a prévia; nada muda sem a sua confirmação%s", sgr(c, EST_FRACO), sgr0(c));
             else if (web_interativa)
                 saida_linha(c, "%s  ✓ pesquisa web pronta — solicitando agora; a aprovação aparecerá ao vivo%s", sgr(c, EST_FRACO), sgr0(c));
         } else {
@@ -1410,6 +1479,8 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
                         c->tarefa_n, compat ? compat : "-", veredito ? veredito : "?", motivo);
             if (web_auto)
                 ;
+            else if (arquivo_interativo)
+                saida_linha(c, "[local] alteração de arquivo: pedindo o plano com a prévia; nada muda sem confirmação");
             else if (auto_tarefa)
                 saida_linha(c, "[local] tarefa de %d passos selecionada — somente leitura, validada pelo daemon, executando automaticamente (LIA_CHAT_AUTOPILOT=read-only)", c->tarefa_n);
             else
@@ -1437,6 +1508,10 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
      * monta o plano e, se por qualquer motivo o plano exigir aprovação,
      * para e pergunta do mesmo jeito (tratar_msg_plano). */
     gboolean vai_auto = ferramenta && c->autopilot && auto_ok && !requer;
+    /* alteração de arquivo sugerida pelo modelo: pede o plano já, para a
+     * pessoa ver a prévia e decidir (nada muda sem a confirmação) */
+    gboolean pede_aprovacao_arquivo = ferramenta && c->autopilot && requer && g_str_has_prefix(ferramenta, "arquivo.");
+    if (pede_aprovacao_arquivo) vai_auto = TRUE;
     if (!ferramenta && *texto) historico_adicionar(c, "Lia", texto);
 
     if (c->term) {
@@ -1470,7 +1545,10 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
             saida_linha(c, "[validação] intenção=%s veredito=%s modelo_propôs=%s: %s",
                         intencao && campo_str(intencao, "id") ? campo_str(intencao, "id") : "-",
                         veredito ? veredito : "?", do_modelo ? do_modelo : "-", motivo);
-        if (ferramenta && vai_auto)
+        if (ferramenta && pede_aprovacao_arquivo)
+            saida_linha(c, "[local] alteração de arquivo sugerida: %s (parâmetros: %s) — pedindo o plano com a prévia; nada muda sem confirmação",
+                        ferramenta, c->proposta_pendente->parametros_json);
+        else if (ferramenta && vai_auto)
             saida_linha(c, "[local] ferramenta selecionada: %s (parâmetros: %s) — leitura segura validada pelo daemon, executando automaticamente (LIA_CHAT_AUTOPILOT=read-only)",
                         ferramenta, c->proposta_pendente->parametros_json);
         else if (ferramenta)

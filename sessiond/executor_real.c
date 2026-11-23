@@ -23,6 +23,8 @@
 #include "../runtime/lia.h"
 #include "../cli/cli.h"
 #include "../web/pesquisa.h"
+#include "../projeto/arquivos.h"
+#include "../projeto/praticas.h"
 
 #include <string.h>
 
@@ -60,6 +62,16 @@ static gboolean campo_bool(JsonObject *obj, const char *chave, gboolean padrao)
     if (JSON_NODE_TYPE(n) != JSON_NODE_VALUE || json_node_get_value_type(n) != G_TYPE_BOOLEAN)
         return padrao;
     return json_node_get_boolean(n);
+}
+
+static gint64 campo_int(JsonObject *obj, const char *chave, gint64 padrao)
+{
+    if (!obj || !json_object_has_member(obj, chave))
+        return padrao;
+    JsonNode *n = json_object_get_member(obj, chave);
+    if (JSON_NODE_TYPE(n) != JSON_NODE_VALUE || json_node_get_value_type(n) != G_TYPE_INT64)
+        return padrao;
+    return json_node_get_int(n);
 }
 
 static const char *campo_str(JsonObject *obj, const char *chave)
@@ -251,6 +263,56 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
         r->sucesso = TRUE;
         r->codigo_saida = 0;
         r->dados_json = pagina;
+        return;
+    } else if (strcmp(m->base.nome, "praticas.consultar") == 0) {
+        const PraticasCatalogo *cat = praticas_global();
+        if (!cat) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup("recurso_indisponivel");
+            r->erro_mensagem = g_strdup("catálogo de boas práticas não carregado (conhecimento/praticas/praticas.json)");
+            return;
+        }
+        const char *ling = campo_str(parametros, "linguagem");
+        const char *tarefa = campo_str(parametros, "tarefa");
+        if (!ling) ling = praticas_linguagem_da_tarefa(tarefa);
+        GPtrArray *sel = praticas_selecionar(cat, tarefa, ling, (int)campo_int(parametros, "limite", 6), 6000);
+        r->sucesso = TRUE;
+        r->codigo_saida = 0;
+        r->dados_json = praticas_para_json(cat, sel, ling);
+        g_ptr_array_unref(sel);
+        return;
+    } else if (g_str_has_prefix(m->base.nome, "arquivo.")) {
+        /* arquivos do projeto (projeto/arquivos.h): o confinamento à raiz,
+         * a proteção de .git/ e as cópias para desfazer são da biblioteca;
+         * a aprovação (com a prévia em diff) já aconteceu no daemon */
+        const char *f = m->base.nome;
+        char *erro_arq = NULL, *dados = NULL;
+        if (!strcmp(f, "arquivo.ler"))
+            dados = proj_ler(campo_str(parametros, "caminho"), campo_int(parametros, "linha_inicial", 1),
+                             campo_int(parametros, "linhas", 400), campo_str(parametros, "codificacao"), &erro_arq);
+        else if (!strcmp(f, "arquivo.listar"))
+            dados = proj_listar(campo_str(parametros, "caminho"), campo_bool(parametros, "recursivo", FALSE),
+                                campo_str(parametros, "padrao"), campo_int(parametros, "limite", 200),
+                                campo_bool(parametros, "ocultos", FALSE), &erro_arq);
+        else if (!strcmp(f, "arquivo.buscar"))
+            dados = proj_buscar(campo_str(parametros, "texto"), campo_bool(parametros, "regex", FALSE),
+                                campo_bool(parametros, "diferenciar_maiusculas", FALSE), campo_str(parametros, "caminho"),
+                                campo_str(parametros, "padrao"), campo_int(parametros, "limite", 50), &erro_arq);
+        else if (!strcmp(f, "arquivo.info"))
+            dados = proj_info(campo_str(parametros, "caminho"), &erro_arq);
+        else if (proj_ferramenta_de_escrita(f))
+            dados = proj_aplicar(f, parametros, &erro_arq);
+        if (!dados) {
+            r->sucesso = FALSE;
+            r->erro_codigo = g_strdup(erro_arq && (strstr(erro_arq, "recusado") || strstr(erro_arq, "fora do projeto"))
+                                      ? "capacidade_negada" : "parametro_invalido");
+            r->erro_mensagem = erro_arq ? erro_arq : g_strdup("operação de arquivo falhou");
+            return;
+        }
+        g_free(erro_arq);
+        r->sucesso = TRUE;
+        r->codigo_saida = 0;
+        r->dados_json = dados;
         return;
     } else {
         r->sucesso = FALSE;

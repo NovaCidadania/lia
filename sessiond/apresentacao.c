@@ -241,6 +241,154 @@ static void render_dispositivos(GString *out, JsonArray *arr)
 /* Passo web: o que foi encontrado e lido — NÃO uma resposta (a resposta
  * conclusiva vem depois, na mensagem 'resposta', sintetizada a partir
  * destas fontes: sessiond/sintese_web.c). */
+/* texto de arquivo do projeto: mantém tab, troca qualquer outro controle
+ * (ESC, BEL...) por '?' — o conteúdo de um arquivo nunca controla o terminal */
+static void anexar_codigo(GString *out, const char *t)
+{
+    for (const char *q = t ? t : ""; *q; q++)
+        g_string_append_c(out, (((unsigned char)*q < 0x20 && *q != '\t' && *q != '\n') || *q == 0x7f) ? '?' : *q);
+}
+
+static void render_arquivo(GString *out, const char *f, JsonObject *d)
+{
+    if (!strcmp(f, "arquivo.ler")) {
+        g_string_append(out, "Arquivo ");
+        anexar_codigo(out, texto(d, "caminho", "?"));
+        if (json_object_has_member(d, "binario") && json_object_get_boolean_member(d, "binario")) {
+            g_string_append_printf(out, " — binário (%s, %" G_GINT64_FORMAT " bytes); primeiros bytes:\n",
+                                   texto(d, "tipo_mime", "?"), inteiro(d, "bytes", 0));
+            g_string_append(out, texto(d, "hexdump", ""));
+            return;
+        }
+        gint64 ini = inteiro(d, "linha_inicial", 1), lidas = inteiro(d, "linhas_lidas", 0), total = inteiro(d, "total_linhas", 0);
+        g_string_append_printf(out, " — linhas %" G_GINT64_FORMAT "–%" G_GINT64_FORMAT " de %" G_GINT64_FORMAT " · %s%s · quebra de linha %s · %" G_GINT64_FORMAT " bytes\n",
+                               lidas ? ini : 0, ini + lidas - 1, total, texto(d, "codificacao", "?"),
+                               json_object_has_member(d, "bom") && json_object_get_boolean_member(d, "bom") ? " com BOM" : "",
+                               texto(d, "quebra_de_linha", "?"), inteiro(d, "bytes", 0));
+        if (g_strcmp0(texto(d, "confianca_codificacao", "alta"), "alta"))
+            g_string_append_printf(out, "  (codificação detectada com confiança %s; se o texto parecer errado, peça para ler com outra codificação)\n",
+                                   texto(d, "confianca_codificacao", "?"));
+        const char *c = texto(d, "conteudo", "");
+        int largura = (int)g_snprintf(NULL, 0, "%" G_GINT64_FORMAT, ini + lidas);
+        gint64 l = ini;
+        for (const char *p = c; *p;) {
+            const char *nl = strchr(p, '\n');
+            char *linha = g_strndup(p, nl ? (gsize)(nl - p) : strlen(p));
+            g_string_append_printf(out, "%*" G_GINT64_FORMAT " │ ", largura, l++);
+            anexar_codigo(out, linha);
+            g_string_append_c(out, '\n');
+            g_free(linha);
+            if (!nl) break;
+            p = nl + 1;
+        }
+        if (json_object_has_member(d, "truncado") && json_object_get_boolean_member(d, "truncado"))
+            g_string_append_printf(out, "… (há mais linhas: peça a partir da linha %" G_GINT64_FORMAT ")\n", ini + lidas);
+    } else if (!strcmp(f, "arquivo.listar")) {
+        JsonArray *e = lista(d, "entradas");
+        guint n = e ? json_array_get_length(e) : 0;
+        g_string_append_printf(out, "%u entrada(s) em ", n);
+        anexar_codigo(out, texto(d, "caminho", "."));
+        g_string_append(out, ":\n");
+        for (guint i = 0; i < n; i++) {
+            JsonObject *o = json_array_get_object_element(e, i);
+            g_string_append(out, "  ");
+            anexar_codigo(out, texto(o, "caminho", "?"));
+            const char *t = texto(o, "tipo", "");
+            if (!strcmp(t, "pasta")) g_string_append_c(out, '/');
+            else if (!strcmp(t, "link")) g_string_append(out, " (link)");
+            else if (tem_inteiro(o, "bytes")) g_string_append_printf(out, "  (%" G_GINT64_FORMAT " bytes)", inteiro(o, "bytes", 0));
+            g_string_append_c(out, '\n');
+        }
+        if (json_object_has_member(d, "truncado") && json_object_get_boolean_member(d, "truncado"))
+            g_string_append(out, "… (lista cortada no limite)\n");
+    } else if (!strcmp(f, "arquivo.buscar")) {
+        JsonArray *e = lista(d, "ocorrencias");
+        guint n = e ? json_array_get_length(e) : 0;
+        g_string_append_printf(out, "%u ocorrência(s) de \"", n);
+        anexar_codigo(out, texto(d, "procurado", ""));
+        g_string_append_printf(out, "\" em %" G_GINT64_FORMAT " arquivo(s) de texto examinado(s):\n", inteiro(d, "arquivos_examinados", 0));
+        for (guint i = 0; i < n; i++) {
+            JsonObject *o = json_array_get_object_element(e, i);
+            g_string_append(out, "  ");
+            anexar_codigo(out, texto(o, "caminho", "?"));
+            g_string_append_printf(out, ":%" G_GINT64_FORMAT ": ", inteiro(o, "linha", 0));
+            anexar_codigo(out, texto(o, "texto", ""));
+            g_string_append_c(out, '\n');
+        }
+        if (json_object_has_member(d, "truncado") && json_object_get_boolean_member(d, "truncado"))
+            g_string_append(out, "… (há mais ocorrências além do limite)\n");
+    } else if (!strcmp(f, "arquivo.info")) {
+        anexar_codigo(out, texto(d, "caminho", "?"));
+        g_string_append_printf(out, ": %s, %" G_GINT64_FORMAT " bytes, permissões %s%s\n", texto(d, "tipo", "?"), inteiro(d, "bytes", 0),
+                               texto(d, "permissoes", "?"), json_object_has_member(d, "executavel") && json_object_get_boolean_member(d, "executavel") ? " (executável)" : "");
+        if (texto(d, "codificacao", NULL))
+            g_string_append_printf(out, "  codificação %s (confiança %s)%s, quebra de linha %s, %" G_GINT64_FORMAT " linhas\n", texto(d, "codificacao", "?"),
+                                   texto(d, "confianca_codificacao", "?"), json_object_has_member(d, "bom") && json_object_get_boolean_member(d, "bom") ? " com BOM" : "",
+                                   texto(d, "quebra_de_linha", "?"), inteiro(d, "total_linhas", 0));
+        else if (texto(d, "tipo_mime", NULL))
+            g_string_append_printf(out, "  binário (%s)\n", texto(d, "tipo_mime", "?"));
+        if (texto(d, "modificado_em", NULL)) g_string_append_printf(out, "  modificado em %s\n", texto(d, "modificado_em", ""));
+        if (texto(d, "sha256", NULL)) g_string_append_printf(out, "  sha256 %s\n", texto(d, "sha256", ""));
+    } else {
+        /* escrita: o que foi feito, o diff e como desfazer */
+        JsonArray *ops = lista(d, "operacoes");
+        for (guint i = 0; ops && i < json_array_get_length(ops); i++) {
+            g_string_append(out, "✓ ");
+            anexar_codigo(out, texto(json_array_get_object_element(ops, i), "resumo", "?"));
+            g_string_append_c(out, '\n');
+        }
+        if (json_object_has_member(d, "completa") && !json_object_get_boolean_member(d, "completa")) {
+            g_string_append(out, "✗ a operação parou no meio: ");
+            anexar_codigo(out, texto(d, "erro", "?"));
+            g_string_append_c(out, '\n');
+        }
+        const char *diff = texto(d, "diff", "");
+        if (*diff && strstr(diff, "@@")) { anexar_codigo(out, diff); if (diff[strlen(diff) - 1] != '\n') g_string_append_c(out, '\n'); }
+        if (texto(d, "operacao_id", NULL) && strcmp(f, "arquivo.desfazer"))
+            g_string_append_printf(out, "Para desfazer: \"desfaça a operação %s\"\n", texto(d, "operacao_id", ""));
+    }
+}
+
+static void juntar_lista(GString *out, JsonObject *o, const char *k, const char *rotulo)
+{
+    JsonArray *a = lista(o, k);
+    if (!a || !json_array_get_length(a)) return;
+    g_string_append_printf(out, "     %s ", rotulo);
+    for (guint i = 0; i < json_array_get_length(a); i++) {
+        JsonNode *n = json_array_get_element(a, i);
+        if (JSON_NODE_TYPE(n) != JSON_NODE_VALUE || json_node_get_value_type(n) != G_TYPE_STRING) continue;
+        if (i) g_string_append(out, "; ");
+        anexar_codigo(out, json_node_get_string(n));
+    }
+    g_string_append_c(out, '\n');
+}
+
+static void render_praticas(GString *out, JsonObject *d)
+{
+    JsonArray *a = lista(d, "praticas");
+    guint n = a ? json_array_get_length(a) : 0;
+    if (!n) {
+        g_string_append(out, "Nenhuma prática do catálogo local se aplica claramente a este pedido.\n");
+        return;
+    }
+    g_string_append_printf(out, "%u prática(s) do catálogo local (de %" G_GINT64_FORMAT ")%s%s — orientação; as regras do projeto e os testes continuam valendo:\n",
+                           n, inteiro(d, "total_no_catalogo", 0), texto(d, "linguagem", NULL) ? " · linguagem: " : "", texto(d, "linguagem", ""));
+    for (guint i = 0; i < n; i++) {
+        JsonObject *o = json_array_get_object_element(a, i);
+        g_string_append_printf(out, "\n  %u. [", i + 1);
+        anexar_codigo(out, texto(o, "id", "?"));
+        g_string_append(out, "]");
+        if (!g_strcmp0(texto(o, "severidade", ""), "obrigatoria")) g_string_append(out, " (obrigatória)");
+        g_string_append(out, " ");
+        anexar_codigo(out, texto(o, "regra", ""));
+        g_string_append_c(out, '\n');
+        juntar_lista(out, o, "passos", "como:");
+        juntar_lista(out, o, "checagens", "confira:");
+        juntar_lista(out, o, "anti_padroes", "evite:");
+        juntar_lista(out, o, "referencias", "para aprofundar:");
+    }
+}
+
 static void render_web(GString *out, JsonObject *d)
 {
     JsonArray *arr = lista(d, "resultados");
@@ -347,6 +495,10 @@ char *apresentacao_renderizar(const char *ferramenta, const char *dados_json, gb
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT &&
                  (strcmp(f, "web.pesquisar") == 0 || strcmp(f, "web.abrir") == 0))
             render_web(out, json_node_get_object(carga));
+        else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT && g_str_has_prefix(f, "arquivo."))
+            render_arquivo(out, f, json_node_get_object(carga));
+        else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT && strcmp(f, "praticas.consultar") == 0)
+            render_praticas(out, json_node_get_object(carga));
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_VALUE && json_node_get_value_type(carga) == G_TYPE_STRING) {
             for (const char *q = json_node_get_string(carga); *q; q++) /* texto humano da ferramenta: tira controle, mantém \n e \t */
                 g_string_append_c(out, ((unsigned char)*q < 0x20 && *q != '\n' && *q != '\t') || *q == 0x7f ? '?' : *q);
@@ -669,6 +821,46 @@ char *apresentacao_frase(const char *ferramenta, const char *dados_json)
         if (pci) g_string_append_printf(out, "Existem %u dispositivos PCI, listados acima com fabricante e identificador.", pci);
         g_string_free(nomes_rede, TRUE);
         g_string_free(nomes_bloco, TRUE);
+    } else if (d && strcmp(f, "praticas.consultar") == 0) {
+        JsonArray *a = lista(d, "praticas");
+        guint n = a ? json_array_get_length(a) : 0;
+        if (!n) g_string_append(out, "Nenhuma prática do catálogo local se aplica claramente a este pedido; descreva a tarefa com mais detalhes (linguagem, o que vai mudar).");
+        else g_string_append_printf(out, "Selecionei %u prática(s) do catálogo local de %" G_GINT64_FORMAT " (listadas acima). São orientação: as regras do projeto, os testes e o código existente continuam sendo a referência.",
+                                    n, inteiro(d, "total_no_catalogo", 0));
+    } else if (d && g_str_has_prefix(f, "arquivo.")) {
+        /* resposta final curta: o detalhe (conteúdo, lista, diff) já foi
+         * mostrado no passo */
+        if (!strcmp(f, "arquivo.ler")) {
+            if (json_object_has_member(d, "binario") && json_object_get_boolean_member(d, "binario"))
+                g_string_append_printf(out, "%s é um arquivo binário (%s, %" G_GINT64_FORMAT " bytes); mostrei os primeiros bytes em hexadecimal.",
+                                       texto(d, "caminho", "?"), texto(d, "tipo_mime", "?"), inteiro(d, "bytes", 0));
+            else
+                g_string_append_printf(out, "Mostrei %s: linhas %" G_GINT64_FORMAT " a %" G_GINT64_FORMAT " de %" G_GINT64_FORMAT " (%s, quebra de linha %s).",
+                                       texto(d, "caminho", "?"), inteiro(d, "linha_inicial", 1),
+                                       inteiro(d, "linha_inicial", 1) + inteiro(d, "linhas_lidas", 0) - 1, inteiro(d, "total_linhas", 0),
+                                       texto(d, "codificacao", "?"), texto(d, "quebra_de_linha", "?"));
+        } else if (!strcmp(f, "arquivo.listar")) {
+            g_string_append_printf(out, "Listei %" G_GINT64_FORMAT " entrada(s) em %s%s.", inteiro(d, "total", 0), texto(d, "caminho", "."),
+                                   json_object_has_member(d, "truncado") && json_object_get_boolean_member(d, "truncado") ? " (lista cortada no limite)" : "");
+        } else if (!strcmp(f, "arquivo.buscar")) {
+            gint64 n = inteiro(d, "total", 0);
+            if (n == 0) g_string_append_printf(out, "Nenhuma ocorrência de \"%s\" nos %" G_GINT64_FORMAT " arquivo(s) de texto examinados.",
+                                               texto(d, "procurado", ""), inteiro(d, "arquivos_examinados", 0));
+            else g_string_append_printf(out, "Encontrei %" G_GINT64_FORMAT " ocorrência(s) de \"%s\" (arquivo e linha listados acima).", n, texto(d, "procurado", ""));
+        } else if (!strcmp(f, "arquivo.info")) {
+            g_string_append_printf(out, "%s: %s, %" G_GINT64_FORMAT " bytes.", texto(d, "caminho", "?"), texto(d, "tipo", "?"), inteiro(d, "bytes", 0));
+        } else {
+            JsonArray *ops = lista(d, "operacoes");
+            guint n = ops ? json_array_get_length(ops) : 0;
+            gboolean completa = !json_object_has_member(d, "completa") || json_object_get_boolean_member(d, "completa");
+            g_string_append(out, completa ? "Feito: " : "Feito em parte: ");
+            for (guint i = 0; i < n; i++)
+                g_string_append_printf(out, "%s%s", i ? "; " : "", texto(json_array_get_object_element(ops, i), "resumo", "?"));
+            g_string_append_c(out, '.');
+            if (!completa) g_string_append_printf(out, " Parou com erro: %s.", texto(d, "erro", "?"));
+            if (texto(d, "operacao_id", NULL) && strcmp(f, "arquivo.desfazer"))
+                g_string_append_printf(out, " Para desfazer, peça: \"desfaça a operação %s\".", texto(d, "operacao_id", ""));
+        }
     }
     g_object_unref(p);
     if (out->len == 0)
@@ -685,7 +877,7 @@ RespostaModo apresentacao_modo_resposta(const char *ferramenta)
     const char *f = ferramenta ? ferramenta : "";
     if (e_ranking(f) || strcmp(f, "sistema.dispositivos") == 0)
         return RESPOSTA_DETERMINISTICA;
-    if (strcmp(f, "web.pesquisar") == 0 || strcmp(f, "web.abrir") == 0)
+    if (strcmp(f, "web.pesquisar") == 0 || strcmp(f, "web.abrir") == 0 || g_str_has_prefix(f, "arquivo.") || strcmp(f, "praticas.consultar") == 0)
         return RESPOSTA_DETERMINISTICA;
     if (strcmp(f, "sistema.recursos") == 0 || strcmp(f, "sistema.diagnosticar") == 0)
         return RESPOSTA_EXTRATIVA;

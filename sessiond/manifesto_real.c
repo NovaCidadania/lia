@@ -4,6 +4,9 @@
 static const char *const CAP_LEITURA_PROCESSO[] = { "leitura_arquivo", "processo", NULL };
 static const char *const CAP_LEITURA[] = { "leitura_arquivo", NULL };
 static const char *const CAP_REDE[] = { "rede", NULL };
+static const char *const CAP_LER_PROJETO[] = { "leitura_arquivo", NULL };
+static const char *const CAP_ESCREVER_PROJETO[] = { "escrita_projeto", NULL };
+static const char *const EOLS[] = { "LF", "CRLF", "CR", NULL };
 
 static const char *const ESTADOS_TOOLS[] = {
     "DISCOVERED", "ACCESSIBLE", "PROBE_SUCCESS", "PROBE_FAILED",
@@ -33,6 +36,109 @@ static const ParametroManifesto PARAM_WEB_PESQUISAR[] = {
 
 static const ParametroManifesto PARAM_WEB_ABRIR[] = {
     { .nome = "url", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = NULL },
+};
+
+/* ---- arquivos do projeto (projeto/arquivos.h) ---- */
+static const ParametroManifesto PARAM_ARQ_LER[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "linha_inicial", .tipo = PARAM_INTEIRO, .min = 1, .max = 100000000 },
+    { .nome = "linhas", .tipo = PARAM_INTEIRO, .min = 1, .max = 2000 },
+    { .nome = "codificacao", .tipo = PARAM_STRING },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_LISTAR[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING },
+    { .nome = "recursivo", .tipo = PARAM_BOOLEANO },
+    { .nome = "padrao", .tipo = PARAM_STRING },
+    { .nome = "limite", .tipo = PARAM_INTEIRO, .min = 1, .max = 2000 },
+    { .nome = "ocultos", .tipo = PARAM_BOOLEANO },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_BUSCAR[] = {
+    { .nome = "texto", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "regex", .tipo = PARAM_BOOLEANO },
+    { .nome = "diferenciar_maiusculas", .tipo = PARAM_BOOLEANO },
+    { .nome = "caminho", .tipo = PARAM_STRING },
+    { .nome = "padrao", .tipo = PARAM_STRING },
+    { .nome = "limite", .tipo = PARAM_INTEIRO, .min = 1, .max = 500 },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_INFO[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_CRIAR[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "conteudo", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "codificacao", .tipo = PARAM_STRING },
+    { .nome = "quebra_de_linha", .tipo = PARAM_ENUM, .valores_enum = EOLS },
+    { .nome = "bom", .tipo = PARAM_BOOLEANO },
+    { .nome = "executavel", .tipo = PARAM_BOOLEANO },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_ESCREVER[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "conteudo", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "codificacao", .tipo = PARAM_STRING },
+    { .nome = "codificacao_atual", .tipo = PARAM_STRING },
+    { .nome = "quebra_de_linha", .tipo = PARAM_ENUM, .valores_enum = EOLS },
+    { .nome = "sha256_esperado", .tipo = PARAM_STRING },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_EDITAR[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "procurar", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "substituir", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "todas", .tipo = PARAM_BOOLEANO },
+    { .nome = "codificacao_atual", .tipo = PARAM_STRING },
+    { .nome = "sha256_esperado", .tipo = PARAM_STRING },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_ANEXAR[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "conteudo", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "codificacao_atual", .tipo = PARAM_STRING },
+    { .nome = "sha256_esperado", .tipo = PARAM_STRING },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_APAGAR[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "sha256_esperado", .tipo = PARAM_STRING },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_ORIGEM_DESTINO[] = {
+    { .nome = "origem", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "destino", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_CAMINHO[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_CONVERTER[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "codificacao", .tipo = PARAM_STRING },
+    { .nome = "codificacao_atual", .tipo = PARAM_STRING },
+    { .nome = "quebra_de_linha", .tipo = PARAM_ENUM, .valores_enum = EOLS },
+    { .nome = "bom", .tipo = PARAM_BOOLEANO },
+    { .nome = "sha256_esperado", .tipo = PARAM_STRING },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_PERMISSOES[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "executavel", .tipo = PARAM_BOOLEANO, .obrigatorio = TRUE },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_ARQ_DESFAZER[] = {
+    { .nome = "operacao_id", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = NULL },
+};
+
+static const ParametroManifesto PARAM_PRATICAS[] = {
+    { .nome = "tarefa", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "linguagem", .tipo = PARAM_STRING },
+    { .nome = "limite", .tipo = PARAM_INTEIRO, .min = 1, .max = 12 },
     { .nome = NULL },
 };
 
@@ -233,6 +339,166 @@ static const ManifestoReal TABELA[] = {
             .uso = "abrir uma fonte HTTPS pública indicada pela pessoa; destinos em rede privada são recusados",
         },
         .parametros = PARAM_WEB_ABRIR,
+    },
+    {
+        .base = {
+            .nome = "arquivo.ler", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_PROJETO,
+            .efeitos = "lê um arquivo dentro do projeto; não grava nada",
+            .timeout_padrao_ms = 15000, .somente_leitura = TRUE,
+            .uso = "ler um arquivo do projeto (texto em qualquer codificação, ou hexdump se binário); caminho, linha_inicial, linhas (até 2000), codificacao opcional",
+        },
+        .parametros = PARAM_ARQ_LER,
+    },
+    {
+        .base = {
+            .nome = "arquivo.listar", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_PROJETO,
+            .efeitos = "lista arquivos dentro do projeto (sem .git/); não grava nada",
+            .timeout_padrao_ms = 15000, .somente_leitura = TRUE,
+            .uso = "listar arquivos e pastas do projeto; caminho, recursivo, padrao (ex.: *.c), limite",
+        },
+        .parametros = PARAM_ARQ_LISTAR,
+    },
+    {
+        .base = {
+            .nome = "arquivo.buscar", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_PROJETO,
+            .efeitos = "lê os arquivos de texto do projeto procurando um trecho; não grava nada",
+            .timeout_padrao_ms = 15000, .somente_leitura = TRUE,
+            .uso = "procurar um texto ou regex nos arquivos do projeto, com arquivo e número da linha; texto, regex, caminho, padrao",
+        },
+        .parametros = PARAM_ARQ_BUSCAR,
+    },
+    {
+        .base = {
+            .nome = "arquivo.info", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_PROJETO,
+            .efeitos = "lê os metadados e o conteúdo de um arquivo do projeto; não grava nada",
+            .timeout_padrao_ms = 15000, .somente_leitura = TRUE,
+            .uso = "informações de um arquivo: tamanho, permissões, codificação, quebra de linha, tipo, sha256",
+        },
+        .parametros = PARAM_ARQ_INFO,
+    },
+    {
+        .base = {
+            .nome = "arquivo.criar", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "cria um arquivo novo dentro do projeto (falha se já existir); guarda o original para desfazer (arquivo.desfazer); só dentro do projeto, nunca em .git/",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "criar um arquivo novo no projeto com o conteúdo dado (nunca sobrescreve); exige aprovação",
+        },
+        .parametros = PARAM_ARQ_CRIAR,
+    },
+    {
+        .base = {
+            .nome = "arquivo.escrever", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "regrava um arquivo existente do projeto; guarda o original para desfazer (arquivo.desfazer); só dentro do projeto, nunca em .git/",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "substituir o conteúdo inteiro de um arquivo existente, preservando codificação e quebra de linha; exige aprovação",
+        },
+        .parametros = PARAM_ARQ_ESCREVER,
+    },
+    {
+        .base = {
+            .nome = "arquivo.editar", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "altera um trecho de um arquivo do projeto; guarda o original para desfazer (arquivo.desfazer); só dentro do projeto, nunca em .git/",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "trocar um trecho exato (procurar → substituir) num arquivo; o trecho precisa ser único, ou todas=true; exige aprovação",
+        },
+        .parametros = PARAM_ARQ_EDITAR,
+    },
+    {
+        .base = {
+            .nome = "arquivo.anexar", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "acrescenta ao fim de um arquivo do projeto; guarda o original para desfazer (arquivo.desfazer); só dentro do projeto, nunca em .git/",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "acrescentar texto ao fim de um arquivo existente; exige aprovação",
+        },
+        .parametros = PARAM_ARQ_ANEXAR,
+    },
+    {
+        .base = {
+            .nome = "arquivo.apagar", .risco = "alto", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "apaga um arquivo ou pasta vazia do projeto; guarda o original para desfazer (arquivo.desfazer); só dentro do projeto, nunca em .git/",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "apagar um arquivo (ou pasta vazia) do projeto; nunca apaga em massa; exige aprovação",
+        },
+        .parametros = PARAM_ARQ_APAGAR,
+    },
+    {
+        .base = {
+            .nome = "arquivo.mover", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "renomeia/move dentro do projeto; registra a operação para desfazer",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "mover ou renomear um arquivo/pasta dentro do projeto (nunca sobrescreve); exige aprovação",
+        },
+        .parametros = PARAM_ARQ_ORIGEM_DESTINO,
+    },
+    {
+        .base = {
+            .nome = "arquivo.copiar", .risco = "baixo", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "cria uma cópia de um arquivo dentro do projeto; registra a operação para desfazer",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "copiar um arquivo dentro do projeto (nunca sobrescreve); exige aprovação",
+        },
+        .parametros = PARAM_ARQ_ORIGEM_DESTINO,
+    },
+    {
+        .base = {
+            .nome = "arquivo.criar_pasta", .risco = "baixo", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "cria pastas dentro do projeto; registra a operação para desfazer",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "criar uma pasta (e as que faltarem) no projeto; exige aprovação",
+        },
+        .parametros = PARAM_ARQ_CAMINHO,
+    },
+    {
+        .base = {
+            .nome = "arquivo.converter", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "regrava um arquivo do projeto em outra codificação/quebra de linha; guarda o original para desfazer (arquivo.desfazer); só dentro do projeto, nunca em .git/",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "converter a codificação (ex.: WINDOWS-1252 → UTF-8), a quebra de linha (LF/CRLF/CR) ou o BOM de um arquivo; exige aprovação",
+        },
+        .parametros = PARAM_ARQ_CONVERTER,
+    },
+    {
+        .base = {
+            .nome = "arquivo.permissoes", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "sim", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "muda só o bit de execução de um arquivo do projeto; registra a permissão anterior para desfazer",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "tornar um arquivo executável (ou não); exige aprovação",
+        },
+        .parametros = PARAM_ARQ_PERMISSOES,
+    },
+    {
+        .base = {
+            .nome = "arquivo.desfazer", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "nao", .capacidades = CAP_ESCREVER_PROJETO,
+            .efeitos = "restaura arquivos a partir das cópias guardadas por uma operação anterior",
+            .timeout_padrao_ms = 15000, .somente_leitura = FALSE,
+            .uso = "desfazer uma alteração anterior de arquivo pelo operacao_id; exige aprovação",
+        },
+        .parametros = PARAM_ARQ_DESFAZER,
+    },
+    {
+        .base = {
+            .nome = "praticas.consultar", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_PROJETO,
+            .efeitos = "consulta o catálogo local de boas práticas de programação (conhecimento/praticas); não grava nada, não usa rede",
+            .timeout_padrao_ms = 5000, .somente_leitura = TRUE,
+            .uso = "boas práticas de programação relevantes para uma tarefa (C, testes, refatoração, git, shell, segurança, bancos de dados...); parâmetro tarefa",
+        },
+        .parametros = PARAM_PRATICAS,
     },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))
