@@ -184,7 +184,18 @@ fi
 # min entre perguntas (keep_alive, ollama/cliente_ollama.c).
 ENV_AQUECER=""
 [ "$MODELO" != mock ] && ENV_AQUECER="LIA_SESSIOND_AQUECER_MODELO=sim"
-env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO $ENV_AQUECER "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
+# Web automática (padrão): web.pesquisar/web.abrir rodam sem pedir
+# confirmação e o chat sinaliza cada acesso com "🌐 web automática".
+# Escrita, persistência, administração e execução de programas continuam
+# exigindo aprovação. LIA_WEB_AUTOMATICA=nao volta a pedir confirmação.
+ENV_WEB=""
+case "${LIA_WEB_AUTOMATICA:-sim}" in
+    sim) ENV_WEB="LIA_SESSIOND_WEB_AUTOMATICA=sim"
+         echo "web automática: LIGADA — pesquisas na internet rodam sem confirmação e são sinalizadas na tela (LIA_WEB_AUTOMATICA=nao desliga)" ;;
+    nao|não) echo "web automática: desligada — toda pesquisa web pede confirmação" ;;
+    *) echo "LIA_WEB_AUTOMATICA deve ser sim ou nao" >&2; exit 2 ;;
+esac
+env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO $ENV_AQUECER $ENV_WEB "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null' EXIT INT TERM
 

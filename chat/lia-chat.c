@@ -1001,12 +1001,15 @@ static void tratar_msg_plano(LiaChat *c, const LiaMsg *m)
             saida_linha(c, "%sPlano da tarefa%s — %s", sgr(c, EST_FORTE), sgr0(c), c->tarefa_objetivo ? c->tarefa_objetivo : "");
             saida_linha(c, "%s  %d passos · risco %s · %s · orçamento: %" G_GINT64_FORMAT " passos, %" G_GINT64_FORMAT " s · hash %.12s…%s",
                         sgr(c, EST_FRACO), c->tarefa_n, risco ? risco : "?",
-                        c->aguardando_decisao_plano ? "EXIGE APROVAÇÃO" : "somente leitura, sem aprovação",
+                        c->aguardando_decisao_plano ? "EXIGE APROVAÇÃO"
+                        : campo_bool(m->dados, "web_automatica", FALSE) ? "internet, sem confirmação (web automática)"
+                        : "somente leitura, sem aprovação",
                         orc_p, orc_ms / 1000, hash, sgr0(c));
         } else {
             saida_linha(c, "[tarefa] objetivo: %s", c->tarefa_objetivo ? c->tarefa_objetivo : "");
-            saida_linha(c, "[tarefa] plano: %d passos, risco=%s, requer_aprovacao=%s, hash=%s", c->tarefa_n, risco ? risco : "?",
-                        c->aguardando_decisao_plano ? "sim" : "nao", hash);
+            saida_linha(c, "[tarefa] plano: %d passos, risco=%s, requer_aprovacao=%s%s, hash=%s", c->tarefa_n, risco ? risco : "?",
+                        c->aguardando_decisao_plano ? "sim" : "nao",
+                        campo_bool(m->dados, "web_automatica", FALSE) ? " (web automática)" : "", hash);
             for (int i = 0; i < c->tarefa_n; i++)
                 saida_linha(c, "[tarefa]   [%d/%d] %s", i + 1, c->tarefa_n, c->tarefa_ferramenta[i]);
         }
@@ -1315,6 +1318,28 @@ static gboolean plano_tem_web(JsonObject *plano)
     return FALSE;
 }
 
+/* o que a pesquisa web vai acessar (consulta ou URL do primeiro passo web),
+ * para a sinalização da web automática; NULL se não houver */
+static char *plano_web_alvo(JsonObject *plano)
+{
+    if (!plano || !json_object_has_member(plano, "passos")) return NULL;
+    JsonNode *n = json_object_get_member(plano, "passos");
+    if (JSON_NODE_TYPE(n) != JSON_NODE_ARRAY) return NULL;
+    JsonArray *passos = json_node_get_array(n);
+    for (guint i = 0; i < json_array_get_length(passos); i++) {
+        JsonNode *p = json_array_get_element(passos, i);
+        if (JSON_NODE_TYPE(p) != JSON_NODE_OBJECT) continue;
+        JsonObject *po = json_node_get_object(p);
+        const char *f = campo_str(po, "ferramenta");
+        JsonObject *par = campo_obj(po, "parametros");
+        if (f && !strcmp(f, "web.pesquisar") && campo_str(par, "consulta"))
+            return sanear(campo_str(par, "consulta"));
+        if (f && !strcmp(f, "web.abrir") && campo_str(par, "url"))
+            return sanear(campo_str(par, "url"));
+    }
+    return NULL;
+}
+
 static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
 {
     const char *pergunta_id = campo_str(m->dados, "pergunta_id");
@@ -1358,11 +1383,24 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         tarefa_ui_carregar(c, pp);
         gboolean auto_tarefa = c->autopilot && auto_ok && !requer;
         gboolean web_interativa = c->autopilot && requer && plano_tem_web(pp);
+        /* web automática: o DAEMON dispensou a confirmação (política
+         * LIA_SESSIOND_WEB_AUTOMATICA) e o plano é só web — segue sozinho,
+         * mas SEMPRE sinalizado na tela */
+        gboolean web_auto = c->autopilot && !requer && campo_bool(validacao, "web_automatica", FALSE) && plano_tem_web(pp);
+        if (web_auto) {
+            char *alvo = plano_web_alvo(pp);
+            if (c->term)
+                saida_linha(c, "%s  🌐 web automática: acessando a internet sem pedir confirmação — %s%s", sgr(c, EST_AVISO),
+                            alvo ? alvo : "pesquisa", sgr0(c));
+            else
+                saida_linha(c, "[web automática] acessando a internet sem pedir confirmação: %s", alvo ? alvo : "pesquisa");
+            g_free(alvo);
+        }
         gboolean parcial = compat && !strcmp(compat, "parcial");
         if (c->term) {
             saida_linha(c, "%s  ✓ tarefa: %s (%d passos%s)%s", sgr(c, EST_FRACO), c->tarefa_objetivo ? c->tarefa_objetivo : "?", c->tarefa_n,
                         parcial ? "; compatibilidade PARCIAL: os dados coletados não respondem à pergunta de fundo" : "", sgr0(c));
-            if (!auto_tarefa && !web_interativa)
+            if (!auto_tarefa && !web_interativa && !web_auto)
                 saida_linha(c, "%s  ⏸ a tarefa não roda sozinha (%s) — /plano para solicitar, ou faça outra pergunta%s", sgr(c, EST_AVISO),
                             !c->autopilot ? "modo manual" : (requer ? "exige aprovação" : "não é leitura pura"), sgr0(c));
             else if (web_interativa)
@@ -1370,14 +1408,16 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         } else {
             saida_linha(c, "[validação] tarefa=%s passos=%d compatibilidade=%s veredito=%s: %s", campo_str(pp, "intencao") ? campo_str(pp, "intencao") : "-",
                         c->tarefa_n, compat ? compat : "-", veredito ? veredito : "?", motivo);
-            if (auto_tarefa)
+            if (web_auto)
+                ;
+            else if (auto_tarefa)
                 saida_linha(c, "[local] tarefa de %d passos selecionada — somente leitura, validada pelo daemon, executando automaticamente (LIA_CHAT_AUTOPILOT=read-only)", c->tarefa_n);
             else
                 saida_linha(c, "[local] tarefa sugerida: %d passos — use /plano para solicitar", c->tarefa_n);
         }
         g_free(texto);
         g_free(motivo);
-        if (auto_tarefa || web_interativa) enviar_solicitar_da_proposta(c, "executar");
+        if (auto_tarefa || web_interativa || web_auto) enviar_solicitar_da_proposta(c, "executar");
         else { tarefa_ui_limpar(c); encerrar_turno(c, FALSE); }
         return;
     }

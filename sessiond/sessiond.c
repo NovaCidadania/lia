@@ -262,6 +262,9 @@ static void enviar_erro(Cliente *c, const char *em_resposta_a, const char *codig
     escrever_linha(c, linha);
 }
 
+static gboolean web_automatica(const ExecutorManifesto *mf);
+static gboolean requer_aprovacao_efetiva(const ExecutorManifesto *mf);
+
 static void enviar_plano(Cliente *c, const char *em_resposta_a, const ExecutorManifesto *mf)
 {
     JsonBuilder *b = json_builder_new();
@@ -316,7 +319,9 @@ static void enviar_plano(Cliente *c, const char *em_resposta_a, const ExecutorMa
     json_builder_set_member_name(b, "reversivel");
     json_builder_add_string_value(b, mf->reversivel);
     json_builder_set_member_name(b, "requer_aprovacao");
-    json_builder_add_boolean_value(b, mf->requer_aprovacao);
+    json_builder_add_boolean_value(b, requer_aprovacao_efetiva(mf));
+    json_builder_set_member_name(b, "web_automatica");
+    json_builder_add_boolean_value(b, web_automatica(mf));
     json_builder_end_object(b);
 
     char *id = lia_novo_id("msg");
@@ -456,12 +461,13 @@ static void registrar_auditoria_disco(Daemon *d, Cliente *c, const char *resulta
     char *caminho = g_strdup_printf("%s/%s.log", d->caminho_dir_auditoria, data);
     char *ts_linha = g_date_time_format(agora, "%Y-%m-%d %H:%M:%S UTC");
     char *linha = g_strdup_printf(
-        "%s uid=%u acao=sessiond.%s risco=%s resultado=%s\n",
+        "%s uid=%u acao=sessiond.%s risco=%s resultado=%s%s\n",
         ts_linha,
         (unsigned)geteuid(),
         c->ferramenta_pendente ? c->ferramenta_pendente : "?",
         mf ? mf->risco : "?",
-        resultado_resumo);
+        resultado_resumo,
+        web_automatica(mf) ? " aprovacao=dispensada_web_automatica" : "");
 
     int fd = open(caminho, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd >= 0) {
@@ -715,7 +721,7 @@ static char *construir_manifesto_texto(void)
         const ExecutorManifesto *mf = g_executor->buscar_manifesto(nomes[i]);
         if (!mf) continue;
         g_string_append_printf(out, "- %s: %s%s\n", mf->nome, mf->uso ? mf->uso : mf->efeitos,
-                               mf->requer_aprovacao ? " [exige aprovação de uma pessoa]" : "");
+                               requer_aprovacao_efetiva(mf) ? " [exige aprovação de uma pessoa]" : "");
     }
     return g_string_free(out, FALSE);
 }
@@ -830,6 +836,28 @@ static const RoteadorManifesto ROT_MANIFESTO = { rot_existe, rot_validar, NULL }
  * exigência de aprovação e só com capacidades de leitura. Qualquer coisa
  * que grave, persista inventário, execute binários, toque hardware ou
  * peça privilégio fica FALSE e continua parando em confirmação. */
+/* Web automática (LIA_SESSIOND_WEB_AUTOMATICA=sim, ligada por padrão em
+ * chat/rodar_local.sh): web.pesquisar e web.abrir deixam de pedir
+ * confirmação. Vale SÓ para ferramentas "web." cuja única capacidade é
+ * "rede" (HTTPS externo, sem gravar nada, sem tocar a máquina); escrita,
+ * persistência, administração e execução de programas continuam exigindo
+ * aprovação explícita. Cada execução fica na auditoria e o cliente recebe
+ * "web_automatica": true para sinalizar na tela. */
+static gboolean g_web_automatica;
+
+static gboolean web_automatica(const ExecutorManifesto *mf)
+{
+    if (!g_web_automatica || !mf || !g_str_has_prefix(mf->nome, "web.")) return FALSE;
+    for (int i = 0; mf->capacidades[i]; i++)
+        if (strcmp(mf->capacidades[i], "rede") != 0) return FALSE;
+    return mf->capacidades[0] != NULL;
+}
+
+static gboolean requer_aprovacao_efetiva(const ExecutorManifesto *mf)
+{
+    return mf && mf->requer_aprovacao && !web_automatica(mf);
+}
+
 static gboolean execucao_automatica_permitida(const ExecutorManifesto *mf)
 {
     if (!mf || !mf->somente_leitura || mf->requer_aprovacao || strcmp(mf->risco, "nenhum") != 0)
@@ -925,7 +953,9 @@ static void enviar_proposta(Cliente *c, const char *pergunta_id, const ModeloRes
         json_builder_set_member_name(b, "risco");
         json_builder_add_string_value(b, mf->risco);
         json_builder_set_member_name(b, "requer_aprovacao");
-        json_builder_add_boolean_value(b, mf->requer_aprovacao);
+        json_builder_add_boolean_value(b, requer_aprovacao_efetiva(mf));
+        json_builder_set_member_name(b, "web_automatica");
+        json_builder_add_boolean_value(b, web_automatica(mf));
         json_builder_set_member_name(b, "somente_leitura");
         json_builder_add_boolean_value(b, mf->somente_leitura);
     }
@@ -1478,6 +1508,18 @@ static void tarefa_unref(Tarefa *t)
     g_free(t);
 }
 
+/* TRUE quando o plano roda sem confirmação SÓ porque todos os seus passos
+ * são web automática (o cliente sinaliza isso na tela) */
+static gboolean plano_web_automatico(const AgentePlano *plano)
+{
+    if (!plano || plano->requer_aprovacao || plano->passos->len == 0) return FALSE;
+    for (guint i = 0; i < plano->passos->len; i++) {
+        const AgentePasso *s = g_ptr_array_index(plano->passos, i);
+        if (!web_automatica(g_executor->buscar_manifesto(s->ferramenta))) return FALSE;
+    }
+    return TRUE;
+}
+
 /* ---- ponte agente <-> manifesto do executor ativo ---- */
 static gboolean ag_info(const char *ferramenta, AgenteFerramentaInfo *out, gpointer dados)
 {
@@ -1485,7 +1527,7 @@ static gboolean ag_info(const char *ferramenta, AgenteFerramentaInfo *out, gpoin
     const ExecutorManifesto *mf = g_executor->buscar_manifesto(ferramenta);
     if (!mf) return FALSE;
     out->risco = mf->risco;
-    out->requer_aprovacao = mf->requer_aprovacao;
+    out->requer_aprovacao = requer_aprovacao_efetiva(mf);
     out->somente_leitura = execucao_automatica_permitida(mf);
     out->capacidade_permitida = capacidades_permitidas(mf);
     out->capacidades = mf->capacidades;
@@ -1523,6 +1565,9 @@ static void auditar_passo(Cliente *c, const AgentePasso *s, const char *resumo)
         for (int i = 0; mf->capacidades[i]; i++)
             json_builder_add_string_value(b, mf->capacidades[i]);
     json_builder_end_array(b);
+    json_builder_set_member_name(b, "aprovacao");
+    json_builder_add_string_value(b, web_automatica(mf) ? "dispensada: web automática (LIA_SESSIOND_WEB_AUTOMATICA=sim)"
+                                     : requer_aprovacao_efetiva(mf) ? "aprovada por uma pessoa" : "não exigida (leitura local)");
     json_builder_set_member_name(b, "resultado_resumo");
     json_builder_add_string_value(b, resumo);
     json_builder_set_member_name(b, "reversao_disponivel");
@@ -1542,8 +1587,9 @@ static void auditar_passo(Cliente *c, const AgentePasso *s, const char *resumo)
     char *data = g_date_time_format(agora, "%Y-%m-%d");
     char *caminho = g_strdup_printf("%s/%s.log", d->caminho_dir_auditoria, data);
     char *ts_linha = g_date_time_format(agora, "%Y-%m-%d %H:%M:%S UTC");
-    char *texto = g_strdup_printf("%s uid=%u acao=sessiond.%s risco=%s resultado=%s tarefa_passo=%s\n",
-                                   ts_linha, (unsigned)geteuid(), s->ferramenta, mf ? mf->risco : "?", resumo, s->id);
+    char *texto = g_strdup_printf("%s uid=%u acao=sessiond.%s risco=%s resultado=%s tarefa_passo=%s%s\n",
+                                   ts_linha, (unsigned)geteuid(), s->ferramenta, mf ? mf->risco : "?", resumo, s->id,
+                                   web_automatica(mf) ? " aprovacao=dispensada_web_automatica" : "");
     int fd = open(caminho, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t n = write(fd, texto, strlen(texto));
@@ -2374,6 +2420,8 @@ static void tarefa_criar(Cliente *c, const char *em_resposta_a, AgentePlano *pla
     json_builder_add_boolean_value(b, TRUE);
     json_builder_set_member_name(b, "execucao_id");
     json_builder_add_string_value(b, t->exec_id);
+    json_builder_set_member_name(b, "web_automatica");
+    json_builder_add_boolean_value(b, plano_web_automatico(plano));
     json_builder_set_member_name(b, "ferramenta"); /* compatibilidade com clientes que só leem um nome */
     json_builder_add_string_value(b, "(tarefa de vários passos)");
     json_builder_end_object(b);
@@ -2446,6 +2494,8 @@ static void enviar_proposta_tarefa(Cliente *c, const char *pergunta_id, const Ag
     }
     json_builder_set_member_name(b, "execucao_automatica_permitida");
     json_builder_add_boolean_value(b, plano && plano->somente_leitura && !plano->requer_aprovacao);
+    json_builder_set_member_name(b, "web_automatica");
+    json_builder_add_boolean_value(b, plano_web_automatico(plano));
     json_builder_end_object(b);
     json_builder_set_member_name(b, "tempo_modelo_ms");
     json_builder_add_int_value(b, tempo_ms);
@@ -2609,7 +2659,7 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
     enviar_plano(c, m->id, mf);
     if (c->fechado) return;
 
-    if (mf->requer_aprovacao) {
+    if (requer_aprovacao_efetiva(mf)) {
         c->estado = ESTADO_AGUARDANDO_APROVACAO;
     } else {
         despachar_execucao(c, mf);
@@ -3121,6 +3171,10 @@ int main(int argc, char **argv)
     escolher_executor();
     escolher_modelo();
     aquecer_modelo();
+    g_web_automatica = g_strcmp0(g_getenv("LIA_SESSIOND_WEB_AUTOMATICA"), "sim") == 0;
+    g_print("lia-sessiond: web automática: %s\n", g_web_automatica
+            ? "LIGADA (web.pesquisar/web.abrir sem confirmação; demais ações continuam exigindo aprovação)"
+            : "desligada (toda pesquisa web pede aprovação)");
     const char *rot = g_getenv("LIA_SESSIOND_ROTEAMENTO");
     if (!rot || !*rot || strcmp(rot, "direto") == 0) {
         g_rota_direta = TRUE;

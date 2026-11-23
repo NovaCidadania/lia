@@ -144,6 +144,9 @@ class Conexao:
         self.s.close()
 
 
+ULTIMO_PLANO = [None]
+
+
 def perguntar_e_executar(c, pergunta, contexto=None, limite=30):
     """pergunta -> proposta -> solicitar -> plano -> aprovar(hash) -> resultado -> resposta"""
     d = {"mensagem": pergunta}
@@ -156,6 +159,7 @@ def perguntar_e_executar(c, pergunta, contexto=None, limite=30):
         return pr, None, None, None, []
     c.enviar("solicitar", {"plano_id": pl["plano_id"], "hash": pl["hash"], "origem_modelo": True, "pergunta_id": pr["dados"]["pergunta_id"]})
     _, plano = c.ate("plano")
+    ULTIMO_PLANO[0] = plano
     if plano and plano["dados"].get("requer_aprovacao"):
         c.enviar("aprovar", {"plano_id": plano["dados"]["plano_id"], "hash": plano["dados"]["hash"], "decisao": "aprovar", "escopo": "uma_vez"})
     msgs1, res = c.ate("resultado", limite)
@@ -189,6 +193,9 @@ def main():
         checar(par.get("consulta") == "evolução da linguagem Exemplar" and par.get("abrir_fontes") == 3,
                "W1: consulta sem o 'me conte com detalhes a' e com abertura de 3 fontes", par)
         checar(res and res["dados"]["estado"] == "sucesso", "W1: coleta concluída", res)
+        pd = ULTIMO_PLANO[0]["dados"] if ULTIMO_PLANO[0] else {}
+        checar(pr["dados"]["validacao"].get("requer_aprovacao") is True and pd.get("requer_aprovacao") is True and pd.get("web_automatica") is False,
+               "W1: sem LIA_SESSIOND_WEB_AUTOMATICA, a pesquisa web exige aprovação (padrão do daemon)", pd)
 
         print("== W2. resposta final conclusiva, estruturada e conferida ==")
         t = resp["dados"]["resposta_texto"] if resp else ""
@@ -321,6 +328,52 @@ def main():
         checar(pl and pl["passos"][0]["ferramenta"] == "web.abrir", "W12: URL indicada usa web.abrir", pl)
         checar(t.startswith("Resposta:") and "https://docs.exemplo/manual" in t and "História da Exemplar" in t, "W12: resposta cita a página aberta", t)
         c.fechar()
+        parar(d)
+
+        print("== W14. web automática (LIA_SESSIOND_WEB_AUTOMATICA=sim): web roda sem aprovação, sinalizada; o resto continua exigindo ==")
+        h = os.path.join(base, "h-auto"); os.makedirs(h)
+        d = iniciar(h, os.path.join(base, "fx1"), LIA_SESSIOND_WEB_AUTOMATICA="sim"); daemons.append(d)
+        c = Conexao(h)
+        c.enviar("perguntar", {"mensagem": "Me conte sobre a linguagem Exemplar"})
+        _, pr = c.ate("proposta")
+        v = pr["dados"]["validacao"] if pr else {}
+        checar(v.get("requer_aprovacao") is False and v.get("web_automatica") is True, "W14: proposta marcada web_automatica, sem exigência de aprovação", v)
+        pl = pr["dados"]["plano_proposto"]
+        c.enviar("solicitar", {"plano_id": pl["plano_id"], "hash": pl["hash"], "origem_modelo": True, "pergunta_id": pr["dados"]["pergunta_id"]})
+        _, plano = c.ate("plano")
+        checar(plano and plano["dados"]["requer_aprovacao"] is False and plano["dados"]["web_automatica"] is True,
+               "W14: plano chega com web_automatica=true e requer_aprovacao=false", plano and plano["dados"])
+        msgs, res = c.ate("resultado", 30)
+        _, resp = c.ate("resposta", 30)
+        checar(res and res["dados"]["estado"] == "sucesso" and resp and resp["dados"]["resposta_texto"].startswith("Resposta:"),
+               "W14: executa e responde SEM nenhum 'aprovar'")
+        aud = [m for m in msgs if m["tipo"] == "auditoria"]
+        checar(aud and all("dispensada: web automática" in m["dados"].get("aprovacao", "") for m in aud),
+               "W14: auditoria registra que a aprovação foi dispensada pela web automática", [m["dados"].get("aprovacao") for m in aud])
+        logs = "".join(open(os.path.join(h, ".lia", "humano", "auditoria", f)).read() for f in os.listdir(os.path.join(h, ".lia", "humano", "auditoria")))
+        checar("acao=sessiond.web.pesquisar" in logs and "aprovacao=dispensada_web_automatica" in logs,
+               "W14: auditoria em disco marca o acesso automático", logs[-300:])
+        c.enviar("solicitar", {"ferramenta": "tools.discover.persistir", "parametros": {}})
+        _, p2 = c.ate("plano")
+        checar(p2 and p2["dados"]["requer_aprovacao"] is True and p2["dados"].get("web_automatica") is False,
+               "W14: gravação em disco (tools.discover.persistir) continua exigindo aprovação", p2 and p2["dados"])
+        c.enviar("aprovar", {"plano_id": p2["dados"]["plano_id"], "hash": p2["dados"]["hash"], "decisao": "rejeitar", "escopo": "uma_vez"})
+        c.ate("resultado", 5)
+        c.enviar("solicitar", {"ferramenta": "web.abrir", "parametros": {"url": "https://blog.exemplo/historia"}})
+        _, p3 = c.ate("plano")
+        _, r3 = c.ate("resultado", 15)
+        checar(p3 and p3["dados"]["requer_aprovacao"] is False and p3["dados"]["web_automatica"] is True and r3 and r3["dados"]["estado"] == "sucesso",
+               "W14: web.abrir solicitada diretamente também roda sem aprovação", p3 and p3["dados"])
+        c.fechar()
+        chat = subprocess.Popen([os.path.join(RAIZ, "build", "lia-chat")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, env={"HOME": h, "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+        chat.stdin.write("Me conte sobre a linguagem Exemplar\n"); chat.stdin.flush()
+        time.sleep(6); chat.stdin.close()
+        saida = chat.stdout.read(); chat.wait(timeout=10)
+        checar("[web automática] acessando a internet sem pedir confirmação: linguagem Exemplar" in saida,
+               "W14: lia-chat sinaliza na tela o acesso automático à internet", saida[-1500:])
+        checar("Aprovar este plano" not in saida and "requer_aprovacao=nao (web automática)" in saida and "Resposta:" in saida,
+               "W14: lia-chat não pede confirmação e mostra a resposta final", saida[-1500:])
         parar(d)
 
         print("== W13. modelo real (Ollama falso): progresso da escrita, cancelamento e resposta extrativa quando o texto não é JSON ==")
