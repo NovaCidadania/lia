@@ -112,22 +112,40 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
             modelo_resposta_liberar(&rr);
             return;
         }
-        if (strstr(prompt_montado_completo, "\"arquivos_para_ler\"") || strstr(prompt_montado_completo, "\"edicoes\"")) {
+        if (strstr(prompt_montado_completo, "{\"criterios\":[") || strstr(prompt_montado_completo, "{\"arquivos\":[") ||
+            strstr(prompt_montado_completo, "\"edicoes\"")) {
             /* ciclo de coding (sessiond/coding.h): respostas roteirizadas por
-             * LIA_MOCK_CODIGO=<arquivo.json> {"plano": ..., "edicoes": [..., ...]}
-             * — cada item é o texto (ou objeto) que o "modelo" devolve; a
-             * i-ésima proposta usa edicoes[i] (a última se repete). Um pedido
-             * de plano novo recomeça a contagem. */
+             * LIA_MOCK_CODIGO=<arquivo.json> {"criterios": ..., "contexto": ...,
+             * "edicoes": [..., ...]} — cada item é o texto (ou objeto) que o
+             * "modelo" devolve; a i-ésima proposta usa edicoes[i] (a última se
+             * repete). "plano" (formato antigo) vale como "criterios". Um
+             * pedido de contexto/critérios recomeça a contagem. Com
+             * MOCK_CODIGO_LENTO no pedido, nunca responde (prazo/cancelamento). */
             static int proxima_edicao = 0;
-            gboolean plano = strstr(prompt_montado_completo, "\"arquivos_para_ler\"") != NULL;
-            if (plano) proxima_edicao = 0;
+            gboolean edicoes = strstr(prompt_montado_completo, "\"edicoes\"") != NULL;
+            gboolean contexto = !edicoes && strstr(prompt_montado_completo, "{\"arquivos\":[") != NULL;
+            gboolean criterios = !edicoes && !contexto;
+            if (!edicoes) proxima_edicao = 0;
+            if (strstr(prompt_montado_completo, "MOCK_CODIGO_LENTO")) {
+                /* fica pendente (1 h): só o cancelamento (mock_cancelar) responde */
+                if (!g_lentos) g_lentos = g_hash_table_new(g_str_hash, g_str_equal);
+                MockLento *m = g_new0(MockLento, 1);
+                m->id = g_strdup(pergunta_id);
+                m->texto = g_strdup("{\"edicoes\":[],\"explicacao\":\"(mock lento)\"}");
+                m->cb = concluido_cb; m->ctx = ctx;
+                m->fonte = g_timeout_add_seconds(3600, mock_lento_fim, m);
+                g_hash_table_insert(g_lentos, m->id, m);
+                return;
+            }
             char *texto = NULL;
             const char *arq = g_getenv("LIA_MOCK_CODIGO");
             JsonParser *jp = json_parser_new();
             if (arq && json_parser_load_from_file(jp, arq, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT) {
                 JsonObject *ro = json_node_get_object(json_parser_get_root(jp));
                 JsonNode *n = NULL;
-                if (plano) n = json_object_has_member(ro, "plano") ? json_object_get_member(ro, "plano") : NULL;
+                if (criterios) n = json_object_has_member(ro, "criterios") ? json_object_get_member(ro, "criterios")
+                                 : json_object_has_member(ro, "plano") ? json_object_get_member(ro, "plano") : NULL;
+                else if (contexto) n = json_object_has_member(ro, "contexto") ? json_object_get_member(ro, "contexto") : NULL;
                 else if (json_object_has_member(ro, "edicoes")) {
                     JsonArray *ea = json_object_get_array_member(ro, "edicoes");
                     guint len = json_array_get_length(ea);
@@ -138,8 +156,9 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
                 else if (n) { JsonGenerator *g = json_generator_new(); json_generator_set_root(g, n); texto = json_generator_to_data(g, NULL); g_object_unref(g); }
             }
             g_object_unref(jp);
-            if (!texto) texto = g_strdup(plano ? "{\"criterios\":[{\"descricao\":\"(mock) os testes passam\",\"verificacao\":\"validacao\"}],\"arquivos_para_ler\":[],\"validacao\":\"teste\"}"
-                                              : "{\"edicoes\":[],\"explicacao\":\"(mock) sem roteiro em LIA_MOCK_CODIGO\"}");
+            if (!texto) texto = g_strdup(criterios ? "{\"criterios\":[{\"descricao\":\"(mock) os testes passam\",\"verificacao\":\"validacao\"}]}"
+                                         : contexto ? "{\"arquivos\":[]}"
+                                                    : "{\"edicoes\":[],\"explicacao\":\"(mock) sem roteiro em LIA_MOCK_CODIGO\"}");
             if (opcoes->progresso_cb) opcoes->progresso_cb(opcoes->progresso_ctx, 42);
             rr.sucesso = TRUE;
             rr.resposta_texto = texto;

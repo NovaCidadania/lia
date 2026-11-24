@@ -130,6 +130,55 @@ char *coding_resumo_docker(const char *fatos, const char *riscos);
  * que não existe no manifest); "" se nenhuma */
 char *coding_contradicoes_docker(const char *fatos, const char *texto);
 
+/* ---- contexto e critérios: o RUNTIME decide, o modelo só sugere ----
+ *
+ * Caminhos citados em instruções negativas ("não leia .env", "sem tocar
+ * em migrations/", "não execute campaign.py") e categorias citadas nelas
+ * (logs, contatos, banco, dumps, migrations, .git, credenciais) viram
+ * padrões proibidos: nunca lidos, nunca alterados, nunca critério. */
+char **coding_caminhos_proibidos(const char *pedido);
+gboolean coding_caminho_proibido(char **proibidos, const char *rel);
+/* a proposta ACRESCENTA ao conteúdo uma referência a caminho proibido
+ * literal (abrir "sends.txt", importar campaign.py): devolve o nome, ou NULL.
+ * A validação rodaria esse código sobre o arquivo real. Padrões com '*' e
+ * diretórios não entram (falso positivo demais); referências que o arquivo
+ * já tinha não contam. */
+char *coding_conteudo_cita_proibido(char **proibidos, const char *antes, const char *depois);
+/* código-fonte, teste ou configuração de build/teste (não dados) */
+gboolean coding_arquivo_de_contexto(const char *rel);
+/* contexto mínimo por regras, sem modelo: quem define os símbolos, os
+ * arquivos de código citados (que existem) e os testes existentes deles;
+ * *a_criar: arquivos de código citados que não existem; *notas: o que foi
+ * ignorado e por quê (uma linha por item) */
+void coding_selecionar_contexto(const char *raiz, const char *pedido, char **definem, char ***ler, char ***a_criar, char **notas);
+/* critérios derivados do PEDIDO e da validação: validação passa; arquivos
+ * a criar existem; identificadores exigidos (`crase`, CONSTANTE_X) estão no
+ * diff; só testes (se o pedido proíbe produção); nada proibido tocado */
+CodingPlano *coding_plano_do_pedido(const char *pedido, char **a_criar, const char *validacao);
+/* filtro dos critérios SUGERIDOS pelo modelo: descarta o que viola
+ * proibição, cita caminho não pedido ou dado, inventa resultado (trecho que
+ * não está no pedido), cita identificador que não está no pedido nem nos
+ * arquivos lidos, ou não tem relação com o pedido */
+void coding_filtrar_criterios_ex(CodingPlano *p, const char *pedido, char **tambem_citados, GHashTable *lidos);
+void coding_mesclar_criterios(CodingPlano *destino, CodingPlano *do_modelo);
+/* conferência com o estado da tarefa (arquivos gravados e lidos, diff) */
+gboolean coding_conferir_criterio_ex(const CodingCriterio *c, gboolean validacao_passou, char **tocados, char **lidos, const char *diff, char **como);
+/* comando de validação configurado que o pedido nomeia, ou NULL */
+char *coding_validacao_do_pedido(const char *pedido, char **nomes);
+/* operação de arquivo direta só com conteúdo LITERAL (bloco ```, trecho
+ * entre aspas/crases ou "com o conteúdo: ...") — o resto de um pedido de
+ * código vai para o ciclo de coding, nunca para arquivo.ler/anexar */
+gboolean coding_operacao_literal(const char *pedido, const char *ferramenta, const char *conteudo);
+/* a validação executa código do projeto: impressão (tamanho+mtime) dos
+ * arquivos que casam com as proibições, antes e depois; "" = nada mudou */
+char *coding_impressao_proibidos(const char *raiz, char **proibidos);
+char *coding_proibidos_alterados(const char *antes, const char *depois);
+/* modelo escolhe o contexto quando as regras não acharam nada */
+char *coding_prompt_contexto(const char *pedido, const char *lista_arquivos);
+char **coding_ler_contexto(const char *texto, const char *lista_arquivos, char **proibidos);
+/* modelo sugere critérios DEPOIS de ver os arquivos lidos */
+char *coding_prompt_criterios(const char *pedido, GHashTable *lidos);
+
 char *coding_prompt_plano(const char *pedido, const char *lista_arquivos);
 /* 'simbolos': em arquivos grandes, só a região deles vai ao modelo */
 char *coding_prompt_edicoes(const char *pedido, GPtrArray *criterios, const char *praticas, GHashTable *lidos,

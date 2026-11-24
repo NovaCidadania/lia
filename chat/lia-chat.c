@@ -169,6 +169,13 @@ typedef struct {
     gint64 tarefa_ms[16];
     gboolean tarefa_replano[16];
     char *tarefa_fase;             /* última fase informada pelo daemon */
+
+    /* ---- tarefa de CÓDIGO em andamento (ciclo de coding do daemon) ---- */
+    gboolean codigo_ativo;
+    char *codigo_etapa;            /* contexto, criterios, proposta, aprovacao_edicao, validacao, correcao... */
+    char *codigo_msg;              /* última mensagem da etapa (curta, para a linha de status) */
+    int codigo_ciclo, codigo_max;
+    gint64 codigo_inicio_us;
 } LiaChat;
 
 #define TAREFA_MAX_PASSOS_UI 16
@@ -283,7 +290,23 @@ static void definir_fase(LiaChat *c, Fase f)
     case FASE_VALIDANDO_PLANO: txt = g_strdup_printf("validando plano%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
     case FASE_AGUARDANDO_APROVACAO: txt = g_strdup_printf("aguardando aprovação%s%s — responda s ou n", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : ""); break;
     case FASE_EXECUTANDO:
-        if (c->tarefa_ativa) {
+        if (c->codigo_ativo && !(c->tarefa_ativa && c->tarefa_n > 0)) {
+            /* ciclo de coding: etapa real, ciclo e tempo — nunca "0/0 passos" */
+            const char *e = c->codigo_etapa ? c->codigo_etapa : "contexto";
+            const char *nome = !strcmp(e, "contexto") || !strcmp(e, "inspecao") ? "lendo o projeto"
+                             : !strcmp(e, "criterios") ? "critérios de aceite"
+                             : !strcmp(e, "proposta") ? "proposta"
+                             : !strcmp(e, "correcao") ? "correção"
+                             : !strcmp(e, "validacao") ? "validação"
+                             : !strcmp(e, "revisao") ? "revisão" : e;
+            char ciclo[48] = "";
+            if (c->codigo_ciclo > 0 || !strcmp(e, "proposta") || !strcmp(e, "correcao"))
+                g_snprintf(ciclo, sizeof ciclo, " · ciclo %d/%d", c->codigo_ciclo + (strcmp(e, "proposta") && strcmp(e, "correcao") ? 0 : 1),
+                           c->codigo_max > 0 ? c->codigo_max : 3);
+            char *curta = c->codigo_msg ? g_utf8_substring(c->codigo_msg, 0, 70) : g_strdup("");
+            txt = g_strdup_printf("código · %s%s%s%s", nome, ciclo, *curta ? " · " : "", curta);
+            g_free(curta);
+        } else if (c->tarefa_ativa && c->tarefa_n > 0) {
             int feitos = 0;
             const char *atual = NULL;
             for (int i = 0; i < c->tarefa_n; i++) {
@@ -294,6 +317,8 @@ static void definir_fase(LiaChat *c, Fase f)
             if (!strcmp(fase, "verificando")) txt = g_strdup_printf("verificando critérios · %d/%d passos", feitos, c->tarefa_n);
             else if (!strcmp(fase, "replanejando")) txt = g_strdup_printf("replanejando · %d/%d passos", feitos, c->tarefa_n);
             else txt = g_strdup_printf("coletando dados · %d/%d passos%s%s", feitos, c->tarefa_n, atual ? " · " : "", atual ? atual : "");
+        } else if (c->tarefa_ativa) {
+            txt = g_strdup_printf("preparando a tarefa%s%s", c->tarefa_fase ? " · " : "", c->tarefa_fase ? c->tarefa_fase : "");
         } else {
             txt = g_strdup_printf("executando leitura%s%s", c->ferramenta_turno ? " · " : "", c->ferramenta_turno ? c->ferramenta_turno : "");
         }
@@ -439,6 +464,10 @@ static void encerrar_turno(LiaChat *c, gboolean concluido)
     g_clear_pointer(&c->ferramenta_turno, g_free);
     tarefa_ui_limpar(c);
     g_clear_pointer(&c->tarefa_objetivo, g_free);
+    c->codigo_ativo = FALSE;
+    g_clear_pointer(&c->codigo_etapa, g_free);
+    g_clear_pointer(&c->codigo_msg, g_free);
+    c->codigo_ciclo = 0;
     definir_fase(c, FASE_OCIOSO);
 }
 
@@ -758,6 +787,19 @@ static void tratar_cancelar(LiaChat *c)
         g_object_unref(b);
         g_free(id);
         saida_linha(c, "[local] cancelamento da execução %s enviado", c->execucao_id_pendente);
+        return;
+    }
+    if (c->codigo_ativo) {
+        /* tarefa de código entre etapas (o modelo escrevendo a proposta,
+         * lendo o projeto...): o daemon encerra o ciclo, guarda o
+         * checkpoint e confirma com 'erro' "cancelado" */
+        JsonBuilder *b = json_builder_new();
+        json_builder_begin_object(b);
+        json_builder_end_object(b);
+        char *id = enviar(c, LIA_MSG_CANCELAR, b, NULL, 0, TRUE);
+        g_object_unref(b);
+        g_free(id);
+        saida_linha(c, "[local] cancelamento da tarefa de código enviado (o checkpoint fica guardado para retomar)");
         return;
     }
     if (c->pergunta_em_andamento || c->fase == FASE_GERANDO_RESPOSTA) {
@@ -1110,7 +1152,15 @@ static void tratar_msg_progresso_ou_saida(LiaChat *c, const LiaMsg *m, gboolean 
             if (c->term) saida_linha(c, "%s  ⋯ código · %s: %s%s", sgr(c, EST_FRACO), etapa ? etapa : "?", msg, sgr0(c));
             else saida_linha(c, "[código] %s: %s", etapa ? etapa : "?", msg);
         }
+        c->codigo_ativo = TRUE;
+        g_free(c->codigo_etapa);
+        c->codigo_etapa = g_strdup(etapa ? etapa : "?");
+        g_free(c->codigo_msg);
+        c->codigo_msg = g_strdup(msg);
+        c->codigo_ciclo = (int)campo_int(cod, "ciclo", c->codigo_ciclo);
+        c->codigo_max = (int)campo_int(cod, "max_ciclos", 3);
         g_free(msg);
+        if (c->fase != FASE_AGUARDANDO_APROVACAO) definir_fase(c, FASE_EXECUTANDO);
         return;
     }
     JsonObject *ana = progresso ? campo_obj(m->dados, "analise") : NULL;
@@ -1459,7 +1509,8 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         g_free(id);
         g_free(texto);
         c->turno_espera_resposta = TRUE;
-        c->tarefa_ativa = TRUE;
+        c->codigo_ativo = TRUE; /* NÃO é uma tarefa de passos: a linha de status mostra a etapa do código */
+        c->codigo_inicio_us = g_get_monotonic_time();
         definir_fase(c, FASE_EXECUTANDO);
         return;
     }
@@ -1968,7 +2019,7 @@ static gboolean ao_sigint(gpointer dados)
     }
     c->ultimo_sigint_us = agora;
     if ((c->plano_id_pendente && c->aguardando_decisao_plano) || c->execucao_id_pendente ||
-        c->pergunta_em_andamento || c->fase == FASE_GERANDO_RESPOSTA) {
+        c->pergunta_em_andamento || c->fase == FASE_GERANDO_RESPOSTA || c->codigo_ativo) {
         tratar_cancelar(c);
     } else {
         anunciar_sigint(c, "lia-chat: nada para cancelar; Ctrl-C de novo em até 2s para encerrar, ou /sair");

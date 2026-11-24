@@ -734,6 +734,36 @@ def main():
         ch.proc.wait(timeout=5)
         ch.encerrar()
 
+        print("== P20. tarefa de CÓDIGO: a linha de status mostra a etapa real — nunca 'coletando dados · 0/0 passos' ==")
+        home_c = os.path.join(base, "cod")
+        proj_c = os.path.join(base, "projc")
+        os.makedirs(home_c)
+        os.makedirs(proj_c)
+        with open(os.path.join(proj_c, "soma.c"), "w") as f:
+            f.write("int soma(int a, int b) { return a - b; }\n")
+        with open(os.path.join(proj_c, "Makefile"), "w") as f:
+            f.write("teste:\n\ttrue\n")
+        daemon_c = iniciar_daemon(home_c, {"LIA_SESSIOND_PROJETO": proj_c, "LIA_SESSIOND_INTERVALO_PROGRESSO_MS": "500"})
+        chats_daemons.append(daemon_c)
+        ch = novo_chat(home_c)
+        ch.esperar(regiao_ok, 5)
+        ch.teclar("corrija o bug na função soma em soma.c MOCK_CODIGO_LENTO\r")
+        vistos = []
+
+        def status_codigo(t):
+            st = t.linha(regiao(t)[0])
+            vistos.append(st)
+            return "código · proposta · ciclo 1/3" in st
+
+        checar(ch.esperar(status_codigo, 8), "P20: status mostra 'código · proposta · ciclo 1/3' enquanto o modelo escreve", vistos[-3:])
+        checar(not any("0/0" in v or "coletando dados" in v for v in vistos), "P20: nunca 'coletando dados · 0/0 passos' durante o ciclo de código", vistos)
+        checar(ch.esperar(lambda t: "aguardando o modelo local" in t.tudo(), 5), "P20: batida de progresso aparece enquanto o modelo trabalha", ch.tela.despejo())
+        ch.teclar("\x03")
+        checar(ch.esperar(lambda t: "pronto" in t.linha(regiao(t)[0]), 8), "P20: Ctrl-C cancela a tarefa de código e a sessão volta a 'pronto'", ch.tela.despejo())
+        ch.teclar("/sair\r")
+        ch.proc.wait(timeout=5)
+        ch.encerrar()
+
         print("== P15. isolamento ==")
         alterado = False
         lia_real = os.path.join(home_real, ".lia")

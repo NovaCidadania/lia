@@ -183,8 +183,18 @@ static char *conteudo_apos_marcador(const char *pedido)
     const char *melhor = NULL;
     gsize tam = 0;
     for (int i = 0; MARCAS[i]; i++) {
-        const char *p = strstr(baixo, MARCAS[i]);
-        if (p && (!melhor || p < melhor)) { melhor = p; tam = strlen(MARCAS[i]); }
+        /* a marca só introduz conteúdo LITERAL quando vem seguida de ':',
+         * aspas, crase ou quebra de linha — "preserve o conteúdo do campo
+         * detail. Mantenha..." é descrição de comportamento, não texto a gravar */
+        for (const char *p = strstr(baixo, MARCAS[i]); p; p = strstr(p + 1, MARCAS[i])) {
+            const char *d = p + strlen(MARCAS[i]);
+            while (*d == ' ') d++;
+            gboolean literal = *d == ':' || *d == '"' || *d == '\'' || *d == '`' || *d == '\n' || !strncmp(d, "“", strlen("“")) ||
+                               !strncmp(d, "«", strlen("«"));
+            if (!literal) continue;
+            if (!melhor || p < melhor) { melhor = p; tam = strlen(MARCAS[i]); }
+            break;
+        }
     }
     char *r = NULL;
     if (melhor) {

@@ -143,6 +143,11 @@ def main():
         prog = s.progresso()
         checar(any("critérios de aceite" in p for p in prog) and any(p.startswith("li soma.c") for p in prog) and
                any("proposta pronta" in p for p in prog), "C1: progresso por etapa (critérios, leitura, proposta)", prog)
+        etapas = [m["dados"]["codigo"]["etapa"] for m in s.msgs if m["tipo"] == "progresso" and "codigo" in m["dados"]]
+        li = [i for i, p in enumerate(prog) if p.startswith("li ")]
+        cr = [i for i, p in enumerate(prog) if "critérios de aceite" in p]
+        checar(li and cr and max(li) < min(cr) and "contexto" in etapas and etapas.index("contexto") < etapas.index("criterios") < etapas.index("proposta"),
+               "C1: o contexto real é lido ANTES dos critérios e da proposta (nenhum pedido ao modelo antes disso)", etapas)
         s.decidir(plano, "aprovar")
         pv = s.ate("plano")
         prevv = (pv["dados"].get("previas") or [{}])[0].get("previa", "") if pv else ""
@@ -152,7 +157,10 @@ def main():
         s.decidir(pv, "aprovar")
         r = s.ate("resposta", 60)
         t = resposta_texto(r)
-        checar(t.startswith("Resposta: concluído") and "✓ soma(2,3) devolve 5" in t and "✓ soma.c usa a + b" in t, "C1: concluído com critérios conferidos", t)
+        checar(t.startswith("Resposta: concluído") and "✓ a validação \"teste\" passa depois da última edição" in t and "soma.c usa a + b" not in t,
+               "C1: concluído com os critérios DO PEDIDO conferidos (os do modelo não entram sem o filtro)", t)
+        checar("Contexto lido: soma.c, teste_soma.c" in t and "Origem das propostas:\n  ciclo 1: modelo local (mock)" in t,
+               "C1: relatório diz o contexto lido (o arquivo citado e o teste dele) e a origem de cada proposta", t)
         checar("Diff:" in t and "+int soma(int a, int b) { return a + b; }" in t and "Validação: \"teste\" passou" in t and "depois da última edição" in t and "ok" in t,
                "C1: relatório cita o diff e a saída da validação posterior à edição", t)
         checar("desfaça a operação" in t and "Checkpoint: codigo-" in t, "C1: como desfazer e o checkpoint")
@@ -216,7 +224,7 @@ def main():
             v = s.ate("plano")
             s.decidir(v, "aprovar")
         r = s.ate("resposta", 60)
-        checar("NÃO concluído — repetição sem progresso" in resposta_texto(r) and "✗ soma(2,3) devolve 5" in resposta_texto(r),
+        checar("NÃO concluído — repetição sem progresso" in resposta_texto(r) and "✗ a validação \"teste\" passa" in resposta_texto(r),
                "C5: para e explica; nunca declara concluído", resposta_texto(r))
         s.fim()
 
@@ -236,7 +244,7 @@ def main():
         print("== C7. propostas inválidas: fora do projeto, arquivo não lido, nenhuma edição ==")
         for nome, rot, trecho in (
             ("c7a", [{"edicoes": [{"acao": "criar", "caminho": "../fora.c", "conteudo": "x"}]}], "fora do projeto"),
-            ("c7b", [editar("int main", "int principal", "teste_soma.c")], "não foi lido nesta tarefa"),
+            ("c7b", [editar("teste:", "teste2:", "Makefile")], "não foi lido nesta tarefa"),
             ("c7c", [{"edicoes": [], "explicacao": "nada"}], "nenhuma edição"),
         ):
             s = Cenario(base, nome, {"plano": PLANO, "edicoes": rot})
@@ -278,16 +286,16 @@ def main():
         s.fim()
 
         print("== C9. cancelar durante a validação: processo encerrado, checkpoint, nada depois ==")
-        s = Cenario(base, "c9", {"plano": dict(PLANO, validacao="lento"), "edicoes": [editar("a - b", "a + b")]})
+        s = Cenario(base, "c9", {"plano": PLANO, "edicoes": [editar("a - b", "a + b")]})
         cenarios.append(s)
         os.makedirs(os.path.join(s.proj, ".lia"))
         with open(os.path.join(s.proj, ".lia", "validacao.json"), "w") as f:
             json.dump({"comandos": {"lento": ["make", "lento"], "teste": ["make", "teste"]}}, f)
-        s.perguntar("corrija o bug na função soma em soma.c")
+        s.perguntar("corrija o bug na função soma em soma.c e valide com lento")
         p = s.ate("plano")
         s.decidir(p, "aprovar")
         v = s.ate("plano")
-        checar(v and "argv: [\"make\",\"lento\"]" in (v["dados"].get("previas") or [{}])[0].get("previa", ""), "C9: comando sugerido existente é usado")
+        checar(v and "argv: [\"make\",\"lento\"]" in (v["dados"].get("previas") or [{}])[0].get("previa", ""), "C9: comando nomeado no pedido (e configurado) é usado")
         s.decidir(v, "aprovar")
         time.sleep(1.5)
         t0 = time.time()
@@ -301,6 +309,172 @@ def main():
         ck_dir = os.path.join(s.home, ".lia", "projeto", "coding")
         cks = [json.load(open(os.path.join(ck_dir, f))) for f in os.listdir(ck_dir)]
         checar(cks and cks[0]["estado"] == "cancelado", "C9: checkpoint gravado como cancelado", cks)
+        s.fim()
+
+        def checkpoints(s):
+            d = os.path.join(s.home, ".lia", "projeto", "coding")
+            return [json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d))] if os.path.isdir(d) else []
+
+        def log(s):
+            return open(os.path.join(s.home, "sessiond.log")).read()
+
+        print("== F1. travamento 'coletando dados 0/0': nada localizável -> o modelo escolhe da lista; nada válido -> encerra com motivo ==")
+        s = Cenario(base, "f1a", {"contexto": {"arquivos": ["inexistente.c", "../fora.c"]}, "edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        pr = s.perguntar("corrija o bug da conta de adição do projeto")
+        r = s.ate("resposta", 20)
+        t = resposta_texto(r)
+        checar(pr and pr["dados"].get("codigo") and t.startswith("Resposta: NÃO concluído — não localizei o código do pedido") and
+               "Contexto lido: nenhum arquivo" in t and s.soma() == SOMA_BUG,
+               "F1: sem contexto real a tarefa ENCERRA com motivo — nunca propõe sem ter lido nada, nunca fica parada", t)
+        ck = checkpoints(s)
+        checar(ck and ck[-1]["estado"] == "interrompido", "F1: checkpoint final coerente (interrompido)", ck)
+        s.fim()
+        s = Cenario(base, "f1b", {"contexto": {"arquivos": ["soma.c"]}, "edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        s.perguntar("corrija o bug da conta de adição do projeto")
+        p = s.ate("plano", 20)
+        prog = s.progresso()
+        checar(p and p["dados"]["intencao"] == "codigo_edicao" and any("o modelo escolheu o contexto: soma.c" in x for x in prog) and
+               any(x.startswith("li soma.c") for x in prog), "F1: contexto escolhido pelo modelo (conferido contra a lista) é lido antes da proposta", prog)
+        ck = checkpoints(s)
+        checar(ck and "soma.c" in ck[-1]["arquivos_lidos_sha256"], "F1: checkpoint gravado DEPOIS da leitura registra o que foi lido", ck and ck[-1])
+        s.decidir(p, "rejeitar")
+        s.ate("resposta")
+        s.fim()
+
+        print("== F2. critérios: absurdos do modelo descartados; erro do modelo -> critérios do pedido, o fluxo segue ==")
+        absurdos = {"criterios": {"criterios": [{"descricao": "O código da função soma em soma.c está correto", "verificacao": "validacao", "texto": "return a * b * 0;"},
+                                  {"descricao": "O arquivo sends.txt contém a linha correta", "verificacao": "contem", "caminho": "sends.txt", "texto": "|"},
+                                  {"descricao": "calcularDesconto devolve zero", "verificacao": "validacao"},
+                                  {"descricao": "soma(2,3) devolve 5 depois da correção do bug", "verificacao": "validacao"}]}}
+        s = Cenario(base, "f2a", dict(absurdos, edicoes=[editar("a - b", "a + b")]), {"LIA_SESSIOND_CODIGO_CRITERIOS_MODELO": "1"})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        p = s.ate("plano")
+        s.decidir(p, "aprovar")
+        v = s.ate("plano")
+        s.decidir(v, "aprovar")
+        r = s.ate("resposta", 60)
+        t = resposta_texto(r)
+        checar(t.startswith("Resposta: concluído") and "✓ soma(2,3) devolve 5 depois da correção do bug" in t, "F2: critério do modelo ligado ao pedido é aceito e conferido", t)
+        checar("Critérios sugeridos e descartados pelo verificador:" in t and "return a * b * 0;" in t and "sends.txt" in t and "calcularDesconto" in t,
+               "F2: critérios inventados (trecho, arquivo de dados, nome inexistente) aparecem como descartados, com motivo", t)
+        s.fim()
+        s = Cenario(base, "f2b", {"criterios": "isto não é JSON", "edicoes": [editar("a - b", "a + b")]}, {"LIA_SESSIOND_CODIGO_CRITERIOS_MODELO": "1"})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        p = s.ate("plano")
+        prog = s.progresso()
+        checar(p and p["dados"]["intencao"] == "codigo_edicao" and any("não sugeriu critérios utilizáveis" in x and "sigo com os do pedido" in x for x in prog),
+               "F2: erro do modelo nos critérios não interrompe: seguem os critérios do pedido", prog)
+        s.decidir(p, "rejeitar")
+        s.ate("resposta")
+        s.fim()
+
+        print("== F3. prazo do modelo, cancelamento e desconexão durante a proposta ==")
+        s = Cenario(base, "f3a", {"edicoes": [editar("a - b", "a + b")]}, {"LIA_SESSIOND_CODIGO_TIMEOUT_MS": "1500"})
+        cenarios.append(s)
+        t0 = time.time()
+        s.perguntar("corrija o bug na função soma em soma.c MOCK_CODIGO_LENTO")
+        r = s.ate("resposta", 15)
+        t = resposta_texto(r)
+        checar(t.startswith("Resposta: NÃO concluído — o modelo local (mock) não respondeu em 1 s") and time.time() - t0 < 10,
+               "F3: prazo estourado ENCERRA a tarefa com o motivo (nada fica ativo)", t[:300])
+        ck = checkpoints(s)
+        checar(ck and ck[-1]["estado"] == "interrompido" and not s.c.silencio(2), "F3: checkpoint 'interrompido' e nada chega depois", ck and ck[-1]["estado"])
+        pr = s.perguntar("corrija o bug na função soma em soma.c")
+        checar(pr and pr["dados"].get("codigo"), "F3: a conexão aceita uma nova tarefa depois do prazo (nada ficou preso)", pr and pr["dados"])
+        s.fim()
+        s = Cenario(base, "f3b", {"edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c MOCK_CODIGO_LENTO")
+        time.sleep(1)
+        s.c.enviar("cancelar", {})
+        e = s.ate("erro", 10)
+        depois = s.c.silencio(2)
+        ck = checkpoints(s)
+        checar(e and e["dados"].get("codigo") == "cancelado" and not any(m["tipo"] == "resposta" for m in depois) and ck and ck[-1]["estado"] == "cancelado",
+               "F3: 'cancelar' durante a proposta: confirmação, checkpoint 'cancelado', nada depois", (e, ck and ck[-1]["estado"]))
+        s.fim()
+        s = Cenario(base, "f3c", {"edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c MOCK_CODIGO_LENTO")
+        time.sleep(1)
+        s.c.fechar()
+        time.sleep(1)
+        ck = checkpoints(s)
+        checar(ck and ck[-1]["estado"] == "desconectado" and "o cliente desconectou" in log(s), "F3: desconexão encerra a tarefa com checkpoint 'desconectado'",
+               (ck and ck[-1]["estado"], log(s)[-300:]))
+        s.c = Conexao(s.home)
+        pr = s.perguntar("retome a tarefa de código %s" % ck[-1]["id"])
+        s.msgs += s.c.silencio(1.5)
+        prog = s.progresso()
+        checar(pr and pr["dados"].get("codigo") and any("próxima etapa: nova proposta" in x for x in prog) and any("pedindo ao modelo a alteração" in x for x in prog),
+               "F3: a tarefa desconectada é retomada pelo checkpoint (volta à proposta)", prog[-3:])
+        s.c.enviar("cancelar", {})
+        s.ate("erro", 10)
+        s.fim()
+
+        print("== F4. caminhos em instruções negativas nunca são lidos nem alterados ==")
+        s = Cenario(base, "f4", {"edicoes": [editar("int main", "int principal", "teste_soma.c"), editar("a - b", "a + b")]})
+        cenarios.append(s)
+        with open(os.path.join(s.proj, "sends.txt"), "w") as f:
+            f.write("DADO-REAL|x\n")
+        s.perguntar("corrija o bug na função soma em soma.c sem alterar o formato de sends.txt. Não leia nem altere teste_soma.c, não leia .env")
+        p = s.ate("plano")
+        prog = s.progresso()
+        checar(not any(x.startswith("li teste_soma.c") or x.startswith("li sends.txt") or x.startswith("li .env") for x in prog) and
+               any("o pedido proíbe tocar em:" in x and "sends.txt" in x and "teste_soma.c" in x and ".env" in x for x in prog),
+               "F4: teste_soma.c, sends.txt e .env (citados em 'sem alterar'/'não leia') não são lidos; o progresso diz por quê", prog)
+        checar(any("proposta recusada pelo verificador" in x and "não foi lido" in x for x in prog), "F4: proposta que mexe no arquivo negado é recusada", prog)
+        s.decidir(p, "aprovar")
+        v = s.ate("plano")
+        s.decidir(v, "aprovar")
+        r = s.ate("resposta", 60)
+        t = resposta_texto(r)
+        checar(t.startswith("Resposta: concluído") and "✓ nada que o pedido proíbe foi lido ou alterado" in t and "Contexto lido: soma.c\n" in t and
+               "DADO-REAL" not in json.dumps(s.msgs), "F4: concluído; critério de proibição conferido; nenhum byte do arquivo de dados saiu", t)
+        s.fim()
+
+        print("== F4b. a validação (código do projeto) mexe num caminho proibido: nunca 'concluído' ==")
+        s = Cenario(base, "f4b", {"edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        with open(os.path.join(s.proj, "Makefile"), "a") as f:
+            f.write("teste-log: teste_soma\n\t./teste_soma\n\techo envio >> registro.log\n")
+        os.makedirs(os.path.join(s.proj, ".lia"))
+        with open(os.path.join(s.proj, ".lia", "validacao.json"), "w") as f:
+            json.dump({"comandos": {"teste-log": ["make", "teste-log"], "teste": ["make", "teste"]}}, f)
+        s.perguntar("corrija o bug na função soma em soma.c e valide com teste-log. Não altere logs.")
+        p = s.ate("plano")
+        s.decidir(p, "aprovar")
+        v = s.ate("plano")
+        s.decidir(v, "aprovar")
+        r = s.ate("resposta", 60)
+        t = resposta_texto(r)
+        checar(t.startswith("Resposta: NÃO concluído — a validação (código do projeto/dos testes) mexeu em caminho que o pedido proíbe: registro.log (criado)"),
+               "F4b: escrita da validação em caminho proibido é detectada e impede 'concluído'", t[:400])
+        s.fim()
+
+        print("== F5. roteamento: pedido de código nunca cai em arquivo.ler/anexar ==")
+        s = Cenario(base, "f5", {"edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        for pedido in ("Leia soma.c e corrija a função soma", "Altere soma.c para que soma some de verdade; nao leia .env",
+                       "Em soma.c, ajuste soma e adicione um teste para cobri-la. Mantenha a compatibilidade e preserve o conteúdo do resto."):
+            pr = s.perguntar(pedido)
+            checar(pr and pr["dados"].get("codigo") is True, "F5: '%s' -> ciclo de coding" % pedido[:50], pr and pr["dados"].get("plano_proposto"))
+            p = s.ate("plano")
+            if p:
+                s.decidir(p, "rejeitar")
+            s.ate("resposta")
+        with open(os.path.join(s.proj, "notas.txt"), "w") as f:
+            f.write("notas\n")
+        pr = s.perguntar("acrescente ao final de notas.txt o texto: revisar soma")
+        pl = pr and pr["dados"].get("plano_proposto")
+        checar(pl and pl["passos"][0]["ferramenta"] == "arquivo.anexar" and not pr["dados"].get("codigo"), "F5: texto literal continua operação direta de arquivo", pr and pr["dados"])
+        pr = s.perguntar("acrescente ao fim de notas.txt uma explicação sobre o projeto")
+        checar(pr and not pr["dados"].get("plano_proposto") and not pr["dados"].get("codigo"), "F5: escrita sem conteúdo literal -> pergunta, nada gravado",
+               pr and pr["dados"].get("resposta_texto"))
         s.fim()
 
         print("== V. 'rode os testes' e 'git' fora do ciclo ==")

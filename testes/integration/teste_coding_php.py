@@ -254,8 +254,8 @@ def main():
         p.decidir(v)
         r = p.ate("resposta", 60)
         t = resposta(r)
-        checar(t.startswith("Resposta: concluído") and "✓ usa placeholder" in t and "1 teste(s), 0 falha(s)" in t, "P1: concluído com o teste PHP passando sem banco", t)
-        checar("Git antes de começar: ramo principal, árvore limpa" in t and "Origem da última proposta: receita determinística" in t,
+        checar(t.startswith("Resposta: concluído") and "✓ a validação \"teste\" passa" in t and "1 teste(s), 0 falha(s)" in t, "P1: concluído com o teste PHP passando sem banco", t)
+        checar("Git antes de começar: ramo principal, árvore limpa" in t and "Origem das propostas:\n  ciclo 1: receita determinística" in t,
                "P1: relatório mostra o estado do Git antes e a origem da proposta", t)
         st = git(p.proj, "status", "--porcelain", "-uall")
         checar(sorted(st.split("\n")[:-1]) == sorted([" M application/models/M_veiculo.php", "?? tests/M_veiculo_getmanutencaoTest.php"]),
@@ -272,7 +272,7 @@ def main():
         checar("+++ b/tests/M_veiculoTest.php" in prev and not any("receita" in x for x in p.progresso()), "P1b: proposta do modelo, prévia normal", prev[:500])
         p.decidir(plano, "rejeitar")
         r = p.ate("resposta")
-        checar("Origem da última proposta: modelo local" in resposta(r), "P1b: relatório diz que a proposta veio do modelo", resposta(r))
+        checar("Origem das propostas:\n  ciclo 1: modelo local" in resposta(r), "P1b: relatório diz que a proposta veio do modelo", resposta(r))
         p.fim()
 
         print("== P2. Git quebrado: a pré-condição falha, a Lia explica e segue ==")

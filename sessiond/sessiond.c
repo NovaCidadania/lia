@@ -134,7 +134,7 @@ typedef struct {
 static void coding_iniciar(Cliente *c, const char *pergunta_id, const char *pedido);
 static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id);
 static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t);
-static void coding_cancelar(Cliente *c);
+static void coding_cancelar(Cliente *c, const char *motivo);
 static AgentePlano *plano_analise_docker(const char *pedido);
 static char *escopo_pedido_generico(void);
 
@@ -1410,6 +1410,22 @@ static void disparar_resumo_modelo(Cliente *c, const char *ferramenta, const cha
     g_free(prompt_final);
 }
 
+/* o plano de arquivo é uma operação LITERAL (conteúdo exato dado pela
+ * pessoa, ou mover/copiar/apagar...)? Pedido de código com outro plano de
+ * arquivo (ler, anexar texto descritivo...) nunca vira esse plano. */
+static gboolean plano_arquivo_literal(const char *mensagem, AgentePlano *pa)
+{
+    if (!pa || pa->passos->len != 1) return FALSE;
+    AgentePasso *s = g_ptr_array_index(pa->passos, 0);
+    const char *conteudo = NULL;
+    JsonParser *jp = json_parser_new();
+    if (s->parametros_json && json_parser_load_from_data(jp, s->parametros_json, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT)
+        conteudo = json_object_get_string_member_with_default(json_node_get_object(json_parser_get_root(jp)), "conteudo", NULL);
+    gboolean r = coding_operacao_literal(mensagem, s->ferramenta, conteudo);
+    g_object_unref(jp);
+    return r;
+}
+
 static void tratar_perguntar(Cliente *c, const LiaMsg *m)
 {
     if (c->coding) {
@@ -1487,7 +1503,10 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
              * transformar numa pergunta de esclarecimento — é tarefa de código */
             char *td = NULL;
             AgentePlano *pa = agente_planejar_arquivos(mensagem, &td);
-            codigo = !pa;
+            codigo = !pa || !plano_arquivo_literal(mensagem, pa);
+            if (pa && codigo)
+                g_print("lia-sessiond: pedido de código: o plano de arquivo '%s' não é uma operação literal — vai para o ciclo de coding\n",
+                        ((AgentePasso *)g_ptr_array_index(pa->passos, 0))->ferramenta);
             if (pa) agente_plano_liberar(pa);
             g_free(td);
         }
@@ -1534,6 +1553,28 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
         char *texto_direto = NULL;
         AgenteCompat compat = COMPAT_COMPATIVEL;
         AgentePlano *plano = agente_planejar_com_contexto(mensagem, contexto_conversa, &texto_direto, &compat);
+        if (plano && plano->passos->len == 1 && proj_raiz()) {
+            /* escrita de arquivo sem conteúdo literal num pedido que fala de
+             * mudar algo: classificação incerta — pergunta, nunca grava um
+             * trecho do pedido como se fosse o conteúdo */
+            AgentePasso *s0 = g_ptr_array_index(plano->passos, 0);
+            gboolean escrita = !strcmp(s0->ferramenta, "arquivo.anexar") || !strcmp(s0->ferramenta, "arquivo.escrever") ||
+                               !strcmp(s0->ferramenta, "arquivo.criar");
+            if (escrita && !plano_arquivo_literal(mensagem, plano)) {
+                char *pid = lia_novo_id("perg");
+                const char *txt = "Não ficou claro se você quer gravar um TEXTO exato ou mudar CÓDIGO. Para gravar texto, coloque-o entre aspas ou num "
+                                  "bloco ``` (ou \"com o conteúdo: ...\"); para mudar código, diga o arquivo e o que deve mudar (ex.: \"corrija a função x em "
+                                  "src/a.py\"). Nada foi alterado.";
+                g_print("lia-sessiond: pergunta %s: escrita de arquivo sem conteúdo literal (%s) — esclarecimento, nada alterado\n", pid, s0->ferramenta);
+                enviar_proposta_tarefa(c, pid, NULL, COMPAT_ESCLARECER, txt, "roteador", "esclarecimento",
+                                       "classificação incerta: escrita de arquivo sem conteúdo literal", 0, 0);
+                agente_plano_liberar(plano);
+                g_free(texto_direto);
+                g_free(pid);
+                g_free(prompt_final);
+                return;
+            }
+        }
         if (plano || texto_direto) {
             char *pid = lia_novo_id("perg");
             char *erro = plano ? agente_plano_validar(plano, &AG_MANIFESTO) : NULL;
@@ -3724,12 +3765,12 @@ static void tratar_cancelar(Cliente *c, const LiaMsg *m)
             return;
         }
         tarefa_cancelar(c->tarefa, "cancelado pelo cliente", TRUE);
-        coding_cancelar(c); /* se a tarefa era de um ciclo de coding: checkpoint e fim, sem mais nada */
+        coding_cancelar(c, "cancelado"); /* se a tarefa era de um ciclo de coding: checkpoint e fim, sem mais nada */
         return;
     }
     if (c->coding) {
         /* o modelo está escrevendo a proposta (nenhuma tarefa em andamento) */
-        coding_cancelar(c);
+        coding_cancelar(c, "cancelado");
         enviar_erro(c, m->id, "cancelado", "tarefa de código cancelada a pedido do cliente (checkpoint guardado)");
         return;
     }
@@ -3862,7 +3903,7 @@ static void desconectar_cliente(Cliente *c, const char *motivo)
     }
     if (c->tarefa)
         tarefa_cancelar(c->tarefa, "cliente desconectou", FALSE);
-    coding_cancelar(c);
+    coding_cancelar(c, "desconectado");
     g_io_stream_close(G_IO_STREAM(c->conexao), NULL, NULL);
     c->daemon->clientes = g_list_remove(c->daemon->clientes, c);
     cliente_unref(c); /* solta a referência que a lista do daemon mantinha */
@@ -4145,6 +4186,10 @@ struct Coding {
     gboolean receita_tentada;
     char *origem_proposta;  /* "modelo local" ou "receita determinística ..." (para o relatório) */
     guint lint_seq;         /* checagem de sintaxe em andamento (resultado só vale se ainda for a mesma) */
+    char **a_criar;         /* arquivos de código citados no pedido que ainda não existem */
+    char *lista;            /* arquivos do projeto (para o modelo escolher contexto, se as regras não acharem nada) */
+    GPtrArray *origens;     /* origem de cada proposta aplicada ("ciclo 1: modelo local ...") */
+    char *impressao_proibidos; /* arquivos proibidos antes da validação (tamanho+mtime) */
 };
 
 static void coding_liberar(Coding *k)
@@ -4155,6 +4200,10 @@ static void coding_liberar(Coding *k)
     if (k->tocados) g_ptr_array_unref(k->tocados);
     if (k->criados) g_ptr_array_unref(k->criados);
     g_free(k->origem_proposta);
+    g_strfreev(k->a_criar);
+    g_free(k->lista);
+    g_free(k->impressao_proibidos);
+    if (k->origens) g_ptr_array_unref(k->origens);
     g_free(k->id); g_free(k->pedido); g_free(k->pergunta_id);
     coding_plano_liberar(k->plano);
     g_hash_table_unref(k->lidos); g_hash_table_unref(k->shas);
@@ -4242,6 +4291,9 @@ static void coding_checkpoint(Coding *k, const char *estado)
     for (guint i = 0; i < k->criados->len; i++) json_array_add_string_element(cr2, g_ptr_array_index(k->criados, i));
     json_object_set_array_member(o, "arquivos_gravados", tc);
     json_object_set_array_member(o, "arquivos_criados", cr2);
+    JsonArray *ac = json_array_new();
+    for (int i = 0; k->a_criar && k->a_criar[i]; i++) json_array_add_string_element(ac, k->a_criar[i]);
+    json_object_set_array_member(o, "a_criar", ac);
     GDateTime *agora = g_date_time_new_now_local();
     char *quando = g_date_time_format_iso8601(agora);
     json_object_set_string_member(o, "atualizado_em", quando);
@@ -4263,11 +4315,17 @@ static void coding_encerrar(Cliente *c, const char *motivo)
     GString *o = g_string_new(NULL);
     GString *crit = g_string_new(NULL);
     gboolean todos = TRUE;
+    g_ptr_array_add(k->tocados, NULL);
+    GList *lk = g_list_sort(g_hash_table_get_keys(k->lidos), (GCompareFunc)strcmp);
+    GPtrArray *lidos_v = g_ptr_array_new();
+    for (GList *it = lk; it; it = it->next) g_ptr_array_add(lidos_v, it->data);
+    g_ptr_array_add(lidos_v, NULL);
     for (guint i = 0; k->plano && i < k->plano->criterios->len; i++) {
         CodingCriterio *cr = g_ptr_array_index(k->plano->criterios, i);
         char *como = NULL;
         gboolean ok = FALSE;
-        if (k->editou) ok = coding_conferir_criterio(cr, k->passou && k->validou_depois, &como);
+        if (k->editou) ok = coding_conferir_criterio_ex(cr, k->passou && k->validou_depois, (char **)k->tocados->pdata, (char **)lidos_v->pdata,
+                                                        k->diffs->str, &como);
         else como = g_strdup("não conferido: nenhuma alteração foi gravada");
         if (!ok) todos = FALSE;
         g_string_append_printf(crit, "  %s %s — %s\n", ok ? "✓" : "✗", cr->descricao, como);
@@ -4286,11 +4344,28 @@ static void coding_encerrar(Cliente *c, const char *motivo)
         else g_string_append(o, "há critério de aceite não conferido");
         g_string_append_c(o, '\n');
     }
-    if (crit->len) { g_string_append(o, "\nCritérios de aceite:\n"); g_string_append(o, crit->str); }
+    if (crit->len) { g_string_append(o, "\nCritérios de aceite (do pedido e da validação; os do modelo só depois do filtro):\n"); g_string_append(o, crit->str); }
+    if (lidos_v->len > 1) {
+        char *j = g_strjoinv(", ", (char **)lidos_v->pdata);
+        g_string_append_printf(o, "Contexto lido: %s\n", j);
+        g_free(j);
+    } else {
+        g_string_append(o, "Contexto lido: nenhum arquivo\n");
+    }
+    g_ptr_array_unref(lidos_v);
+    g_list_free(lk);
+    g_ptr_array_remove_index(k->tocados, k->tocados->len - 1);
     if (k->git_antes) g_string_append_printf(o, "Git antes de começar: %s\n", k->git_antes);
-    if (k->origem_proposta) g_string_append_printf(o, "Origem da última proposta: %s\n", k->origem_proposta);
+    if (k->origens->len) {
+        g_string_append(o, "Origem das propostas:\n");
+        for (guint i = 0; i < k->origens->len; i++) g_string_append_printf(o, "  %s\n", (char *)g_ptr_array_index(k->origens, i));
+    } else if (k->origem_proposta) {
+        g_string_append_printf(o, "Origem da última proposta (não aplicada): %s\n", k->origem_proposta);
+    } else {
+        g_string_append(o, "Origem das propostas: nenhuma proposta chegou a ser aplicada\n");
+    }
     if (k->plano && k->plano->descartados && k->plano->descartados[0]) {
-        g_string_append(o, "Critérios descartados (não verificáveis):\n");
+        g_string_append(o, "Critérios sugeridos e descartados pelo verificador:\n");
         for (int i = 0; k->plano->descartados[i]; i++) g_string_append_printf(o, "  – %s\n", k->plano->descartados[i]);
     }
     if (k->validacao_json) {
@@ -4332,7 +4407,7 @@ static void coding_encerrar(Cliente *c, const char *motivo)
     g_string_free(o, TRUE);
 }
 
-typedef struct { Cliente *c; char *modelo_id; char *desc; guint batida; gint64 inicio_us, tokens; } CodCtx;
+typedef struct { Cliente *c; char *modelo_id; char *desc; guint batida, prazo; gint64 inicio_us, tokens; } CodCtx;
 
 static gboolean codctx_valido(CodCtx *x)
 {
@@ -4352,6 +4427,36 @@ static gboolean ao_codctx_batida(gpointer p)
     return G_SOURCE_CONTINUE;
 }
 
+/* prazo de cada consulta ao modelo no ciclo de coding: estourou, a
+ * consulta é cancelada e a tarefa ENCERRA com o motivo (checkpoint
+ * "interrompido") — nunca fica ativa esperando um callback que não vem */
+static guint prazo_modelo_codigo_ms(void)
+{
+    const char *v = g_getenv("LIA_SESSIOND_CODIGO_TIMEOUT_MS");
+    gint64 n = v && *v ? g_ascii_strtoll(v, NULL, 10) : 0;
+    return n >= 200 && n <= 3600000 ? (guint)n : 600000;
+}
+
+static gboolean ao_codctx_prazo(gpointer p)
+{
+    CodCtx *x = p;
+    x->prazo = 0;
+    if (!codctx_valido(x)) return G_SOURCE_REMOVE;
+    Cliente *c = cliente_ref(x->c);
+    Coding *k = c->coding;
+    char *id = k->modelo_id;
+    k->modelo_id = NULL; /* qualquer callback tardio passa a ser ignorado (e libera x) */
+    char *mot = g_strdup_printf("o modelo local (%s) não respondeu em %u s (tempo limite da etapa \"%s\"; LIA_SESSIOND_CODIGO_TIMEOUT_MS)",
+                                x->desc, prazo_modelo_codigo_ms() / 1000, coding_etapa_texto(k->estado));
+    g_print("lia-sessiond: coding %s: %s\n", k->id, mot);
+    if (g_modelo) g_modelo->cancelar(g_modelo, id); /* pode chamar o callback aqui mesmo: x não é mais usado depois daqui */
+    g_free(id);
+    if (c->coding == k) coding_encerrar(c, mot);
+    g_free(mot);
+    cliente_unref(c);
+    return G_SOURCE_REMOVE;
+}
+
 static CodCtx *codctx_novo(Cliente *c, const char *modelo_id)
 {
     CodCtx *x = g_new0(CodCtx, 1);
@@ -4360,12 +4465,14 @@ static CodCtx *codctx_novo(Cliente *c, const char *modelo_id)
     x->desc = modelo_descricao();
     x->inicio_us = g_get_monotonic_time();
     x->batida = g_timeout_add(intervalo_progresso_ms(), ao_codctx_batida, x);
+    x->prazo = g_timeout_add(prazo_modelo_codigo_ms(), ao_codctx_prazo, x);
     return x;
 }
 
 static void codctx_liberar(CodCtx *x)
 {
     if (x->batida) g_source_remove(x->batida);
+    if (x->prazo) g_source_remove(x->prazo);
     cliente_unref(x->c);
     g_free(x->modelo_id);
     g_free(x->desc);
@@ -4385,15 +4492,21 @@ static void ao_coding_tokens(gpointer ctx, gint64 tokens)
 static void coding_propor(Cliente *c);
 static void coding_validar(Cliente *c);
 
-static void coding_inspecionar(Cliente *c)
+/* lê (no máximo CODING_MAX_ARQUIVOS_LIDOS) os arquivos da lista, com uma
+ * linha de progresso por arquivo; proibidos pelo pedido nunca são lidos */
+static void coding_ler_lista(Cliente *c, char **lista)
 {
     Coding *k = c->coding;
-    for (int i = 0; k->plano->arquivos_para_ler && k->plano->arquivos_para_ler[i] && g_hash_table_size(k->lidos) < CODING_MAX_ARQUIVOS_LIDOS; i++) {
-        char *abs = proj_resolver(k->plano->arquivos_para_ler[i], FALSE, TRUE, &(char *){ NULL });
-        if (!abs) continue; /* arquivo citado que não existe (será criado) */
+    char **proib = coding_caminhos_proibidos(k->pedido);
+    for (int i = 0; lista && lista[i] && g_hash_table_size(k->lidos) < CODING_MAX_ARQUIVOS_LIDOS; i++) {
+        if (coding_caminho_proibido(proib, lista[i])) continue;
+        char *e0 = NULL;
+        char *abs = proj_resolver(lista[i], FALSE, TRUE, &e0);
+        g_free(e0);
+        if (!abs) continue;
         char *rel = proj_relativo(abs);
         g_free(abs);
-        if (g_hash_table_contains(k->lidos, rel)) { g_free(rel); continue; }
+        if (g_hash_table_contains(k->lidos, rel) || coding_caminho_proibido(proib, rel)) { g_free(rel); continue; }
         char *sha = NULL, *erro = NULL;
         char *txt = proj_ler_texto(rel, CODING_MAX_BYTES_ARQUIVO, &sha, &erro);
         char *m;
@@ -4407,13 +4520,70 @@ static void coding_inspecionar(Cliente *c)
             m = g_strdup_printf("não li %s: %s", rel, erro);
             g_free(sha);
         }
-        coding_progresso(c, "inspecao", m);
+        coding_progresso(c, "contexto", m);
         g_free(m); g_free(erro); g_free(rel);
+    }
+    g_strfreev(proib);
+}
+
+static void ao_coding_criterios(gpointer ctx, const ModeloResposta *r);
+
+/* critérios do PEDIDO e da validação (sem modelo); opcionalmente o modelo
+ * sugere mais, já vendo os arquivos lidos, e o verificador filtra */
+static void coding_definir_criterios(Cliente *c)
+{
+    Coding *k = c->coding;
+    char *val = NULL;
+    char *erro = NULL, *lj = validacao_listar(&erro);
+    g_free(erro);
+    if (lj) {
+        JsonParser *jp = json_parser_new();
+        GPtrArray *nomes = g_ptr_array_new();
+        if (json_parser_load_from_data(jp, lj, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT) {
+            JsonObject *o = json_node_get_object(json_parser_get_root(jp));
+            JsonArray *a = json_object_has_member(o, "comandos") ? json_object_get_array_member(o, "comandos") : NULL;
+            for (guint i = 0; a && i < json_array_get_length(a); i++) {
+                JsonObject *co = json_array_get_object_element(a, i);
+                const char *n = co ? json_object_get_string_member_with_default(co, "nome", NULL) : NULL;
+                if (n) g_ptr_array_add(nomes, (gpointer)n);
+            }
+        }
+        g_ptr_array_add(nomes, NULL);
+        val = coding_validacao_do_pedido(k->pedido, (char **)nomes->pdata);
+        g_ptr_array_free(nomes, TRUE);
+        g_object_unref(jp);
+        g_free(lj);
+    }
+    char *padrao = val ? NULL : validacao_comando_padrao();
+    coding_plano_liberar(k->plano);
+    k->plano = coding_plano_do_pedido(k->pedido, k->a_criar, val ? val : padrao);
+    g_free(k->plano->validacao);
+    k->plano->validacao = val; /* só o que o pedido nomeou; senão, coding_validar usa o padrão */
+    g_free(padrao);
+    GString *m = g_string_new("critérios de aceite (do pedido e da validação, sem modelo):");
+    for (guint i = 0; i < k->plano->criterios->len; i++)
+        g_string_append_printf(m, " (%u) %s;", i + 1, ((CodingCriterio *)g_ptr_array_index(k->plano->criterios, i))->descricao);
+    coding_progresso(c, "criterios", m->str);
+    g_string_free(m, TRUE);
+    coding_checkpoint(k, "criterios");
+    if (g_strcmp0(g_getenv("LIA_SESSIOND_CODIGO_CRITERIOS_MODELO"), "1") == 0) {
+        k->estado = COD_PLANEJANDO;
+        char *prompt = coding_prompt_criterios(k->pedido, k->lidos);
+        k->modelo_id = g_strdup_printf("%s-criterios", k->id);
+        coding_progresso(c, "criterios", "pedindo ao modelo local sugestões de critérios (o verificador descarta o que não vier do pedido ou do código lido)");
+        CodCtx *x = codctx_novo(c, k->modelo_id);
+        static const char *ESQ = "{\"type\":\"object\",\"properties\":{\"criterios\":{\"type\":\"array\",\"maxItems\":3,\"items\":{\"type\":\"object\","
+                                 "\"properties\":{\"descricao\":{\"type\":\"string\",\"maxLength\":200},\"verificacao\":{\"type\":\"string\",\"enum\":[\"validacao\",\"contem\"]},"
+                                 "\"caminho\":{\"type\":\"string\"},\"texto\":{\"type\":\"string\"}},\"required\":[\"descricao\",\"verificacao\"]}}},\"required\":[\"criterios\"]}";
+        ModeloOpcoes op = { .esquema_json = ESQ, .max_tokens = 300, .resumo = TRUE };
+        g_modelo->perguntar(g_modelo, k->modelo_id, prompt, &op, ao_coding_criterios, x);
+        g_free(prompt);
+        return;
     }
     coding_propor(c);
 }
 
-static void ao_coding_plano(gpointer ctx, const ModeloResposta *r)
+static void ao_coding_criterios(gpointer ctx, const ModeloResposta *r)
 {
     CodCtx *x = ctx;
     if (!codctx_valido(x)) { codctx_liberar(x); return; }
@@ -4421,42 +4591,60 @@ static void ao_coding_plano(gpointer ctx, const ModeloResposta *r)
     Coding *k = c->coding;
     g_clear_pointer(&k->modelo_id, g_free);
     char *erro = NULL;
-    k->plano = r->sucesso ? coding_ler_plano(r->resposta_texto, &erro) : NULL;
-    if (!k->plano) {
-        coding_progresso(c, "criterios", "o modelo não devolveu critérios utilizáveis; uso o critério mínimo (a validação precisa passar)");
-        k->plano = coding_plano_padrao(k->pedido);
+    CodingPlano *sug = r->sucesso ? coding_ler_plano(r->resposta_texto, &erro) : NULL;
+    if (!sug) {
+        char *m = g_strdup_printf("o modelo não sugeriu critérios utilizáveis (%s); sigo com os do pedido",
+                                  r->sucesso ? (erro ? erro : "?") : (r->erro_codigo ? r->erro_codigo : "erro"));
+        coding_progresso(c, "criterios", m);
+        g_free(m);
+    } else {
+        GPtrArray *tc = g_ptr_array_new();
+        for (int i = 0; k->definem && k->definem[i]; i++) g_ptr_array_add(tc, k->definem[i]);
+        for (int i = 0; k->a_criar && k->a_criar[i]; i++) g_ptr_array_add(tc, k->a_criar[i]);
+        g_ptr_array_add(tc, NULL);
+        coding_filtrar_criterios_ex(sug, k->pedido, (char **)tc->pdata, k->lidos);
+        g_ptr_array_free(tc, TRUE);
+        guint antes = k->plano->criterios->len;
+        coding_mesclar_criterios(k->plano, sug);
+        GString *m = g_string_new(NULL);
+        g_string_append_printf(m, "sugestões do modelo: %u aceita(s)", k->plano->criterios->len - antes);
+        for (int i = 0; sug->descartados && sug->descartados[i]; i++) g_string_append_printf(m, "; descartada: %s", sug->descartados[i]);
+        coding_progresso(c, "criterios", m->str);
+        g_string_free(m, TRUE);
+        coding_plano_liberar(sug);
+        coding_checkpoint(k, "criterios");
     }
     g_free(erro);
-    coding_filtrar_criterios(k->plano, k->pedido, k->definem);
-    /* os caminhos citados no pedido também são lidos */
-    char **cit = intencao_caminhos(k->pedido);
-    GPtrArray *todos = g_ptr_array_new();
-    /* com o símbolo localizado por busca, a leitura é focada: quem o define
-     * e o que o pedido cita — a lista do modelo é ignorada (ele pedia
-     * arquivos sem relação, que só inchavam o contexto) */
-    gboolean focado = k->definem && k->definem[0];
-    if (focado && k->plano->arquivos_para_ler && k->plano->arquivos_para_ler[0])
-        coding_progresso(c, "inspecao", "leitura focada: só o arquivo que define o símbolo citado e os caminhos do pedido (a lista sugerida pelo modelo foi ignorada)");
-    for (int i = 0; !focado && k->plano->arquivos_para_ler && k->plano->arquivos_para_ler[i]; i++) g_ptr_array_add(todos, g_strdup(k->plano->arquivos_para_ler[i]));
-    for (int i = 0; cit[i]; i++) if (!g_strv_contains((const char *const *)k->plano->arquivos_para_ler, cit[i])) g_ptr_array_add(todos, g_strdup(cit[i]));
-    /* quem define os símbolos citados (achado por busca, não pelo modelo) vem primeiro */
-    for (int i = 0; k->definem && k->definem[i]; i++) {
-        gboolean ja = FALSE;
-        for (guint q = 0; q < todos->len; q++) if (!strcmp(g_ptr_array_index(todos, q), k->definem[i])) ja = TRUE;
-        if (!ja) g_ptr_array_insert(todos, 0, g_strdup(k->definem[i]));
-    }
-    g_ptr_array_add(todos, NULL);
-    g_strfreev(k->plano->arquivos_para_ler);
-    k->plano->arquivos_para_ler = (char **)g_ptr_array_free(todos, FALSE);
-    g_strfreev(cit);
-    GString *m = g_string_new("critérios de aceite:");
-    for (guint i = 0; i < k->plano->criterios->len; i++)
-        g_string_append_printf(m, " (%u) %s;", i + 1, ((CodingCriterio *)g_ptr_array_index(k->plano->criterios, i))->descricao);
-    coding_progresso(c, "criterios", m->str);
-    g_string_free(m, TRUE);
-    coding_checkpoint(k, "inspecao");
-    coding_inspecionar(c);
     codctx_liberar(x);
+    coding_propor(c);
+}
+
+static void ao_coding_contexto(gpointer ctx, const ModeloResposta *r)
+{
+    CodCtx *x = ctx;
+    if (!codctx_valido(x)) { codctx_liberar(x); return; }
+    Cliente *c = x->c;
+    Coding *k = c->coding;
+    g_clear_pointer(&k->modelo_id, g_free);
+    char **proib = coding_caminhos_proibidos(k->pedido);
+    char **esc = r->sucesso ? coding_ler_contexto(r->resposta_texto, k->lista, proib) : g_new0(char *, 1);
+    g_strfreev(proib);
+    codctx_liberar(x);
+    if (esc[0]) {
+        char *j = g_strjoinv(", ", esc);
+        char *m = g_strdup_printf("o modelo escolheu o contexto: %s (conferido contra a lista do projeto e as proibições)", j);
+        coding_progresso(c, "contexto", m);
+        g_free(m); g_free(j);
+        coding_ler_lista(c, esc);
+    }
+    g_strfreev(esc);
+    if (g_hash_table_size(k->lidos) == 0) {
+        coding_encerrar(c, "não localizei o código do pedido (nenhum arquivo citado, nenhum símbolo definido no projeto, e o modelo não indicou um arquivo válido) — "
+                           "cite o arquivo ou a função a alterar");
+        return;
+    }
+    coding_checkpoint(k, "contexto");
+    coding_definir_criterios(c);
 }
 
 static void coding_processar_proposta(Cliente *c, const ModeloResposta *r);
@@ -4499,6 +4687,22 @@ static void coding_processar_proposta(Cliente *c, const ModeloResposta *r)
             if (!coding_caminho_de_teste(a->caminho))
                 erro = g_strdup_printf("o pedido proíbe alterar o código de produção, e a proposta muda %s — só arquivos de teste podem ser criados ou alterados", a->caminho);
         }
+        if (erro) { g_ptr_array_unref(arqs); arqs = NULL; g_clear_pointer(&hash, g_free); g_clear_pointer(&expl, g_free); }
+    }
+    if (arqs) {
+        /* caminho citado numa proibição ("não altere migrations/") nunca é gravado */
+        char **proib = coding_caminhos_proibidos(k->pedido);
+        for (guint i = 0; i < arqs->len && !erro; i++) {
+            CodingArquivo *a = g_ptr_array_index(arqs, i);
+            if (coding_caminho_proibido(proib, a->caminho))
+                erro = g_strdup_printf("o pedido proíbe tocar em %s, e a proposta o %s", a->caminho, a->existia ? "altera" : "cria");
+            char *citado = erro ? NULL : coding_conteudo_cita_proibido(proib, a->antes, a->conteudo);
+            if (citado)
+                erro = g_strdup_printf("a proposta escreve em %s uma referência a %s, que o pedido proíbe acessar — a validação rodaria esse código "
+                                       "sobre o arquivo real; use um arquivo temporário sintético ou um dublê", a->caminho, citado);
+            g_free(citado);
+        }
+        g_strfreev(proib);
         if (erro) { g_ptr_array_unref(arqs); arqs = NULL; g_clear_pointer(&hash, g_free); g_clear_pointer(&expl, g_free); }
     }
     if (!arqs) {
@@ -4673,6 +4877,7 @@ static void coding_seguir_proposta(Cliente *c, GPtrArray *arqs, char *hash, char
     g_clear_pointer(&k->erro_proposta, g_free);
     g_ptr_array_add(k->propostas, hash);
     k->ciclo++;
+    g_ptr_array_add(k->origens, g_strdup_printf("ciclo %d: %s", k->ciclo, k->origem_proposta ? k->origem_proposta : "?"));
     /* cada arquivo vira UM passo de gravação, preso ao hash observado na leitura */
     AgentePlano *p = agente_plano_novo(expl && *expl ? expl : "gravar a alteração de código proposta", "codigo_edicao");
     for (guint i = 0; i < arqs->len; i++) {
@@ -4877,6 +5082,14 @@ static void coding_validar(Cliente *c)
         return;
     }
     k->estado = COD_AGUARDANDO_VALIDACAO;
+    {
+        /* a validação roda código do projeto (testes escritos pelo modelo):
+         * a impressão dos caminhos proibidos é comparada depois */
+        char **proib = coding_caminhos_proibidos(k->pedido);
+        g_free(k->impressao_proibidos);
+        k->impressao_proibidos = proib[0] ? coding_impressao_proibidos(proj_raiz(), proib) : NULL;
+        g_strfreev(proib);
+    }
     char *m = g_strdup_printf("alteração gravada; agora a validação \"%s\" — veja o comando exato e aprove", k->comando);
     coding_progresso(c, "validacao", m);
     g_free(m);
@@ -4972,6 +5185,24 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
     }
     g_free(k->validacao_json);
     k->validacao_json = json_rel;
+    if (k->impressao_proibidos) {
+        char **proib = coding_caminhos_proibidos(k->pedido);
+        char *depois = coding_impressao_proibidos(proj_raiz(), proib);
+        char *mud = coding_proibidos_alterados(k->impressao_proibidos, depois);
+        g_strfreev(proib);
+        g_free(depois);
+        if (*mud) {
+            char *mot = g_strdup_printf("a validação (código do projeto/dos testes) mexeu em caminho que o pedido proíbe: %s — "
+                                        "não declaro concluído; confira e desfaça essas mudanças", mud);
+            g_free(mud);
+            g_string_free(finais, TRUE); g_string_free(shas_saida, TRUE);
+            k->validou_depois = TRUE;
+            coding_encerrar(c, mot);
+            g_free(mot);
+            return TRUE;
+        }
+        g_free(mud);
+    }
     char *final = g_string_free(finais, FALSE);
     char *sha_saida = g_string_free(shas_saida, FALSE);
     k->validou_depois = TRUE;
@@ -5006,14 +5237,15 @@ static gboolean coding_apos_rejeicao(Cliente *c, Tarefa *t)
 
 /* cancelamento pela pessoa (/cancelar): guarda o checkpoint e encerra em
  * silêncio (docs/protocolo.md §11.7: nada chega depois do cancelamento) */
-static void coding_cancelar(Cliente *c)
+static void coding_cancelar(Cliente *c, const char *motivo)
 {
     Coding *k = c->coding;
     if (!k) return;
+    c->coding = NULL; /* antes de cancelar o modelo: um callback síncrono já encontra a tarefa encerrada */
     if (k->modelo_id && g_modelo) g_modelo->cancelar(g_modelo, k->modelo_id);
-    coding_checkpoint(k, "cancelado");
-    g_print("lia-sessiond: coding %s: cancelado pela pessoa\n", k->id);
-    c->coding = NULL;
+    coding_checkpoint(k, motivo);
+    g_print("lia-sessiond: coding %s: %s\n", k->id, !strcmp(motivo, "desconectado") ? "encerrado: o cliente desconectou (checkpoint guardado)"
+                                                                                     : "cancelado pela pessoa (checkpoint guardado)");
     coding_liberar(k);
 }
 
@@ -5030,6 +5262,8 @@ static Coding *coding_novo(const char *id, const char *pergunta_id, const char *
     k->diffs = g_string_new(NULL);
     k->tocados = g_ptr_array_new_with_free_func(g_free);
     k->criados = g_ptr_array_new_with_free_func(g_free);
+    k->origens = g_ptr_array_new_with_free_func(g_free);
+    k->a_criar = g_new0(char *, 1);
     k->inicio_us = g_get_monotonic_time();
     return k;
 }
@@ -5071,8 +5305,8 @@ static void coding_iniciar(Cliente *c, const char *pergunta_id, const char *pedi
     c->coding = coding_novo(id, pergunta_id, pedido);
     g_free(id);
     g_print("lia-sessiond: coding %s: iniciado (%s)\n", c->coding->id, pedido);
-    coding_ack(c, pergunta_id, "Tarefa de código: critérios de aceite → leitura dos arquivos → proposta → sua aprovação → validação → revisão.");
-    coding_checkpoint(c->coding, "criterios");
+    coding_ack(c, pergunta_id, "Tarefa de código: contexto do projeto → critérios do pedido → proposta → sua aprovação → validação → revisão.");
+    coding_checkpoint(c->coding, "preparo");
     coding_preparar(c);
 }
 
@@ -5083,6 +5317,8 @@ typedef struct {
     gboolean proibe_git;
     char *git_json, *git_erro, *lista;
     char **definem;
+    char **ler, **a_criar;   /* contexto escolhido por regras */
+    char *notas;             /* o que foi ignorado e por quê */
     gint64 inicio_us;
 } Preparo;
 
@@ -5098,6 +5334,7 @@ static gpointer preparo_thread(gpointer dados)
         g_free(g);
     }
     coding_explorar_projeto(proj_raiz(), pp->pedido, 150, &pp->lista, &pp->definem);
+    coding_selecionar_contexto(proj_raiz(), pp->pedido, pp->definem, &pp->ler, &pp->a_criar, &pp->notas);
     g_idle_add(preparo_fim, pp);
     return NULL;
 }
@@ -5110,7 +5347,7 @@ static void coding_preparar(Cliente *c)
     pp->pedido = g_strdup(c->coding->pedido);
     pp->proibe_git = intencao_proibe_git(c->coding->pedido);
     pp->inicio_us = g_get_monotonic_time();
-    coding_progresso(c, "inspecao", pp->proibe_git ? "explorando o projeto (o pedido proíbe o Git: estado do repositório não consultado)"
+    coding_progresso(c, "contexto", pp->proibe_git ? "explorando o projeto (o pedido proíbe o Git: estado do repositório não consultado)"
                                                    : "conferindo o estado do Git e explorando o projeto");
     GThread *th = g_thread_try_new("lia-coding-preparo", preparo_thread, pp, NULL);
     if (th) g_thread_unref(th);
@@ -5143,26 +5380,45 @@ static gboolean preparo_fim(gpointer dados)
         k->git_antes = g_strdup_printf("não foi possível ler o estado do Git (%s); segui sem ele — cada gravação continua com prévia, aprovação e cópia para desfazer",
                                        pp->git_erro ? pp->git_erro : "?");
     }
-    coding_progresso(c, "inspecao", k->git_antes);
+    coding_progresso(c, "contexto", k->git_antes);
     k->definem = pp->definem;
     pp->definem = NULL;
     if (k->definem && k->definem[0]) {
         char *junto = g_strjoinv(", ", k->definem);
         char *m = g_strdup_printf("os símbolos citados são definidos em: %s", junto);
-        coding_progresso(c, "inspecao", m);
+        coding_progresso(c, "contexto", m);
         g_free(m); g_free(junto);
     }
-    char *prompt = coding_prompt_plano(k->pedido, pp->lista ? pp->lista : "");
-    c->coding->modelo_id = g_strdup_printf("%s-plano", c->coding->id);
-    coding_progresso(c, "criterios", "definindo critérios de aceite e o que ler (modelo local)");
-    CodCtx *x = codctx_novo(c, c->coding->modelo_id);
-    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = 500, .resumo = TRUE, .progresso_cb = NULL };
-    g_modelo->perguntar(g_modelo, c->coding->modelo_id, prompt, &op, ao_coding_plano, x);
-    g_free(prompt);
+    g_strfreev(k->a_criar);
+    k->a_criar = pp->a_criar;
+    pp->a_criar = NULL;
+    g_free(k->lista);
+    k->lista = pp->lista;
+    pp->lista = NULL;
+    char **notas = g_strsplit(pp->notas ? pp->notas : "", "\n", -1);
+    for (int i = 0; notas[i]; i++) if (*notas[i]) coding_progresso(c, "contexto", notas[i]);
+    g_strfreev(notas);
+    /* contexto mínimo REAL antes de qualquer pedido ao modelo */
+    coding_ler_lista(c, pp->ler);
+    if (g_hash_table_size(k->lidos) == 0 && !(k->a_criar && k->a_criar[0])) {
+        /* as regras não acharam nada: o modelo escolhe, da lista do projeto */
+        k->estado = COD_PLANEJANDO;
+        char *prompt = coding_prompt_contexto(k->pedido, k->lista ? k->lista : "");
+        k->modelo_id = g_strdup_printf("%s-contexto", k->id);
+        coding_progresso(c, "contexto", "nenhum arquivo citado nem símbolo localizado: peço ao modelo local que escolha até 4 arquivos da lista do projeto");
+        CodCtx *x = codctx_novo(c, k->modelo_id);
+        ModeloOpcoes op = { .esquema_json = "{\"type\":\"object\",\"properties\":{\"arquivos\":{\"type\":\"array\",\"maxItems\":4,\"items\":{\"type\":\"string\"}}},\"required\":[\"arquivos\"]}",
+                            .max_tokens = 120, .resumo = TRUE };
+        g_modelo->perguntar(g_modelo, k->modelo_id, prompt, &op, ao_coding_contexto, x);
+        g_free(prompt);
+        goto fim;
+    }
+    coding_checkpoint(k, "contexto");
+    coding_definir_criterios(c);
 fim:
     cliente_unref(pp->c);
     g_free(pp->id); g_free(pp->pedido); g_free(pp->git_json); g_free(pp->git_erro); g_free(pp->lista);
-    g_strfreev(pp->definem);
+    g_strfreev(pp->definem); g_strfreev(pp->ler); g_strfreev(pp->a_criar); g_free(pp->notas);
     g_free(pp);
     return G_SOURCE_REMOVE;
 }
@@ -5193,28 +5449,19 @@ static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id)
     Coding *k = c->coding;
     k->ciclo = (int)json_object_get_int_member_with_default(o, "ciclo", 0);
     k->editou = json_object_get_boolean_member_with_default(o, "editou", FALSE);
-    k->plano = g_new0(CodingPlano, 1);
-    k->plano->criterios = g_ptr_array_new_with_free_func(g_free);
-    g_ptr_array_set_free_func(k->plano->criterios, NULL);
-    /* critérios: reconstruídos pelo leitor do modelo (mesma validação) */
-    JsonNode *cr = json_object_get_member(o, "criterios");
-    JsonObject *emb = json_object_new();
-    json_object_set_member(emb, "criterios", cr ? json_node_copy(cr) : json_node_new(JSON_NODE_ARRAY));
-    JsonNode *en = json_node_alloc();
-    json_node_init_object(en, emb);
-    JsonGenerator *g = json_generator_new();
-    json_generator_set_root(g, en);
-    char *ct = json_generator_to_data(g, NULL);
-    g_object_unref(g);
-    json_node_unref(en);
-    json_object_unref(emb);
-    char *e2 = NULL;
-    CodingPlano *lido = coding_ler_plano(ct, &e2);
-    g_free(ct); g_free(e2);
-    g_ptr_array_unref(k->plano->criterios);
-    g_free(k->plano);
-    k->plano = lido ? lido : coding_plano_padrao(k->pedido);
-    coding_filtrar_criterios(k->plano, k->pedido, NULL);
+    /* critérios: derivados de novo do PEDIDO (a mesma regra do início); a
+     * lista de arquivos a criar vem do checkpoint */
+    JsonArray *acj = json_object_has_member(o, "a_criar") ? json_object_get_array_member(o, "a_criar") : NULL;
+    GPtrArray *acv = g_ptr_array_new();
+    for (guint i = 0; acj && i < json_array_get_length(acj) && i < 16; i++) {
+        const char *rel = json_array_get_string_element(acj, i);
+        if (rel && !proj_sensivel(rel) && coding_arquivo_de_contexto(rel)) g_ptr_array_add(acv, g_strdup(rel));
+    }
+    g_ptr_array_add(acv, NULL);
+    g_strfreev(k->a_criar);
+    k->a_criar = (char **)g_ptr_array_free(acv, FALSE);
+    k->plano = coding_plano_do_pedido(k->pedido, k->a_criar, json_object_get_string_member_with_default(o, "comando_validacao", NULL));
+    g_clear_pointer(&k->plano->validacao, g_free);
     if (json_object_has_member(o, "comando_validacao")) k->plano->validacao = g_strdup(json_object_get_string_member(o, "comando_validacao"));
     JsonObject *shas = json_object_get_object_member(o, "arquivos_lidos_sha256");
     GPtrArray *ler = g_ptr_array_new();

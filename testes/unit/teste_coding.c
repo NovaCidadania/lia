@@ -74,9 +74,10 @@ int main(void)
     p = coding_ler_plano("{\"criterios\":[{\"descricao\":\"Makefile ok\",\"verificacao\":\"contem\",\"caminho\":\"Makefile\",\"texto\":\"ALL: soma\"},"
                          "{\"descricao\":\"usa adição\",\"verificacao\":\"contem\",\"caminho\":\"soma.c\",\"texto\":\"a + b\"}]}", &e);
     coding_filtrar_criterios(p, "corrija o bug na função soma em soma.c", NULL);
-    checar(p->criterios->len == 1 && !strcmp(((CodingCriterio *)g_ptr_array_index(p->criterios, 0))->caminho, "soma.c") &&
-           p->descartados && strstr(p->descartados[0], "o pedido não cita Makefile"),
-           "critérios vêm do pedido: 'contem' sobre arquivo que o pedido não cita é descartado (e relatado)");
+    checar(p->criterios->len == 1 && !strcmp(((CodingCriterio *)g_ptr_array_index(p->criterios, 0))->verificacao, "validacao") &&
+           p->descartados && g_strv_length(p->descartados) == 2 && strstr(p->descartados[0], "o pedido não cita Makefile") &&
+           strstr(p->descartados[1], "resultado inventado"),
+           "critérios vêm do pedido: 'contem' sobre arquivo não citado e trecho que o pedido não pede ('a + b') são descartados (e relatados)");
     coding_plano_liberar(p);
     p = coding_ler_plano("isto não é json", &e);
     checar(!p && e, "plano: resposta sem JSON -> erro (o daemon usa o plano mínimo)");
@@ -411,6 +412,183 @@ int main(void)
     g_clear_pointer(&e, g_free);
     json_object_unref(o); json_object_unref(l);
     g_free(arq); g_free(dir);
+
+    /* ---- fase 1 (avaliação real 2026-11-24): proibições, contexto, critérios ---- */
+    {
+        const char *SF = "Corrija o bug na funcao _iter_log de core.py: ao interpretar uma linha sends.txt, preserve o campo detail inteiro mesmo se "
+                         "contiver |. Crie tests/test_core.py com testes unittest usando somente arquivo temporario sintetico. Nao acesse arquivos "
+                         "reais de contatos, .env ou logs, e nao rode campanha/envio.";
+        char **pr = coding_caminhos_proibidos(SF);
+        checar(coding_caminho_proibido(pr, ".env") && coding_caminho_proibido(pr, "logs/envios.log") && coding_caminho_proibido(pr, "emails.txt") &&
+               coding_caminho_proibido(pr, "phones.txt") && !coding_caminho_proibido(pr, "core.py") && !coding_caminho_proibido(pr, "tests/test_core.py"),
+               "proibidos: .env, logs e contatos citados em 'Nao acesse' — o código pedido continua permitido");
+        g_strfreev(pr);
+        pr = coding_caminhos_proibidos("Nunca leia .env, config/database.php, dumps ou dados de aluno. Não rode migrations. Corrija app/Models/Titulo.php");
+        checar(coding_caminho_proibido(pr, "config/database.php") && coding_caminho_proibido(pr, "database/migrations/2020_01_01_x.php") &&
+               coding_caminho_proibido(pr, "backup/dump-2024.sql") && !coding_caminho_proibido(pr, "app/Models/Titulo.php"),
+               "proibidos: banco, migrations e dumps; o arquivo a corrigir (fora da negação) não");
+        g_strfreev(pr);
+        pr = coding_caminhos_proibidos("Nao altere migrations/ nem .git; corrija o teste em src/a.ts");
+        checar(coding_caminho_proibido(pr, "prisma/migrations/0001/migration.sql") && coding_caminho_proibido(pr, ".git/config") &&
+               !coding_caminho_proibido(pr, "src/a.ts"), "proibidos: diretório citado vale para tudo abaixo; a oração depois do ';' é positiva");
+        g_strfreev(pr);
+        pr = coding_caminhos_proibidos("Não execute campaign.py, corrija core.py");
+        checar(coding_caminho_proibido(pr, "campaign.py") && !coding_caminho_proibido(pr, "core.py"),
+               "proibidos: 'não execute X, corrija Y' — X proibido, Y não (a vírgula com verbo de ação fecha a negação)");
+        g_strfreev(pr);
+        pr = coding_caminhos_proibidos("corrija core.py preservando o formato de sends.txt");
+        checar(!pr[0], "sem negação: nada proibido");
+        g_strfreev(pr);
+        checar(coding_arquivo_de_contexto("core.py") && coding_arquivo_de_contexto("src/services/leilao-estado.test.ts") &&
+               coding_arquivo_de_contexto("package.json") && !coding_arquivo_de_contexto("sends.txt") && !coding_arquivo_de_contexto("emails.txt") &&
+               !coding_arquivo_de_contexto(".env") && !coding_arquivo_de_contexto("dump.sql"), "contexto de código: fonte, teste e build — nunca dados");
+
+        gravar("core.py", "def _iter_log(p):\n    for l in open(p):\n        yield l.split('|')\n");
+        gravar("sends.txt", "dado real\n");
+        gravar(".env", "SEGREDO=1\n");
+        gravar("src/services/leilao-estado.ts", "export function validarTransicaoLeilao(a: string) { return MAPA[a].includes(a); }\n");
+        gravar("src/services/leilao-estado.test.ts", "import { it } from 'vitest';\n");
+        char **ler = NULL, **cr = NULL, *notas = NULL;
+        coding_selecionar_contexto(raiz, SF, NULL, &ler, &cr, &notas);
+        checar(ler && g_strv_length(ler) == 1 && !strcmp(ler[0], "core.py"), "contexto (sf): lê só core.py — nem sends.txt (dado), nem .env (proibido)");
+        checar(cr && g_strv_length(cr) == 1 && !strcmp(cr[0], "tests/test_core.py"), "contexto (sf): tests/test_core.py é arquivo a criar");
+        checar(notas && strstr(notas, "sends.txt é citado no pedido, mas não é código") && strstr(notas, ".env"), "contexto (sf): notas explicam o que não foi lido");
+        g_strfreev(ler); g_strfreev(cr); g_free(notas);
+        char *def[] = { "src/services/leilao-estado.ts", NULL };
+        coding_selecionar_contexto(raiz, "Corrija validarTransicaoLeilao para lançar AppError TRANSICAO_INVALIDA", def, &ler, &cr, &notas);
+        checar(ler && g_strv_length(ler) == 2 && !strcmp(ler[0], "src/services/leilao-estado.ts") && !strcmp(ler[1], "src/services/leilao-estado.test.ts"),
+               "contexto (le): quem define o símbolo e o teste existente dele, sem modelo");
+        g_strfreev(ler); g_strfreev(cr); g_free(notas);
+        coding_selecionar_contexto(raiz, "Implemente proteção em src/services/leilao-estado.ts: a função não pode lançar TypeError", NULL, &ler, &cr, &notas);
+        checar(ler && ler[0] && !strcmp(ler[0], "src/services/leilao-estado.ts"), "contexto: caminho citado seguido de ':' é lido");
+        g_strfreev(ler); g_strfreev(cr); g_free(notas);
+
+        char *acriar[] = { "tests/test_core.py", NULL };
+        CodingPlano *pd = coding_plano_do_pedido(SF, acriar, "teste");
+        gboolean tem_val = FALSE, tem_existe = FALSE, tem_intocado = FALSE;
+        for (guint i = 0; i < pd->criterios->len; i++) {
+            CodingCriterio *c = g_ptr_array_index(pd->criterios, i);
+            if (!strcmp(c->verificacao, "validacao") && strstr(c->descricao, "\"teste\"")) tem_val = TRUE;
+            if (!strcmp(c->verificacao, "existe") && !strcmp(c->caminho, "tests/test_core.py")) tem_existe = TRUE;
+            if (!strcmp(c->verificacao, "intocado") && strstr(c->texto, ".env")) tem_intocado = TRUE;
+        }
+        checar(tem_val && tem_existe && tem_intocado, "critérios do pedido (sem modelo): validação, arquivo a criar existe, nada proibido tocado");
+        /* critérios ABSURDOS reais do llama3.2:3b (checkpoint da avaliação) */
+        CodingPlano *sug = coding_ler_plano("{\"criterios\":[{\"descricao\":\"O código da função _iter_log em core.py está correto\",\"verificacao\":\"validacao\","
+                                            "\"texto\":\"return a + b;\"},{\"descricao\":\"O arquivo sends.txt contém a linha correta\",\"verificacao\":\"contem\","
+                                            "\"caminho\":\"sends.txt\",\"texto\":\"|\"},{\"descricao\":\"A função calcularDesconto retorna zero\",\"verificacao\":\"validacao\"},"
+                                            "{\"descricao\":\"Ler o .env para conferir a configuração\",\"verificacao\":\"validacao\"},"
+                                            "{\"descricao\":\"o campo detail preserva o separador\",\"verificacao\":\"validacao\"}]}", &e);
+        GHashTable *ld = g_hash_table_new(g_str_hash, g_str_equal);
+        g_hash_table_insert(ld, "core.py", "def _iter_log(p):\n    for l in open(p):\n        yield l.split('|')\n");
+        coding_filtrar_criterios_ex(sug, SF, acriar, ld);
+        GString *ds = g_string_new(NULL);
+        for (int i = 0; sug->descartados && sug->descartados[i]; i++) g_string_append_printf(ds, "%s\n", sug->descartados[i]);
+        checar(sug->criterios->len == 1 && strstr(((CodingCriterio *)g_ptr_array_index(sug->criterios, 0))->descricao, "detail"),
+               "filtro: só o critério ligado ao pedido sobrevive");
+        checar(strstr(ds->str, "return a + b;") && strstr(ds->str, "sends.txt não é código") && strstr(ds->str, "calcularDesconto") &&
+               strstr(ds->str, "viola uma proibição"), "filtro: 'return a + b', sends.txt, nome inventado e .env são descartados com motivo");
+        g_string_free(ds, TRUE);
+        coding_mesclar_criterios(pd, sug);
+        checar(pd->criterios->len >= 4, "critérios do modelo filtrados se somam aos do pedido");
+        coding_plano_liberar(sug); coding_plano_liberar(pd);
+        g_hash_table_unref(ld);
+
+        /* conferência dos critérios do runtime */
+        CodingPlano *p2 = coding_plano_do_pedido("Corrija leilao-estado.ts para lançar `TRANSICAO_INVALIDA`; não altere o model, só o teste. Nao leia .env", NULL, NULL);
+        char *toc_ok[] = { "src/services/leilao-estado.test.ts", NULL }, *toc_mal[] = { "src/services/leilao-estado.ts", NULL };
+        char *lid_mal[] = { ".env", NULL };
+        const char *diff = "--- a/x\n+++ b/x\n+  throw new AppError('TRANSICAO_INVALIDA', 409);\n";
+        int ok_todos = 0, falha_esperada = 0;
+        for (guint i = 0; i < p2->criterios->len; i++) {
+            CodingCriterio *c = g_ptr_array_index(p2->criterios, i);
+            char *como = NULL;
+            if (coding_conferir_criterio_ex(c, TRUE, toc_ok, NULL, diff, &como)) ok_todos++;
+            g_free(como);
+            if (!strcmp(c->verificacao, "so_testes") && !coding_conferir_criterio_ex(c, TRUE, toc_mal, NULL, diff, &como)) falha_esperada++;
+            if (!strcmp(c->verificacao, "intocado") && !coding_conferir_criterio_ex(c, TRUE, toc_ok, lid_mal, diff, &como)) falha_esperada++;
+            if (!strcmp(c->verificacao, "no_diff") && !coding_conferir_criterio_ex(c, TRUE, toc_ok, NULL, "+++ b/x\n+ outra coisa\n", &como)) falha_esperada++;
+        }
+        checar(ok_todos == (int)p2->criterios->len && falha_esperada == 3,
+               "conferência: no_diff, so_testes e intocado passam quando cumpridos e falham quando violados");
+        coding_plano_liberar(p2);
+
+        CodingPlano *p3 = coding_plano_do_pedido("O endpoint deve responder com o código ERRO_PAGINA", NULL, NULL);
+        gboolean achou = FALSE;
+        for (guint i = 0; i < p3->criterios->len; i++)
+            if (!strcmp(((CodingCriterio *)g_ptr_array_index(p3->criterios, i))->verificacao, "no_diff")) achou = TRUE;
+        checar(achou, "constante exigida no fim do pedido também vira critério");
+        coding_plano_liberar(p3);
+        p3 = coding_plano_do_pedido("Teste `M_veiculo::getmanutencao` com `$id` em tests/M_X_Y.php", NULL, NULL);
+        checar(p3->criterios->len == 1, "trechos entre crases nomeiam o assunto: não viram critério de conteúdo");
+        coding_plano_liberar(p3);
+        /* substituir_funcao em Python, com o nome inferido da declaração */
+        gravar("parser.py", "import x\n\ndef _iter_log(p):\n    rows = []\n    for l in p:\n        rows.append(l.split('|'))\n    return rows\n\n\ndef outra():\n    return 1\n");
+        GHashTable *lp = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free), *sp = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        g_hash_table_insert(lp, g_strdup("parser.py"), g_strdup("import x\n\ndef _iter_log(p):\n    rows = []\n    for l in p:\n        rows.append(l.split('|'))\n    return rows\n\n\ndef outra():\n    return 1\n"));
+        g_hash_table_insert(sp, g_strdup("parser.py"), g_strdup("0"));
+        char *hh = NULL, *ee = NULL;
+        GPtrArray *ap = coding_aplicar_edicoes("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"parser.py\",\"conteudo\":"
+                                               "\"def _iter_log(p):\\n    return [l.split('|', 4) for l in p]\"}]}", lp, sp, &hh, NULL, &ee);
+        checar(ap && ap->len == 1 && !strcmp(((CodingArquivo *)g_ptr_array_index(ap, 0))->conteudo,
+                                             "import x\n\ndef _iter_log(p):\n    return [l.split('|', 4) for l in p]\n\n\ndef outra():\n    return 1\n"),
+               "substituir_funcao em Python: sem \"funcao\", o nome vem do def; só a função muda");
+        if (ap) g_ptr_array_unref(ap);
+        g_free(hh); g_free(ee);
+        g_hash_table_unref(lp); g_hash_table_unref(sp);
+        /* impressão dos proibidos antes/depois da validação */
+        char *pz[] = { "*.log", ".env", NULL };
+        gravar("logs/envios.log", "a\n");
+        char *antes = coding_impressao_proibidos(raiz, pz);
+        gravar("logs/envios.log", "a\nbb\n");
+        gravar("novo.log", "x");
+        char *depois = coding_impressao_proibidos(raiz, pz);
+        char *mud = coding_proibidos_alterados(antes, depois);
+        checar(strstr(antes, ".env\t") && strstr(mud, "logs/envios.log (alterado)") && strstr(mud, "novo.log (criado)") && !strstr(mud, ".env"),
+               "impressão dos proibidos: arquivo oculto incluído; alteração e criação detectadas");
+        char *nada = coding_proibidos_alterados(depois, depois);
+        checar(!*nada, "impressão dos proibidos: nada mudou -> vazio");
+        g_free(antes); g_free(depois); g_free(mud); g_free(nada);
+
+        char *nomes[] = { "teste", "lento", NULL };
+        char *v = coding_validacao_do_pedido("corrija soma.c e valide com lento", nomes);
+        checar(v && !strcmp(v, "lento"), "validação nomeada no pedido");
+        g_free(v);
+        v = coding_validacao_do_pedido("corrija o teste lento de soma.c", nomes);
+        checar(!v, "nome de comando solto no texto não escolhe a validação");
+        g_free(v);
+
+        /* roteamento: pedido de código nunca vira leitura ou anexo de texto descritivo */
+        checar(!coding_operacao_literal("Leia core.py e corrija _iter_log", "arquivo.ler", NULL), "literal: 'leia X e corrija' não é leitura direta");
+        checar(!coding_operacao_literal("Adicione ao final de core.py uma correção para _iter_log. Mantenha a compatibilidade", "arquivo.anexar",
+                                        "uma correção para _iter_log. Mantenha a compatibilidade"), "literal: texto descritivo não é conteúdo");
+        checar(coding_operacao_literal("acrescente a linha \"x = 1\" ao fim de core.py", "arquivo.anexar", "x = 1"), "literal: trecho entre aspas é conteúdo");
+        checar(coding_operacao_literal("crie o arquivo src/main.c com o conteúdo: x", "arquivo.criar", "x"), "literal: 'com o conteúdo: x'");
+        checar(coding_operacao_literal("mova src/a.c para src/b.c", "arquivo.mover", NULL), "literal: mover é operação de arquivo");
+        checar(coding_e_pedido("Ajuste src/controllers/task.controller.ts para rejeitar página 0 com HTTP 400") &&
+               coding_e_pedido("Acrescente em tests/test_core.py um teste unittest para _iter_log") &&
+               coding_e_pedido("Garanta que validarTransicaoLeilao lance AppError com HTTP 409"),
+               "pedido de código: ajuste/acrescente/garanta com caminho ou símbolo");
+        checar(coding_e_pedido("Melhore os diagnósticos de registros malformados do log lido por core.py") &&
+               !coding_e_pedido("melhore a redação do README"), "pedido de código: 'melhore' com caminho de código sim; texto sem código não");
+
+        /* conteúdo proposto que ACESSA caminho proibido (avaliação real sf-preciso:
+         * o teste do modelo abria sends.txt, o log real de envios) */
+        char **prc = coding_caminhos_proibidos("corrija core.py. Não leia .env, emails.txt nem sends.txt, e não execute campaign.py");
+        char *x = coding_conteudo_cita_proibido(prc, NULL, "with open('sends.txt') as f:\n    pass\n");
+        checar(x && !strcmp(x, "sends.txt"), "conteúdo: teste que abre sends.txt é recusado");
+        g_free(x);
+        x = coding_conteudo_cita_proibido(prc, NULL, "import unittest\nimport campaign\n");
+        checar(x && !strcmp(x, "campaign.py"), "conteúdo: importar campaign.py (executa o módulo) é recusado");
+        g_free(x);
+        x = coding_conteudo_cita_proibido(prc, NULL, "SENDS = os.path.join(tmp, 'sends_teste.txt')\nx = process.env.X\nimport campaigns\n");
+        checar(!x, "conteúdo: nomes parecidos (sends_teste.txt, process.env, campaigns) não contam");
+        g_free(x);
+        x = coding_conteudo_cita_proibido(prc, "SENDS_FILE = 'sends.txt'\n", "SENDS_FILE = 'sends.txt'\nX = 1\n");
+        checar(!x, "conteúdo: referência que o arquivo já tinha não conta");
+        g_free(x);
+        g_strfreev(prc);
+    }
 
     g_hash_table_unref(lidos);
     g_hash_table_unref(shas);

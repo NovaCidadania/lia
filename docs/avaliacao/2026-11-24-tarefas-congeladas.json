@@ -1,0 +1,27 @@
+{
+  "formato": "lia-avaliacao-tarefas/1",
+  "congelado_em": "2026-11-24",
+  "regra": "enunciados fixados ANTES de qualquer execução; não usar como treino antes de concluir a comparação",
+  "tarefas": [
+    {"id": "le-preciso", "projeto": "/home/zad/le", "subdir": "leilao_api", "categoria": "preciso",
+     "prompt": "Em src/services/leilao-estado.ts, faça validarTransicaoLeilao lançar AppError TRANSICAO_INVALIDA com HTTP 409 quando receber uma transição desconhecida em runtime (hoje ela dá TypeError ao acessar PERMITIDAS[transicao]). Acrescente em src/services/leilao-estado.test.ts um teste para a transição desconhecida, sem banco. Não leia .env e não rode migrations."},
+    {"id": "le-aberto", "projeto": "/home/zad/le", "subdir": "leilao_api", "categoria": "aberto",
+     "prompt": "Torne previsível para os consumidores da API o tratamento de transições inválidas do leilão, seguindo o desenho de erros que o projeto já usa e provando com testes unitários sem banco. Não leia .env e não rode migrations."},
+    {"id": "mk-preciso", "projeto": "/home/zad/mk", "subdir": "", "categoria": "preciso",
+     "prompt": "Em Assets/Scripts/Networking/Protocol/ProtocolCodec.cs, rejeite bits desconhecidos de InputButtons ao decodificar o pacote simples e o bundle de comandos, e cubra os dois casos em Assets/Tests/Editor/ProtocolCodecTests.cs. Não abra cenas, não altere arquivos .meta e não inicie servidores."},
+    {"id": "mk-aberto", "projeto": "/home/zad/mk", "subdir": "", "categoria": "aberto",
+     "prompt": "Garanta que um bundle de comandos inválido não deixe comandos parcialmente gravados no array de saída do ProtocolCodec, mantendo o protocolo válido como está, e teste os limites. Não altere arquivos .meta nem cenas."},
+    {"id": "ws-preciso", "projeto": "/home/zad/ws", "subdir": "nest-crud-gerenciador-de-tarefas", "categoria": "preciso",
+     "prompt": "Corrija src/controllers/task.controller.ts para que GET /tasks/page/:page rejeite páginas 0, negativas, fracionárias ou não numéricas com HTTP 400 (BadRequestException) sem chamar o Prisma, e adicione testes unitários com PrismaService mockado para entradas inválidas e uma página válida. Não conecte a banco nem rode migrations."},
+    {"id": "ws-aberto", "projeto": "/home/zad/ws", "subdir": "nest-crud-gerenciador-de-tarefas", "categoria": "aberto",
+     "prompt": "Permita filtrar a lista paginada de tarefas por estado de conclusão sem quebrar a paginação nem os metadados, num desenho compatível com os endpoints atuais, com testes sem banco. Não conecte a banco nem rode migrations."},
+    {"id": "sf-preciso", "projeto": "/home/zad/sf", "subdir": "", "categoria": "preciso",
+     "prompt": "Corrija _iter_log em core.py para preservar o campo detail inteiro mesmo quando ele contém |, e crie tests/test_core.py com testes unittest usando só um arquivo temporário sintético (troque config.SENDS_FILE no teste). Não leia .env, emails.txt, phones.txt nem sends.txt, e não execute campaign.py nem nenhum envio."},
+    {"id": "sf-aberto", "projeto": "/home/zad/sf", "subdir": "", "categoria": "aberto",
+     "prompt": "Melhore os diagnósticos de registros malformados do log de envios lido por core.py, sem ler filas ou dados reais e testando só com fixtures sintéticas. Não leia .env, emails.txt, phones.txt nem sends.txt, e não execute campaign.py nem nenhum envio."},
+    {"id": "sweduc-preciso", "projeto": "/home/zad/sweduc", "subdir": "", "categoria": "preciso",
+     "prompt": "Crie em tests/Unit/TituloVencimentoTest.php um teste sem banco para o limite temporal de Titulo::vencido (src/Model/Financeiro/Titulo.php), congelando o tempo com Carbon::setTestNow no dia do vencimento e no dia seguinte. Não leia .env, config/database.php, dumps nem dados de aluno, e não rode migrations."},
+    {"id": "sweduc-aberto", "projeto": "/home/zad/sweduc", "subdir": "", "categoria": "aberto",
+     "prompt": "Torne reproduzíveis os cálculos de vencimento, bolsa e total de Titulo em cenários de datas e configurações, escolhendo e testando uma solução sem banco. Não leia .env, config/database.php, dumps nem dados de aluno, e não rode migrations."}
+  ]
+}

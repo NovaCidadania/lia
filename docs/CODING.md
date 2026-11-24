@@ -227,35 +227,61 @@ crie src/contador.c com um programa que conta as linhas de um arquivo
 retome a tarefa de código codigo-20261124-101010-ab12
 ```
 
-Etapas, cada uma visível no chat (`progresso` com `codigo.etapa`):
+Etapas, cada uma visível no chat (`progresso` com `codigo.etapa`; a linha
+de status do lia-chat mostra `código · <etapa> · ciclo n/3 · <mensagem>`):
 
-0. **preparo** (em segundo plano) — `git status` como pré-condição (salvo
-   quando o pedido proíbe o Git: "não rode git", "sem git"); se falhar, a
-   tarefa segue e o relatório diz que o estado do Git não foi lido. Um
-   pedido de código nunca vira só `git.status`. A Lia também explora o
-   projeto (sem vendor/, node_modules/ e arquivos sensíveis) e acha quem
-   DEFINE os símbolos citados (`Classe::metodo`, `função`), para ler só a
-   região relevante de arquivos grandes.
-1. **critérios** — o modelo propõe critérios de aceite verificáveis
-   (`validacao`: conferido pelos testes; `contem`: o arquivo deve conter um
-   texto) e quais arquivos ler; sem resposta utilizável, vale o critério
-   mínimo "a validação passa".
-2. **inspeção** — a Lia lê os arquivos (registra o sha256 de cada um).
-3. **proposta** — o modelo propõe edições, com as boas práticas
-   recuperadas no prompt e tudo delimitado como dado. O verificador só
-   aceita `criar` (arquivo novo, com `criar_pastas` para as pastas que
-   faltam, visíveis na prévia), `editar` (trecho exato e único; trecho
-   abreviado com "..." é recusado) e `substituir_funcao` (a função inteira
-   reescrita, chaves balanceadas, só a função citada muda) de arquivo
-   **lido nesta tarefa**, dentro do projeto; aplica em memória e gera UMA
-   gravação por arquivo, presa ao hash lido. Critérios `contem` sobre
-   arquivo que o pedido não cita são descartados (e listados no relatório).
+0. **contexto** (em segundo plano, sem modelo) — `git status` como
+   pré-condição (salvo quando o pedido proíbe o Git: "não rode git", "sem
+   git"); se falhar, a tarefa segue e o relatório diz que o estado do Git
+   não foi lido. A Lia explora o projeto (sem vendor/, node_modules/ e
+   arquivos sensíveis), acha quem DEFINE os símbolos citados
+   (`Classe::metodo`, `função`) e escolhe o contexto **por regras**: quem
+   define os símbolos, os arquivos de **código** citados que existem e os
+   testes que já existem para eles (`leilao-estado.test.ts`,
+   `test_core.py`, `*Test.php`). Arquivo de código citado que não existe
+   vira "a criar". Arquivo de **dados** citado (`sends.txt`, `.csv`,
+   `.log`, dumps) nunca é lido só por ter sido mencionado. Caminhos e
+   categorias citados em **instruções negativas** ("não leia .env", "não
+   altere migrations/", "não execute campaign.py", "sem tocar em logs,
+   contatos, banco, dumps, credenciais, .git") viram proibições: nunca
+   lidos, nunca gravados, nunca critério. Só quando as regras não acham
+   nada o modelo escolhe até 4 arquivos **da lista do projeto** (conferidos
+   contra a lista e as proibições); se ainda assim nada for lido, a tarefa
+   **encerra** dizendo que não localizou o código — nunca pede uma proposta
+   sem contexto.
+1. **critérios** — vêm do **pedido e da validação**, sem modelo: a
+   validação (nomeada no pedido, "valide com lento", ou a padrão) passa
+   depois da última edição; cada arquivo a criar existe; constantes
+   exigidas (`TRANSICAO_INVALIDA`) aparecem no diff; só arquivos de teste
+   mudam quando o pedido proíbe mexer em produção; nada proibido foi lido
+   ou alterado. Com `LIA_SESSIOND_CODIGO_CRITERIOS_MODELO=1`, o modelo
+   **sugere** critérios depois de ver os arquivos lidos e o verificador
+   descarta (e lista no relatório) o que viola proibição, cita arquivo não
+   pedido ou de dados, inventa resultado (trecho que o pedido não pede, ex.
+   `return a + b;`), cita identificador que não está no pedido nem no
+   código lido, ou não tem relação com o pedido. Erro do modelo aqui não
+   interrompe: seguem os critérios do pedido.
+2. **proposta** — o modelo propõe edições, com o contexto lido, as boas
+   práticas recuperadas e as proibições no prompt, tudo delimitado como
+   dado. O verificador só aceita `criar` (arquivo novo, com `criar_pastas`
+   para as pastas que faltam, visíveis na prévia), `editar` (trecho exato e
+   único; trecho abreviado com "..." é recusado) e `substituir_funcao` (a
+   função inteira reescrita, chaves balanceadas, só a função citada muda)
+   de arquivo **lido nesta tarefa**, dentro do projeto e fora das
+   proibições; aplica em memória e gera UMA gravação por arquivo, presa ao
+   hash lido. Conteúdo proposto que **acrescenta** referência a um caminho
+   proibido literal (abrir `sends.txt`, `import campaign`) é recusado antes
+   da prévia: a validação rodaria esse código sobre o arquivo real.
    **Receita determinística:** em pedidos sobre SQL injection/bind em PHP,
    antes do modelo a Lia tenta uma regra fixa: na função citada, `$var`
    interpolada na SQL vira `?` e `->query($sql)` passa a receber
    `array($var)`; com pedido de teste, cria um PHPUnit com banco falso (sem
    conexão). A proposta passa pelo mesmo verificador, prévia e aprovação, e
-   o relatório diz a origem ("receita determinística" ou "modelo local").
+   o relatório diz a origem de **cada** proposta aplicada ("ciclo 1:
+   receita determinística…" ou "ciclo 1: modelo local (…), respondeu em X s").
+   Cada consulta ao modelo tem prazo (`LIA_SESSIOND_CODIGO_TIMEOUT_MS`,
+   padrão 10 min): estourou, a consulta é cancelada e a tarefa encerra com
+   o motivo — nunca fica ativa esperando.
 4. **aprovação da gravação** — plano com a prévia (diff); nada é gravado
    antes do "s"; arquivo alterado depois da prévia = nada gravado.
 5. **validação** — plano com a prévia do comando; outra aprovação. Em PHP,
@@ -272,10 +298,25 @@ vezes seguidas, mesma falha depois da correção (repetição sem progresso),
 limite de ciclos, validação indisponível ou interrompida.
 
 Checkpoints: `~/.lia/projeto/coding/<id>.json` (0600) com pedido,
-critérios, hashes dos arquivos lidos, operações (para desfazer), propostas
-(hash) e o estado da última validação — sem conteúdo de arquivo nem saída
-de testes. "retome a tarefa de código <id>" relê os arquivos e continua da
-validação pendente ou de uma nova proposta.
+critérios, hashes dos arquivos lidos, arquivos a criar, operações (para
+desfazer), propostas (hash) e o estado da última validação — sem conteúdo
+de arquivo nem saída de testes. Gravados a cada etapa (`preparo`,
+`contexto` — depois da leitura —, `criterios`, `aprovacao_edicao`,
+`validacao`, `correcao`) e no fim: `concluido`, `interrompido` (falha,
+prazo do modelo), `cancelado` (a pessoa cancelou) ou `desconectado` (o
+cliente caiu). "retome a tarefa de código <id>" relê os arquivos, refaz os
+critérios a partir do pedido e continua da validação pendente ou de uma
+nova proposta.
+
+Roteamento: pedido de código ("corrija", "ajuste", "implemente", "garanta",
+"acrescente um teste"… com caminho, símbolo ou termo de código) só vira
+ferramenta de arquivo direta quando é uma operação **literal** (conteúdo
+em bloco ```, entre aspas ou "com o conteúdo: …"; mover/copiar/apagar).
+"Leia core.py e corrija _iter_log", "altere X; não leia .env" e textos que
+descrevem comportamento ("preserve o conteúdo do campo…") vão para o ciclo
+de coding — nunca para `arquivo.ler` ou `arquivo.anexar`. Escrita de
+arquivo sem conteúdo literal fora desse caso gera uma pergunta de
+esclarecimento; nada é gravado.
 
 Limitação honesta: a qualidade das propostas depende do modelo local; um
 modelo de 3B erra com frequência trechos de `procurar` (o verificador
@@ -370,7 +411,8 @@ servidor com `--device none -ngl 0`.
 ```
 make teste-processo        # isolamento real: argv literal, ambiente, rede, limites, timeout, cancelamento (22)
 make teste-validacao-git   # validação e Git num projeto C temporário (38)
-make teste-coding-unit     # partes puras do ciclo (42)
-make teste-coding          # ciclo completo com modelo mock roteirizado, rejeições, retomada, Git, chat (43)
+make teste-coding-unit     # partes puras do ciclo: proibições, contexto, critérios do pedido, filtro, roteamento literal, referência a caminho proibido no conteúdo (130)
+make teste-coding          # ciclo completo com modelo mock: rejeições, retomada, Git, chat, contexto antes dos critérios,
+                           # critérios absurdos, prazo/cancelar/desconexão, caminhos negados, roteamento (66)
 make teste-coding-php      # PHP: receita, modelo, Git, análise, Docker (fatos, citados, injection), pedidos de teste/amplos, php -l, correção, lento/cancelar, .env (71)
 ```
