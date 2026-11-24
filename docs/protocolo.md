@@ -353,3 +353,40 @@ Mudanças no protocolo:
 - Tarefas de arquivo e de boas práticas terminam com uma `resposta`
   determinística curta (o detalhe — conteúdo, lista, diff, práticas — vem
   na observação do passo).
+
+## 13. Coding, validação e Git (fase 2)
+
+Ferramentas novas no executor real (com projeto definido): `validar.listar`,
+`validar.executar` (aprovação a cada execução, capacidade `execucao_projeto`,
+sempre em isolamento), `git.status`, `git.diff`, `git.log` (leitura) e
+`git.commit` (aprovação). A prévia (`plano.previa`/`plano.previas[]`) existe
+também para `validar.executar` (o comando exato, ambiente, isolamento e
+limites) e `git.commit` (arquivos e diff); a aprovação fica presa ao hash
+dela e é conferida de novo antes de executar. Comportamento e riscos:
+`docs/CODING.md`, `docs/THREAT-MODEL.md` §5.5.
+
+**Rejeição fecha o turno explicitamente.** Quando a pessoa rejeita um plano
+que veio de uma pergunta, o `resultado` (estado `cancelado`) traz
+`"resposta_a_seguir": true` e o daemon envia em seguida uma `resposta`
+dizendo o que (não) foi feito. Sem essa marca (cancelamento pela pessoa com
+`cancelar`, ou plano solicitado sem pergunta), nada chega depois — §11.7
+continua valendo. O cliente usa a marca para decidir entre esperar e
+encerrar o turno: nunca fica esperando uma resposta que não vem.
+
+**Ciclo de coding.** Um pedido de código (`perguntar`) recebe uma `proposta`
+com `"codigo": true`, `"codigo_id"` e sem plano: o turno continua aberto. O
+daemon então envia:
+
+- `progresso` sem `execucao_id`, com `"codigo": {"id", "etapa", "ciclo",
+  "max_ciclos"}` — etapas `criterios`, `inspecao`, `proposta`,
+  `aprovacao_edicao`, `validacao`, `correcao`, `revisao`, `retomada`;
+- `plano` de tarefa (intenção `codigo_edicao` ou `codigo_validacao`) com
+  `previas[]`, que a pessoa aprova ou rejeita como qualquer plano;
+- `resultado` de cada tarefa;
+- uma única `resposta` final (relatório) — que começa por "Resposta:
+  concluído" só com diff, validação posterior à última edição e critérios
+  conferidos, ou por "Resposta: NÃO concluído — <motivo>".
+
+Durante o ciclo, um novo `perguntar` na mesma conexão é recusado
+(`estado_invalido`). `cancelar` encerra o ciclo (o processo em execução é
+morto), grava o checkpoint e nada mais chega. Desconexão faz o mesmo.

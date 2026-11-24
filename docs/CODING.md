@@ -1,4 +1,4 @@
-# Coding: arquivos do projeto e boas práticas
+# Coding: arquivos, boas práticas, validação, ciclo de coding e Git
 
 Primeira camada da habilidade de codar da Lia: ler e alterar arquivos do
 projeto com segurança, em qualquer codificação, e consultar um catálogo
@@ -43,6 +43,10 @@ e pedidos de arquivo recebem uma explicação de como definir a pasta.
 | `arquivo.permissoes` | só o bit de execução | **sim** |
 | `arquivo.desfazer` | desfaz uma operação anterior pelo `operacao_id` | **sim** |
 | `praticas.consultar` | boas práticas relevantes para uma tarefa | não |
+| `validar.listar` | comandos de build/teste do projeto e o estado do isolamento | não |
+| `validar.executar` | roda build/testes em isolamento (executa código do projeto) | **sim, a cada vez** |
+| `git.status` / `git.diff` / `git.log` | consultas Git em isolamento, somente leitura | não |
+| `git.commit` | commit local só com os arquivos mostrados; nunca push | **sim** |
 
 ### Prévia, aprovação e desfazer
 
@@ -146,22 +150,111 @@ desempenho, depuração, profissionalismo, projeto, documentação).
 
 ```
 make teste-arquivos            # biblioteca: confinamento, codificações, diff, escrita, desfazer (79)
-make teste-intencao-arquivos   # pedidos em português -> plano (46)
+make teste-intencao-arquivos   # pedidos em português -> plano (59)
 make teste-praticas            # catálogo: esquema, extensão, recuperação (26)
 make teste-arquivos-projeto    # daemon + chat de ponta a ponta (39)
 ```
 
-## Próximas fases
+## Fase 2: validação, ciclo de coding e Git
 
-Ainda não existe (e é a continuação natural):
+### Validação (build/testes) — `validar.listar`, `validar.executar`
 
-1. **Executor de validação** — compilar e testar depois de editar
-   (`make`, `make teste`, `gcc -fsyntax-only`, `python3 -m py_compile`,
-   `sh -n`), com lista fechada de comandos por projeto, sem shell,
-   timeout, limite de saída, ambiente limpo e aprovação na primeira vez.
-2. **Ciclo de coding com o modelo** — pedido → critérios de aceite →
-   inspeção focalizada → plano → edição (com prévia) → build/teste → revisão
-   do diff → conclusão só com evidência; detecção de ação repetida sem
-   ganho; práticas recuperadas no prompt.
-3. **Git** — `git.status`, `git.diff`, `git.log` (leitura) e
-   `git.commit` (com aprovação, mensagem revisada, sem push).
+```
+rode os testes / compile o projeto / rode a validação "lint"
+quais os comandos de validação do projeto?
+```
+
+Comandos nomeados vêm de `<projeto>/.lia/validacao.json`
+
+```json
+{"comandos": {"teste": ["make", "teste"], "build": {"argv": ["make"], "timeout_segundos": 300}}}
+```
+
+ou, sem ele, do Makefile (`build` = `make`; alvos `teste`/`test`/`check`).
+Esse arquivo é **dado não confiável** do repositório: só nomeia comandos.
+Quem autoriza é a pessoa, a cada execução, vendo a prévia (executável,
+argv, diretório, ambiente, isolamento, limites e o aviso de que o comando
+roda código do projeto). A política do daemon vale por cima: shells e
+"embrulhos" proibidos, código em linha proibido, executável fora de
+`LIA_SESSIOND_VALIDACAO_PERMITIDOS` recusado.
+
+`argv` explícito evita um shell intermediário — mas não impede que `make`
+ou um script de teste executem comandos. Por isso **toda** execução roda no
+bubblewrap (`projeto/processo.c`): sem rede, sem `/home`, sistema somente
+leitura, só o projeto gravável, `.git/` somente leitura, ambiente limpo,
+limites de memória/CPU/tempo/saída, cancelamento que encerra a árvore de
+processos. Sem bwrap funcional, nada é executado (falha fechada) e a
+resposta explica como habilitar. Detalhes e riscos residuais:
+`docs/THREAT-MODEL.md` §5.5.
+
+### Git — `git.status`, `git.diff`, `git.log`, `git.commit`
+
+```
+git status / quais arquivos alterados no repositório?
+mostre o diff de src/main.c / mostre os 5 últimos commits
+faça commit de src/main.c com a mensagem "Corrige o cálculo"
+```
+
+Consultas sem aprovação (isolamento com o projeto somente leitura). Commit
+com aprovação, mostrando ramo, mensagem, os arquivos exatos e o diff de cada
+um; sem lista, entram todos os alterados — listados um a um. O que estava
+preparado fora deles continua preparado. Ganchos desativados, sem
+assinatura, configuração do sistema/usuário desligada; nunca push, reset,
+clean, rebase, checkout de arquivos ou reescrita de histórico. Autor:
+`LIA_GIT_AUTOR="Nome <email>"` no `rodar_local.sh` (padrão: `user.name`/
+`user.email` do repositório).
+
+### Ciclo de coding
+
+```
+corrija o bug na função soma em soma.c
+crie src/contador.c com um programa que conta as linhas de um arquivo
+retome a tarefa de código codigo-20261124-101010-ab12
+```
+
+Etapas, cada uma visível no chat (`progresso` com `codigo.etapa`):
+
+1. **critérios** — o modelo propõe critérios de aceite verificáveis
+   (`validacao`: conferido pelos testes; `contem`: o arquivo deve conter um
+   texto) e quais arquivos ler; sem resposta utilizável, vale o critério
+   mínimo "a validação passa".
+2. **inspeção** — a Lia lê os arquivos (registra o sha256 de cada um).
+3. **proposta** — o modelo propõe edições, com as boas práticas
+   recuperadas no prompt e tudo delimitado como dado. O verificador só
+   aceita `criar` (arquivo novo) e `editar` (trecho exato e único) de
+   arquivo **lido nesta tarefa**, dentro do projeto; aplica em memória e
+   gera UMA gravação por arquivo, presa ao hash lido.
+4. **aprovação da gravação** — plano com a prévia (diff); nada é gravado
+   antes do "s"; arquivo alterado depois da prévia = nada gravado.
+5. **validação** — plano com a prévia do comando; outra aprovação.
+6. **revisão** — se passou: critérios conferidos (lendo os arquivos) e
+   relatório com diff, saída da validação, como desfazer e o checkpoint.
+   Se falhou: novo ciclo com a saída do erro (até 3), cada um com nova
+   prévia e aprovação.
+
+"Concluído" **só** com diff real, validação que passou **depois** da
+última edição e todos os critérios conferidos. Caso contrário o relatório
+começa com "NÃO concluído" e diz por quê: recusa, proposta inválida duas
+vezes seguidas, mesma falha depois da correção (repetição sem progresso),
+limite de ciclos, validação indisponível ou interrompida.
+
+Checkpoints: `~/.lia/projeto/coding/<id>.json` (0600) com pedido,
+critérios, hashes dos arquivos lidos, operações (para desfazer), propostas
+(hash) e o estado da última validação — sem conteúdo de arquivo nem saída
+de testes. "retome a tarefa de código <id>" relê os arquivos e continua da
+validação pendente ou de uma nova proposta.
+
+Limitação honesta: a qualidade das propostas depende do modelo local; um
+modelo de 3B erra com frequência trechos de `procurar` (o verificador
+recusa e pede de novo, uma vez) e demora minutos para escrever código. A
+segurança não depende do modelo: nada grava nem executa sem passar pelo
+verificador e pela sua aprovação.
+
+### Testes da fase 2
+
+```
+make teste-processo        # isolamento real: argv literal, ambiente, rede, limites, timeout, cancelamento (22)
+make teste-validacao-git   # validação e Git num projeto C temporário (38)
+make teste-coding-unit     # partes puras do ciclo (42)
+make teste-coding          # ciclo completo com modelo mock roteirizado, rejeições, retomada, Git, chat (43)
+```

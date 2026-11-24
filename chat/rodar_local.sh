@@ -212,7 +212,20 @@ else
     ENV_PROJETO="LIA_SESSIOND_PROJETO=$PROJETO"
     echo "projeto: $PROJETO — leitura livre; criar/editar/apagar/mover só com a sua confirmação, depois de ver a prévia (LIA_PROJETO escolhe outra pasta)"
 fi
-env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO $ENV_AQUECER $ENV_WEB ${ENV_PROJETO:+"$ENV_PROJETO"} "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
+# Autor dos commits feitos pela Lia (sempre com a sua aprovação, nunca
+# push): LIA_GIT_AUTOR="Nome <email>", ou o user.name/user.email do seu Git
+# (o daemon roda com um HOME de teste e não vê a sua configuração global).
+ENV_AUTOR=""
+if [ "$PROJETO" != nenhum ]; then
+    AUTOR="${LIA_GIT_AUTOR:-}"
+    if [ -z "$AUTOR" ]; then
+        GN=$(git -C "$PROJETO" config user.name 2>/dev/null || true)
+        GE=$(git -C "$PROJETO" config user.email 2>/dev/null || true)
+        [ -n "$GN" ] && [ -n "$GE" ] && AUTOR="$GN <$GE>"
+    fi
+    [ -n "$AUTOR" ] && ENV_AUTOR="LIA_SESSIOND_GIT_AUTOR=$AUTOR"
+fi
+env HOME="$TEST_HOME" $ENV_EXECUTOR $ENV_MODELO $ENV_OLLAMA_MODELO $ENV_AQUECER $ENV_WEB ${ENV_PROJETO:+"$ENV_PROJETO"} ${ENV_AUTOR:+"$ENV_AUTOR"} "$RAIZ/build/lia-sessiond" > "$TEST_HOME/sessiond.log" 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null' EXIT INT TERM
 

@@ -179,7 +179,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
                   $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
                   $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o \
-                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o $(B)/sessiond-projeto-arquivos.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-projeto-praticas.o
+                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o $(B)/sessiond-projeto-arquivos.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-projeto-praticas.o $(B)/sessiond-projeto-processo.o $(B)/sessiond-projeto-validacao.o $(B)/sessiond-projeto-git.o $(B)/sessiond-coding.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -268,6 +268,49 @@ $(B)/sessiond-projeto-arquivos.o: projeto/arquivos.c projeto/arquivos.h | $(B)
 
 $(B)/sessiond-intencao-arquivos.o: sessiond/intencao_arquivos.c sessiond/intencao_arquivos.h sessiond/agente.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-projeto-validacao.o: projeto/validacao.c projeto/validacao.h projeto/processo.h projeto/arquivos.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-coding.o: sessiond/coding.c sessiond/coding.h sessiond/intencao_arquivos.h projeto/arquivos.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-projeto-git.o: projeto/git.c projeto/git.h projeto/processo.h projeto/arquivos.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-projeto-processo.o: projeto/processo.c projeto/processo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-processo.o: testes/unit/teste_processo.c projeto/processo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-processo: $(B)/teste-processo.o $(B)/sessiond-projeto-processo.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+# execução isolada (bubblewrap): argv literal, ambiente limpo, sem rede,
+# limites, timeout, cancelamento
+teste-processo: $(B)/teste-processo
+	$(B)/teste-processo
+
+$(B)/teste-validacao-git.o: testes/unit/teste_validacao_git.c projeto/validacao.h projeto/git.h projeto/processo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-validacao-git: $(B)/teste-validacao-git.o $(B)/sessiond-projeto-validacao.o $(B)/sessiond-projeto-git.o $(B)/sessiond-projeto-processo.o $(B)/sessiond-projeto-arquivos.o
+	$(CC) $^ $(SESSIOND_LIBS) $(PROJ_LIBS) -o $@
+
+# validação (build/testes) e Git num projeto temporário, tudo isolado
+teste-validacao-git: $(B)/teste-validacao-git
+	$(B)/teste-validacao-git
+
+$(B)/teste-coding-unit.o: testes/unit/teste_coding.c sessiond/coding.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-coding-unit: $(B)/teste-coding-unit.o $(B)/sessiond-coding.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-agente.o $(B)/sessiond-roteador.o $(B)/sessiond-projeto-arquivos.o
+	$(CC) $^ $(SESSIOND_LIBS) $(PROJ_LIBS) -lm -o $@
+
+# partes puras do ciclo de coding (sem daemon, sem modelo)
+teste-coding-unit: $(B)/teste-coding-unit
+	$(B)/teste-coding-unit
 
 $(B)/sessiond-projeto-praticas.o: projeto/praticas.c projeto/praticas.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -380,6 +423,11 @@ teste-web-resposta: sessiond chat teste-sintese-web
 teste-arquivos-projeto: sessiond chat teste-arquivos teste-intencao-arquivos
 	python3 -I testes/integration/teste_arquivos_projeto.py
 
+# fase 2 de coding: ciclo completo com modelo mock roteirizado, validação
+# isolada, rejeições, repetição, limite de ciclos, checkpoint/retomada, Git
+teste-coding: sessiond chat teste-processo teste-validacao-git teste-coding-unit
+	python3 -I testes/integration/teste_coding.py
+
 # ---------------------------------------------------------------------------
 # lia-chat (chat/): primeiro cliente de chat interativo de terminal para o
 # protocolo (docs/protocolo.md §9). Camada fina sobre gui/protocolo.c — não
@@ -410,4 +458,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
+.PHONY: teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run

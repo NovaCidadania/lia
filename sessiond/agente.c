@@ -232,6 +232,10 @@ char *agente_plano_validar(AgentePlano *p, const AgenteManifesto *mf)
         }
         if (s->timeout_ms <= 0 || s->timeout_ms > AGENTE_ORCAMENTO_TEMPO_MS)
             s->timeout_ms = info.timeout_padrao_ms > 0 ? info.timeout_padrao_ms : 10000;
+        /* passo longo declarado pelo manifesto (validar.executar): o
+         * orçamento da tarefa acompanha, até o teto */
+        if (s->timeout_ms + 30000 > p->orcamento_tempo_ms)
+            p->orcamento_tempo_ms = MIN(s->timeout_ms + 30000, AGENTE_ORCAMENTO_TEMPO_MAX_MS);
         s->somente_leitura = info.somente_leitura && !info.requer_aprovacao && nivel_risco(info.risco) == 0;
         s->requer_aprovacao = info.requer_aprovacao;
         if (nivel_risco(info.risco) > risco) risco = nivel_risco(info.risco);
@@ -1171,6 +1175,19 @@ char **agente_extrair_evidencias(const char *ferramenta, const char *parametros_
             ev = strv_acrescentar(ev, "resultados_web");
         else
             lim = strv_acrescentar(lim, "a busca não devolveu resultados estruturados");
+    } else if (!strcmp(f, "validar.executar")) {
+        /* a execução é a evidência; passar ou falhar é o RESULTADO (o
+         * relatório diz qual) — um teste que falha não é falha da ferramenta */
+        if (d && json_object_has_member(d, "passou")) {
+            ev = strv_acrescentar(ev, "validacao_executada");
+            if (json_object_get_boolean_member(d, "passou")) ev = strv_acrescentar(ev, "validacao_passou");
+            else lim = strv_acrescentar(lim, "a validação não passou: veja as últimas linhas de erro");
+        }
+    } else if (!strcmp(f, "validar.listar")) {
+        ev = strv_acrescentar(ev, "validacao_listada");
+    } else if (g_str_has_prefix(f, "git.")) {
+        ev = strv_acrescentar(ev, !strcmp(f, "git.commit") ? "commit_criado" : !strcmp(f, "git.status") ? "git_status"
+                                  : !strcmp(f, "git.diff") ? "git_diff" : "git_log");
     } else if (strcmp(f, "praticas.consultar") == 0) {
         JsonArray *pa = d && json_object_has_member(d, "praticas") ? json_object_get_array_member(d, "praticas") : NULL;
         if (pa && json_array_get_length(pa) > 0) ev = strv_acrescentar(ev, "praticas_selecionadas");

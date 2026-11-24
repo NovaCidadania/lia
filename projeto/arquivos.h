@@ -65,6 +65,10 @@ char *proj_listar(const char *caminho, gboolean recursivo, const char *padrao, g
 char *proj_buscar(const char *texto, gboolean regex, gboolean diferenciar_maiusculas, const char *caminho,
                   const char *padrao, gint64 limite, char **erro);
 char *proj_info(const char *caminho, char **erro);
+/* texto inteiro (UTF-8, quebras de linha como \n) e o sha256 dos BYTES do
+ * arquivo — o hash que uma edição posterior exige (sha256_esperado).
+ * Recusa binários e arquivos maiores que 'max_bytes'. */
+char *proj_ler_texto(const char *caminho, gsize max_bytes, char **sha256, char **erro);
 
 /* ------------------------------------------------------------- escrita */
 /* Ferramentas de escrita (nomes do manifesto): arquivo.criar, .escrever,

@@ -958,6 +958,22 @@ char *proj_info(const char *caminho, char **erro)
     return json_de(b);
 }
 
+char *proj_ler_texto(const char *caminho, gsize max_bytes, char **sha256, char **erro)
+{
+    char *abs = proj_resolver(caminho, FALSE, TRUE, erro);
+    if (!abs) return NULL;
+    struct stat st;
+    if (stat(abs, &st) != 0 || !S_ISREG(st.st_mode)) { *erro = g_strdup_printf("não é um arquivo comum: %s", caminho); g_free(abs); return NULL; }
+    if ((gsize)st.st_size > max_bytes) { *erro = g_strdup_printf("%s tem %lld bytes (limite %zu)", caminho, (long long)st.st_size, max_bytes); g_free(abs); return NULL; }
+    Texto *t = texto_carregar(abs, NULL, erro);
+    g_free(abs);
+    if (!t) return NULL;
+    char *r = g_strdup(t->texto);
+    if (sha256) *sha256 = g_strdup(t->sha256);
+    texto_liberar(t);
+    return r;
+}
+
 /* ================================================================== diff */
 
 static char **linhas_de(const char *t, gsize *n)

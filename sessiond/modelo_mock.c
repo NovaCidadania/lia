@@ -21,6 +21,7 @@
  * acidente. */
 #include "modelo.h"
 #include <stdlib.h>
+#include <json-glib/json-glib.h>
 #include <string.h>
 
 static gboolean contem_ci(const char *texto, const char *alvo)
@@ -45,6 +46,41 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
          * ferramenta não devolveu — testa a checagem de fundamentação. */
         ModeloResposta rr = { 0 };
         rr.sucesso = TRUE;
+        if (strstr(prompt_montado_completo, "\"arquivos_para_ler\"") || strstr(prompt_montado_completo, "\"edicoes\"")) {
+            /* ciclo de coding (sessiond/coding.h): respostas roteirizadas por
+             * LIA_MOCK_CODIGO=<arquivo.json> {"plano": ..., "edicoes": [..., ...]}
+             * — cada item é o texto (ou objeto) que o "modelo" devolve; a
+             * i-ésima proposta usa edicoes[i] (a última se repete). Um pedido
+             * de plano novo recomeça a contagem. */
+            static int proxima_edicao = 0;
+            gboolean plano = strstr(prompt_montado_completo, "\"arquivos_para_ler\"") != NULL;
+            if (plano) proxima_edicao = 0;
+            char *texto = NULL;
+            const char *arq = g_getenv("LIA_MOCK_CODIGO");
+            JsonParser *jp = json_parser_new();
+            if (arq && json_parser_load_from_file(jp, arq, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT) {
+                JsonObject *ro = json_node_get_object(json_parser_get_root(jp));
+                JsonNode *n = NULL;
+                if (plano) n = json_object_has_member(ro, "plano") ? json_object_get_member(ro, "plano") : NULL;
+                else if (json_object_has_member(ro, "edicoes")) {
+                    JsonArray *ea = json_object_get_array_member(ro, "edicoes");
+                    guint len = json_array_get_length(ea);
+                    if (len) n = json_array_get_element(ea, (guint)MIN(proxima_edicao, (int)len - 1));
+                    proxima_edicao++;
+                }
+                if (n && JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_STRING) texto = g_strdup(json_node_get_string(n));
+                else if (n) { JsonGenerator *g = json_generator_new(); json_generator_set_root(g, n); texto = json_generator_to_data(g, NULL); g_object_unref(g); }
+            }
+            g_object_unref(jp);
+            if (!texto) texto = g_strdup(plano ? "{\"criterios\":[{\"descricao\":\"(mock) os testes passam\",\"verificacao\":\"validacao\"}],\"arquivos_para_ler\":[],\"validacao\":\"teste\"}"
+                                              : "{\"edicoes\":[],\"explicacao\":\"(mock) sem roteiro em LIA_MOCK_CODIGO\"}");
+            if (opcoes->progresso_cb) opcoes->progresso_cb(opcoes->progresso_ctx, 42);
+            rr.sucesso = TRUE;
+            rr.resposta_texto = texto;
+            concluido_cb(ctx, &rr);
+            modelo_resposta_liberar(&rr);
+            return;
+        }
         if (strstr(prompt_montado_completo, "\"linha_do_tempo\"")) {
             /* síntese de pesquisa web (sessiond/sintese_web.h). Marcadores no
              * pedido: MOCK_SINTESE_INVENTADA (números que as fontes não têm),

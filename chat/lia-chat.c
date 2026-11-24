@@ -1011,7 +1011,10 @@ static void imprimir_previas_tarefa(LiaChat *c, JsonObject *dados)
         JsonNode *e = json_array_get_element(a, i);
         if (JSON_NODE_TYPE(e) != JSON_NODE_OBJECT) continue;
         JsonObject *o = json_node_get_object(e);
-        if (c->term) saida_linha(c, "%s  O que vai mudar nos arquivos:%s", sgr(c, EST_FORTE), sgr0(c));
+        const char *fo = campo_str(o, "ferramenta");
+        if (c->term) saida_linha(c, "%s  %s%s", sgr(c, EST_FORTE),
+                                 fo && !strcmp(fo, "validar.executar") ? "O que vai ser executado:" : fo && !strcmp(fo, "git.commit") ? "O que vai entrar no commit:"
+                                                                       : "O que vai mudar nos arquivos:", sgr0(c));
         imprimir_previa(c, campo_str(o, "previa"));
         if (campo_str(o, "erro")) {
             char *er = sanear(campo_str(o, "erro"));
@@ -1096,6 +1099,20 @@ static void tratar_msg_progresso_ou_saida(LiaChat *c, const LiaMsg *m, gboolean 
     const char *exec_id = campo_str(m->dados, "execucao_id");
     if (exec_id && !c->execucao_id_pendente)
         c->execucao_id_pendente = g_strdup(exec_id);
+    JsonObject *cod = progresso ? campo_obj(m->dados, "codigo") : NULL;
+    if (cod) {
+        /* etapa do ciclo de coding: uma linha por etapa; os tokens do
+         * modelo só atualizam a linha de status */
+        char *msg = sanear(campo_str(m->dados, "mensagem"));
+        const char *etapa = campo_str(cod, "etapa");
+        gboolean tokens = g_str_has_prefix(msg, "o modelo está escrevendo");
+        if (!tokens) {
+            if (c->term) saida_linha(c, "%s  ⋯ código · %s: %s%s", sgr(c, EST_FRACO), etapa ? etapa : "?", msg, sgr0(c));
+            else saida_linha(c, "[código] %s: %s", etapa ? etapa : "?", msg);
+        }
+        g_free(msg);
+        return;
+    }
     JsonObject *sint = progresso ? campo_obj(m->dados, "sintese") : NULL;
     if (sint) {
         /* o modelo está escrevendo a resposta: só a linha de status muda
@@ -1232,7 +1249,12 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
         g_free(apres);
         limpar_pendencias_de_execucao(c);
         tarefa_ui_limpar(c);
-        if (c->turno_espera_resposta && !cancelada) {
+        /* rejeição de plano vindo de pergunta: o daemon avisa que a
+         * 'resposta' final ainda vem (resposta_a_seguir) — sem isso,
+         * cancelado encerra o turno aqui mesmo */
+        gboolean vem_resposta = campo_bool(m->dados, "resposta_a_seguir", FALSE);
+        if ((c->turno_espera_resposta && !cancelada) || (cancelada && vem_resposta)) {
+            c->turno_espera_resposta = TRUE;
             iniciar_progresso_pergunta(c);
             definir_fase(c, FASE_GERANDO_RESPOSTA);
         } else if (cancelada) {
@@ -1278,7 +1300,8 @@ static void tratar_msg_resultado(LiaChat *c, const LiaMsg *m)
     g_free(apres);
     gboolean cancelado = estado && !strcmp(estado, "cancelado");
     limpar_pendencias_de_execucao(c);
-    if (c->turno_espera_resposta && !cancelado) {
+    if ((c->turno_espera_resposta && !cancelado) || (cancelado && campo_bool(m->dados, "resposta_a_seguir", FALSE))) {
+        c->turno_espera_resposta = TRUE;
         /* o daemon vai fechar o turno com 'resposta' (resumo fundamentado
          * do modelo, ou determinística se a execução falhou) */
         iniciar_progresso_pergunta(c);
@@ -1417,6 +1440,19 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
 
     char *texto = sanear(campo_str(m->dados, "resposta_texto"));
     g_strstrip(texto);
+    if (campo_bool(m->dados, "codigo", FALSE)) {
+        /* tarefa de código: várias etapas, cada gravação/execução com a
+         * própria aprovação; o turno só fecha com a 'resposta' final */
+        char *id = sanear(campo_str(m->dados, "codigo_id"));
+        if (c->term) saida_linha(c, "%s  ✓ %s (%s)%s", sgr(c, EST_FRACO), texto, id, sgr0(c));
+        else saida_linha(c, "[código] %s (%s)", texto, id);
+        g_free(id);
+        g_free(texto);
+        c->turno_espera_resposta = TRUE;
+        c->tarefa_ativa = TRUE;
+        definir_fase(c, FASE_EXECUTANDO);
+        return;
+    }
     JsonObject *intencao = campo_obj(m->dados, "intencao");
     JsonObject *validacao = campo_obj(m->dados, "validacao");
     const char *veredito = campo_str(validacao, "veredito");
@@ -1448,7 +1484,8 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
         gboolean auto_tarefa = c->autopilot && auto_ok && !requer;
         /* web ou alteração de arquivo: o plano é pedido na hora e a
          * aprovação (com a prévia do diff, para arquivos) aparece ao vivo */
-        gboolean arquivo_interativo = c->autopilot && requer && plano_tem_prefixo(pp, "arquivo.");
+        gboolean arquivo_interativo = c->autopilot && requer &&
+            (plano_tem_prefixo(pp, "arquivo.") || plano_tem_prefixo(pp, "validar.") || plano_tem_prefixo(pp, "git."));
         gboolean web_interativa = (c->autopilot && requer && plano_tem_web(pp)) || arquivo_interativo;
         /* web automática: o DAEMON dispensou a confirmação (política
          * LIA_SESSIOND_WEB_AUTOMATICA) e o plano é só web — segue sozinho,
@@ -1471,7 +1508,9 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
                 saida_linha(c, "%s  ⏸ a tarefa não roda sozinha (%s) — /plano para solicitar, ou faça outra pergunta%s", sgr(c, EST_AVISO),
                             !c->autopilot ? "modo manual" : (requer ? "exige aprovação" : "não é leitura pura"), sgr0(c));
             else if (arquivo_interativo)
-                saida_linha(c, "%s  ✓ alteração de arquivo pronta — mostrando a prévia; nada muda sem a sua confirmação%s", sgr(c, EST_FRACO), sgr0(c));
+                saida_linha(c, "%s  ✓ %s — mostrando a prévia; nada acontece sem a sua confirmação%s", sgr(c, EST_FRACO),
+                            plano_tem_prefixo(pp, "validar.") ? "execução de build/testes pronta" : plano_tem_prefixo(pp, "git.") ? "commit pronto"
+                                                              : "alteração de arquivo pronta", sgr0(c));
             else if (web_interativa)
                 saida_linha(c, "%s  ✓ pesquisa web pronta — solicitando agora; a aprovação aparecerá ao vivo%s", sgr(c, EST_FRACO), sgr0(c));
         } else {
@@ -1510,7 +1549,8 @@ static void tratar_msg_proposta(LiaChat *c, const LiaMsg *m)
     gboolean vai_auto = ferramenta && c->autopilot && auto_ok && !requer;
     /* alteração de arquivo sugerida pelo modelo: pede o plano já, para a
      * pessoa ver a prévia e decidir (nada muda sem a confirmação) */
-    gboolean pede_aprovacao_arquivo = ferramenta && c->autopilot && requer && g_str_has_prefix(ferramenta, "arquivo.");
+    gboolean pede_aprovacao_arquivo = ferramenta && c->autopilot && requer &&
+        (g_str_has_prefix(ferramenta, "arquivo.") || g_str_has_prefix(ferramenta, "validar.") || g_str_has_prefix(ferramenta, "git."));
     if (pede_aprovacao_arquivo) vai_auto = TRUE;
     if (!ferramenta && *texto) historico_adicionar(c, "Lia", texto);
 

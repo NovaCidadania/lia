@@ -25,6 +25,8 @@
 #include "../web/pesquisa.h"
 #include "../projeto/arquivos.h"
 #include "../projeto/praticas.h"
+#include "../projeto/validacao.h"
+#include "../projeto/git.h"
 
 #include <string.h>
 
@@ -63,6 +65,8 @@ static gboolean campo_bool(JsonObject *obj, const char *chave, gboolean padrao)
         return padrao;
     return json_node_get_boolean(n);
 }
+
+static gboolean ferramenta_de_processo(const char *nome);
 
 static gint64 campo_int(JsonObject *obj, const char *chave, gint64 padrao)
 {
@@ -264,6 +268,11 @@ static void executar_de_verdade(const ManifestoReal *m, JsonObject *parametros, 
         r->codigo_saida = 0;
         r->dados_json = pagina;
         return;
+    } else if (ferramenta_de_processo(m->base.nome)) {
+        r->sucesso = FALSE;
+        r->erro_codigo = g_strdup("recurso_indisponivel");
+        r->erro_mensagem = g_strdup("não foi possível criar a thread de execução isolada; tente de novo");
+        return;
     } else if (strcmp(m->base.nome, "praticas.consultar") == 0) {
         const PraticasCatalogo *cat = praticas_global();
         if (!cat) {
@@ -371,6 +380,68 @@ static gboolean entregar_idle(gpointer dados)
     return G_SOURCE_REMOVE;
 }
 
+/* resultado pronto: tira da tabela de cancelamento e entrega na thread principal */
+static void concluir_tarefa(TarefaReal *t, ExecutorResultado r)
+{
+    g_mutex_lock(&g_mutex_em_andamento);
+    g_hash_table_remove(g_em_andamento, t->execucao_id);
+    g_mutex_unlock(&g_mutex_em_andamento);
+
+    EntregaReal *e = g_new(EntregaReal, 1);
+    e->concluido_cb = t->concluido_cb;
+    e->ctx = t->ctx;
+    e->resultado = r;
+    g_idle_add(entregar_idle, e);
+
+    g_free(t->execucao_id);
+    if (t->parametros_raiz)
+        json_node_unref(t->parametros_raiz);
+    g_free(t);
+}
+
+/* ferramentas que executam processos (sempre isolados: projeto/processo.h)
+ * rodam numa thread própria — um build de minutos não segura as demais —
+ * e o cancelamento chega ao processo, que é encerrado de verdade */
+static gboolean ferramenta_de_processo(const char *nome)
+{
+    return !strcmp(nome, "validar.executar") || !strcmp(nome, "validar.listar") || g_str_has_prefix(nome, "git.");
+}
+
+static gpointer thread_processo(gpointer dados)
+{
+    TarefaReal *t = dados;
+    ExecutorResultado r = { 0 };
+    const char *f = t->m->base.nome;
+    char *erro = NULL, *saida = NULL;
+    if (!strcmp(f, "validar.executar")) saida = validacao_executar(t->parametros, &t->cancelado, &erro);
+    else if (!strcmp(f, "validar.listar")) saida = validacao_listar(&erro);
+    else if (!strcmp(f, "git.status")) saida = git_status(&t->cancelado, &erro);
+    else if (!strcmp(f, "git.diff")) saida = git_diff(t->parametros, &t->cancelado, &erro);
+    else if (!strcmp(f, "git.log")) saida = git_log(t->parametros, &t->cancelado, &erro);
+    else if (!strcmp(f, "git.commit")) saida = git_commit_aplicar(t->parametros, &t->cancelado, &erro);
+    else erro = g_strdup_printf("ferramenta de processo desconhecida: %s", f);
+    if (g_atomic_int_get(&t->cancelado)) {
+        r.sucesso = FALSE;
+        r.codigo_saida = 130;
+        r.erro_codigo = g_strdup("cancelado");
+        r.erro_mensagem = g_strdup("cancelado durante a execução (o processo foi encerrado)");
+        g_free(saida);
+        g_free(erro);
+    } else if (saida) {
+        r.sucesso = TRUE;
+        r.codigo_saida = 0;
+        r.dados_json = saida;
+        g_free(erro);
+    } else {
+        r.sucesso = FALSE;
+        r.codigo_saida = 1;
+        r.erro_codigo = g_strdup(erro && strstr(erro, "isolamento") ? "recurso_indisponivel" : "parametro_invalido");
+        r.erro_mensagem = erro ? erro : g_strdup("falhou");
+    }
+    concluir_tarefa(t, r);
+    return NULL;
+}
+
 static gpointer loop_trabalhador(gpointer dados)
 {
     (void)dados;
@@ -401,20 +472,7 @@ static gpointer loop_trabalhador(gpointer dados)
             }
         }
 
-        g_mutex_lock(&g_mutex_em_andamento);
-        g_hash_table_remove(g_em_andamento, t->execucao_id);
-        g_mutex_unlock(&g_mutex_em_andamento);
-
-        EntregaReal *e = g_new(EntregaReal, 1);
-        e->concluido_cb = t->concluido_cb;
-        e->ctx = t->ctx;
-        e->resultado = r;
-        g_idle_add(entregar_idle, e);
-
-        g_free(t->execucao_id);
-        if (t->parametros_raiz)
-            json_node_unref(t->parametros_raiz);
-        g_free(t);
+        concluir_tarefa(t, r);
     }
     return NULL;
 }
@@ -477,6 +535,11 @@ static void real_iniciar(const Executor *self, const char *execucao_id, const Ex
     g_hash_table_insert(g_em_andamento, t->execucao_id, t);
     g_mutex_unlock(&g_mutex_em_andamento);
 
+    if (ferramenta_de_processo(m->nome)) {
+        GThread *th = g_thread_try_new("lia-processo", thread_processo, t, NULL);
+        if (th) { g_thread_unref(th); return; }
+        /* sem thread nova (limite de recursos): cai na fila comum */
+    }
     g_async_queue_push(g_fila, t);
 }
 

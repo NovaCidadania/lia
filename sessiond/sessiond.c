@@ -50,6 +50,11 @@
 #include "sintese_web.h"
 #include "../projeto/arquivos.h"
 #include "../projeto/praticas.h"
+#include "../projeto/validacao.h"
+#include "../projeto/git.h"
+#include "../projeto/processo.h"
+#include "coding.h"
+#include "intencao_arquivos.h"
 
 #define LIA_SESSIOND_LINHA_MAX 65536
 #define LIA_SESSIOND_CHUNK 4096
@@ -64,6 +69,7 @@ typedef enum {
 
 typedef struct Daemon Daemon;
 typedef struct Tarefa Tarefa;
+typedef struct Coding Coding;
 
 typedef struct {
     Daemon *daemon;
@@ -117,8 +123,18 @@ typedef struct {
      * idêntica; se o arquivo mudou no meio, nada é alterado */
     char *previa_pendente;
     char *previa_sha_pendente;
+    /* o próximo 'resultado' cancelado será seguido de uma 'resposta'
+     * (rejeição de um plano vindo de pergunta): o cliente não encerra o turno */
+    gboolean resposta_a_seguir;
+    Coding *coding;               /* ciclo de coding em andamento (no máximo um por conexão) */
     gint64 exec_inicio_us;        /* g_get_monotonic_time() de quando a execução atual foi despachada */
 } Cliente;
+
+/* ciclo de coding (fim do arquivo) */
+static void coding_iniciar(Cliente *c, const char *pergunta_id, const char *pedido);
+static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id);
+static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t);
+static void coding_cancelar(Cliente *c);
 
 struct Daemon {
     GSocketListener *listener;
@@ -271,7 +287,8 @@ static void enviar_erro(Cliente *c, const char *em_resposta_a, const char *codig
 
 static gboolean web_automatica(const ExecutorManifesto *mf);
 static gboolean capacidades_permitidas(const ExecutorManifesto *mf);
-static char *previa_arquivo(const char *ferramenta, JsonObject *params, char **sha, char **erro);
+static char *previa_ferramenta(const char *ferramenta, JsonObject *params, char **sha, char **erro);
+static gboolean ferramenta_tem_previa(const char *ferramenta);
 static gboolean requer_aprovacao_efetiva(const ExecutorManifesto *mf);
 
 static void enviar_plano(Cliente *c, const char *em_resposta_a, const ExecutorManifesto *mf)
@@ -398,6 +415,10 @@ static void enviar_resultado_ex(Cliente *c, const char *estado, int codigo_saida
     json_builder_set_member_name(b, "codigo_saida");
     json_builder_add_int_value(b, codigo_saida);
     embutir_json_bruto(b, "dados", dados_json);
+    if (c->resposta_a_seguir) {
+        json_builder_set_member_name(b, "resposta_a_seguir");
+        json_builder_add_boolean_value(b, TRUE);
+    }
     if (apresentacao) {
         json_builder_set_member_name(b, "apresentacao");
         json_builder_add_string_value(b, apresentacao);
@@ -676,7 +697,7 @@ static void despachar_execucao(Cliente *c, const ExecutorManifesto *mf)
          * git checkout...): a alteração só segue se a prévia de agora for
          * idêntica à aprovada */
         char *sha = NULL, *erro_pv = NULL;
-        char *pv = previa_arquivo(mf->nome, c->parametros_pendentes ? json_node_get_object(c->parametros_pendentes) : NULL, &sha, &erro_pv);
+        char *pv = previa_ferramenta(mf->nome, c->parametros_pendentes ? json_node_get_object(c->parametros_pendentes) : NULL, &sha, &erro_pv);
         gboolean igual = pv && sha && !strcmp(sha, c->previa_sha_pendente);
         g_free(pv); g_free(sha);
         if (!igual) {
@@ -836,9 +857,20 @@ static char *construir_esquema_proposta(void)
  * que a pessoa vê antes de aprovar e o sha256 dele. NULL + *erro quando a
  * alteração não pode ser feita como pedida (trecho ausente, arquivo já
  * existe, fora do projeto...) — antes de qualquer aprovação. */
-static char *previa_arquivo(const char *ferramenta, JsonObject *params, char **sha, char **erro)
+/* Ferramentas cuja aprovação fica presa a uma PRÉVIA: escrita em arquivo
+ * (diff), validação (comando exato, configuração e impressão digital do
+ * projeto) e commit (arquivos e diff). Na execução a prévia é recalculada
+ * e precisa ser idêntica à aprovada. */
+static gboolean ferramenta_tem_previa(const char *ferramenta)
 {
-    char *pv = proj_previa(ferramenta, params, erro);
+    return ferramenta && (proj_ferramenta_de_escrita(ferramenta) || !strcmp(ferramenta, "validar.executar") || !strcmp(ferramenta, "git.commit"));
+}
+
+static char *previa_ferramenta(const char *ferramenta, JsonObject *params, char **sha, char **erro)
+{
+    char *pv = !strcmp(ferramenta, "validar.executar") ? validacao_previa(params, erro)
+             : !strcmp(ferramenta, "git.commit") ? git_commit_previa(params, erro)
+             : proj_previa(ferramenta, params, erro);
     if (pv && sha) *sha = g_compute_checksum_for_string(G_CHECKSUM_SHA256, pv, -1);
     return pv;
 }
@@ -847,13 +879,16 @@ static gboolean capacidades_permitidas(const ExecutorManifesto *mf)
 {
     /* arquivos do projeto só existem com um projeto definido
      * (LIA_SESSIOND_PROJETO) — sem ele, nem aparecem para o modelo */
-    if (g_str_has_prefix(mf->nome, "arquivo.") && !proj_raiz())
+    if ((g_str_has_prefix(mf->nome, "arquivo.") || g_str_has_prefix(mf->nome, "validar.") || g_str_has_prefix(mf->nome, "git.")) && !proj_raiz())
         return FALSE;
     if (!g_executor->restringe_a_leitura)
         return TRUE;
     for (int i = 0; mf->capacidades[i]; i++) {
-        /* escrita SÓ dentro do projeto, sempre com aprovação e prévia */
-        if (strcmp(mf->capacidades[i], "escrita_projeto") == 0 && proj_raiz() && mf->requer_aprovacao)
+        /* escrita SÓ dentro do projeto, sempre com aprovação e prévia; e
+         * execução de comandos do projeto SÓ com aprovação, prévia e
+         * isolamento (o executor recusa sem bwrap funcional) */
+        if ((strcmp(mf->capacidades[i], "escrita_projeto") == 0 || strcmp(mf->capacidades[i], "execucao_projeto") == 0) &&
+            proj_raiz() && mf->requer_aprovacao)
             continue;
         if (strcmp(mf->capacidades[i], "leitura_arquivo") != 0 && strcmp(mf->capacidades[i], "processo") != 0 && strcmp(mf->capacidades[i], "rede") != 0)
             return FALSE;
@@ -884,8 +919,8 @@ static char *rot_validar(const char *ferramenta, const char *parametros_json, gp
     /* escrita em arquivo: a alteração precisa ser possível AGORA (trecho
      * encontrado e único, arquivo novo que ainda não existe...) — senão o
      * plano é recusado antes de pedir aprovação, com o motivo real */
-    if (!erro && proj_ferramenta_de_escrita(ferramenta)) {
-        char *pv = previa_arquivo(ferramenta, json_node_get_object(json_parser_get_root(p)), NULL, &erro);
+    if (!erro && ferramenta_tem_previa(ferramenta)) {
+        char *pv = previa_ferramenta(ferramenta, json_node_get_object(json_parser_get_root(p)), NULL, &erro);
         g_free(pv);
     }
     g_object_unref(p);
@@ -1375,6 +1410,10 @@ static void disparar_resumo_modelo(Cliente *c, const char *ferramenta, const cha
 
 static void tratar_perguntar(Cliente *c, const LiaMsg *m)
 {
+    if (c->coding) {
+        enviar_erro(c, m->id, "estado_invalido", "há uma tarefa de código em andamento nesta conexão — aprove/recuse a etapa atual ou cancele");
+        return;
+    }
     if (c->pergunta_pendente_id) {
         enviar_erro(c, m->id, "estado_invalido", "já existe uma pergunta em andamento nesta conexão");
         return;
@@ -1415,6 +1454,41 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
         return;
     }
 
+    /* Tarefa de código (sessiond/coding.h): pedido de criar/alterar código
+     * sem conteúdo literal (o literal é operação de arquivo direta) ou
+     * retomada de um checkpoint */
+    if (proj_raiz()) {
+        GRegex *re = g_regex_new("retom\\w*\\s+(?:a\\s+)?tarefa\\s+de\\s+c[oó]digo\\s+(codigo-\\d{8}-\\d{6}-[0-9a-f]{4})", G_REGEX_CASELESS, 0, NULL);
+        GMatchInfo *mi = NULL;
+        char *retomar_id = NULL;
+        if (g_regex_match(re, mensagem, 0, &mi)) retomar_id = g_match_info_fetch(mi, 1);
+        g_match_info_free(mi);
+        g_regex_unref(re);
+        gboolean codigo = FALSE;
+        if (!retomar_id && coding_e_pedido(mensagem)) {
+            char *td = NULL;
+            AgentePlano *pa = agente_planejar_arquivos(mensagem, &td);
+            codigo = !pa && !td;
+            if (pa) agente_plano_liberar(pa);
+            g_free(td);
+        }
+        if (retomar_id || codigo) {
+            char *pid = lia_novo_id("perg");
+            if (!g_modelo) {
+                enviar_proposta_tarefa(c, pid, NULL, COMPAT_INEXISTENTE, "Para escrever código preciso de um modelo local (LIA_SESSIOND_MODELO=ollama ou llama_cpp).",
+                                       "roteador", "rejeitada", "sem modelo", 0, 0);
+            } else if (retomar_id) {
+                coding_retomar(c, pid, retomar_id);
+            } else {
+                coding_iniciar(c, pid, mensagem);
+            }
+            g_free(pid);
+            g_free(retomar_id);
+            g_free(prompt_final);
+            return;
+        }
+    }
+
     /* Agent Runtime v2: o pedido é uma TAREFA de vários passos (lentidão,
      * comparação, relatório, inventário, evidências sobre malware...)? O
      * planejador é determinístico; o plano é validado inteiro aqui e só
@@ -1438,10 +1512,12 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
                 if (erro) {
                     g_print("lia-sessiond: pergunta %s: plano de tarefa inválido (%s)\n", pid, erro);
                     char *txt;
-                    if (g_str_has_prefix(plano->intencao, "arquivo") && !proj_raiz()) {
-                        txt = g_strdup("Nenhuma pasta de projeto está definida, então não leio nem altero arquivos. Inicie o chat de dentro do "
+                    gboolean de_projeto = g_str_has_prefix(plano->intencao, "arquivo") || !strcmp(plano->intencao, "validar") ||
+                                          g_str_has_prefix(plano->intencao, "git_");
+                    if (de_projeto && !proj_raiz()) {
+                        txt = g_strdup("Nenhuma pasta de projeto está definida, então não leio nem altero arquivos, não rodo builds e não uso o Git. Inicie o chat de dentro do "
                                        "repositório (./chat/rodar_local.sh) ou escolha a pasta com LIA_PROJETO=/caminho/do/projeto.");
-                    } else if (g_str_has_prefix(plano->intencao, "arquivo")) {
+                    } else if (de_projeto) {
                         /* o motivo real (trecho não encontrado, já existe, fora do projeto...) sem o prefixo técnico */
                         const char *motivo = strstr(erro, "): ") ? strstr(erro, "): ") + 3 : erro;
                         txt = g_strdup_printf("Não dá para fazer isso: %s. Nada foi alterado.", motivo);
@@ -1564,6 +1640,7 @@ struct Tarefa {
     guint timer_passo[AGENTE_MAX_PASSOS];
     gint64 inicio_passo[AGENTE_MAX_PASSOS];
     char *previa_sha[AGENTE_MAX_PASSOS]; /* escrita em arquivo: sha256 da prévia aprovada */
+    gboolean resposta_a_seguir;          /* rejeitada a partir de uma pergunta: 'resposta' vem depois do 'resultado' */
     gboolean sugestao_pedida; /* o modelo já foi consultado para um passo de replanejamento nesta tarefa */
     char *modelo_id;          /* consulta ao modelo em andamento (sugestão de replanejamento), para cancelar */
 };
@@ -1611,6 +1688,34 @@ static gboolean ag_info(const char *ferramenta, AgenteFerramentaInfo *out, gpoin
 }
 
 static const AgenteManifesto AG_MANIFESTO = { ag_info, rot_validar, NULL };
+
+/* detalhe de auditoria sem conteúdo sensível: para validação, o comando,
+ * o código de saída e a duração (nunca a saída); para commit, o hash e
+ * quantos arquivos (nunca o diff) */
+static char *detalhe_auditoria(const char *ferramenta, const char *dados_json)
+{
+    if (!dados_json || (strcmp(ferramenta, "validar.executar") && strcmp(ferramenta, "git.commit"))) return g_strdup("");
+    JsonParser *jp = json_parser_new();
+    char *r = g_strdup("");
+    if (json_parser_load_from_data(jp, dados_json, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT) {
+        JsonObject *o = json_node_get_object(json_parser_get_root(jp));
+        g_free(r);
+        if (!strcmp(ferramenta, "validar.executar"))
+            r = g_strdup_printf(" comando=%s passou=%s codigo_saida=%" G_GINT64_FORMAT " tempo_ms=%" G_GINT64_FORMAT "%s%s",
+                                json_object_has_member(o, "comando") ? json_object_get_string_member(o, "comando") : "?",
+                                json_object_has_member(o, "passou") && json_object_get_boolean_member(o, "passou") ? "sim" : "nao",
+                                json_object_has_member(o, "codigo_saida") ? json_object_get_int_member(o, "codigo_saida") : -1,
+                                json_object_has_member(o, "tempo_ms") ? json_object_get_int_member(o, "tempo_ms") : -1,
+                                json_object_has_member(o, "timeout") && json_object_get_boolean_member(o, "timeout") ? " timeout=sim" : "",
+                                json_object_has_member(o, "cancelado") && json_object_get_boolean_member(o, "cancelado") ? " cancelado=sim" : "");
+        else
+            r = g_strdup_printf(" commit=%.12s arquivos=%u", json_object_has_member(o, "commit") ? json_object_get_string_member(o, "commit") : "?",
+                                json_object_has_member(o, "arquivos") ? json_array_get_length(json_object_get_array_member(o, "arquivos")) : 0);
+        for (char *q = r; *q; q++) if ((unsigned char)*q < 0x20) *q = '?';
+    }
+    g_object_unref(jp);
+    return r;
+}
 
 static void auditar_passo(Cliente *c, const AgentePasso *s, const char *resumo)
 {
@@ -1662,9 +1767,11 @@ static void auditar_passo(Cliente *c, const AgentePasso *s, const char *resumo)
     char *data = g_date_time_format(agora, "%Y-%m-%d");
     char *caminho = g_strdup_printf("%s/%s.log", d->caminho_dir_auditoria, data);
     char *ts_linha = g_date_time_format(agora, "%Y-%m-%d %H:%M:%S UTC");
-    char *texto = g_strdup_printf("%s uid=%u acao=sessiond.%s risco=%s resultado=%s tarefa_passo=%s%s\n",
+    char *extra = detalhe_auditoria(s->ferramenta, s->dados_json);
+    char *texto = g_strdup_printf("%s uid=%u acao=sessiond.%s risco=%s resultado=%s tarefa_passo=%s%s%s\n",
                                    ts_linha, (unsigned)geteuid(), s->ferramenta, mf ? mf->risco : "?", resumo, s->id,
-                                   web_automatica(mf) ? " aprovacao=dispensada_web_automatica" : "");
+                                   web_automatica(mf) ? " aprovacao=dispensada_web_automatica" : "", extra);
+    g_free(extra);
     int fd = open(caminho, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t n = write(fd, texto, strlen(texto));
@@ -1944,10 +2051,10 @@ static void tarefa_despachar(Tarefa *t, int idx)
     if (json_parser_load_from_data(jp, s->parametros_json, -1, NULL) && json_parser_get_root(jp) &&
         JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT)
         params = json_node_get_object(json_parser_get_root(jp));
-    if (proj_ferramenta_de_escrita(s->ferramenta)) {
+    if (ferramenta_tem_previa(s->ferramenta)) {
         /* só altera se a prévia de agora for idêntica à aprovada */
         char *sha = NULL, *erro_pv = NULL;
-        char *pv = previa_arquivo(s->ferramenta, params, &sha, &erro_pv);
+        char *pv = previa_ferramenta(s->ferramenta, params, &sha, &erro_pv);
         gboolean igual = pv && sha && idx < AGENTE_MAX_PASSOS && t->previa_sha[idx] && !strcmp(sha, t->previa_sha[idx]);
         g_free(pv); g_free(sha);
         if (!igual) {
@@ -2012,7 +2119,12 @@ static void tarefa_verificar(Tarefa *t)
     t->estado = TAREFA_VERIFICANDO;
     enviar_progresso_tarefa(t, "verificando", -1, "verificando os critérios de sucesso contra as evidências coletadas", FALSE);
     gint64 restante_ms = t->plano->orcamento_tempo_ms - (g_get_monotonic_time() - t->inicio_us) / 1000;
-    gboolean pode = t->plano->replanejamentos < AGENTE_MAX_REPLANEJAMENTOS &&
+    /* tarefas que gravam, executam ou fazem commit nunca ganham passos que a
+     * pessoa não viu na aprovação: replanejar só vale para coletas de leitura */
+    gboolean efeito = !t->plano->somente_leitura || g_str_has_prefix(t->plano->intencao, "codigo_") ||
+                      !strcmp(t->plano->intencao, "validar") || g_str_has_prefix(t->plano->intencao, "git_") ||
+                      g_str_has_prefix(t->plano->intencao, "arquivo");
+    gboolean pode = !efeito && t->plano->replanejamentos < AGENTE_MAX_REPLANEJAMENTOS &&
                     (int)t->plano->passos->len < t->plano->orcamento_passos && restante_ms > 2000;
     char **aus = NULL;
     AgenteVeredito v = agente_verificar(t->plano, pode, &aus);
@@ -2256,7 +2368,9 @@ static void ao_sintese_web(gpointer ctx, const ModeloResposta *r)
  * ou o erro real de cada passo; nunca o relatório genérico da coleta. */
 static gboolean tarefa_resposta_arquivos(Tarefa *t, Cliente *c, const char *pergunta_id)
 {
-    if (!g_str_has_prefix(t->plano->intencao, "arquivo") && strcmp(t->plano->intencao, "boas_praticas") != 0) return FALSE;
+    if (!g_str_has_prefix(t->plano->intencao, "arquivo") && strcmp(t->plano->intencao, "boas_praticas") != 0 &&
+        strcmp(t->plano->intencao, "validar") != 0 && !g_str_has_prefix(t->plano->intencao, "git_"))
+        return FALSE;
     GString *o = g_string_new(NULL);
     gboolean alguma_falha = FALSE;
     for (guint i = 0; i < t->plano->passos->len; i++) {
@@ -2422,7 +2536,7 @@ static void tarefa_finalizar(Tarefa *t, AgenteVeredito v, char **ausentes, const
 
     /* pesquisa web: a resposta final é a síntese das fontes lidas (ou a
      * cotação, ou o erro real) — nunca o relatório genérico da coleta */
-    if (!c->fechado && (tarefa_resposta_arquivos(t, c, pergunta_id) || tarefa_resposta_web(t, c, pergunta_id, pedido))) {
+    if (!c->fechado && (coding_apos_tarefa(c, t) || tarefa_resposta_arquivos(t, c, pergunta_id) || tarefa_resposta_web(t, c, pergunta_id, pedido))) {
         g_free(pergunta_id);
         g_free(relatorio);
         g_free(evid);
@@ -2495,6 +2609,10 @@ static void tarefa_cancelar(Tarefa *t, const char *motivo, gboolean avisar)
         json_builder_end_object(b);
         json_builder_set_member_name(b, "tarefa");
         json_builder_add_boolean_value(b, TRUE);
+        if (t->resposta_a_seguir) {
+            json_builder_set_member_name(b, "resposta_a_seguir");
+            json_builder_add_boolean_value(b, TRUE);
+        }
         json_builder_end_object(b);
         char *id = lia_novo_id("msg");
         char *linha = lia_msg_montar(LIA_MSG_RESULTADO, id, NULL, b);
@@ -2504,6 +2622,29 @@ static void tarefa_cancelar(Tarefa *t, const char *motivo, gboolean avisar)
     }
     tarefa_desligar_do_cliente(t);
     tarefa_unref(t);
+}
+
+/* Rejeição de um plano de tarefa: cancela e, se o plano veio de uma
+ * pergunta, fecha o turno com uma 'resposta' explícita — o cliente sabe
+ * pelo 'resposta_a_seguir' do resultado que ela vem. */
+static gboolean coding_apos_rejeicao(Cliente *c, Tarefa *t);
+
+static void tarefa_rejeitar(Tarefa *t)
+{
+    Cliente *c = t->c;
+    char *pid = t->pergunta_id ? g_strdup(t->pergunta_id) : NULL;
+    char *obj = g_strdup(t->plano->objetivo);
+    t->resposta_a_seguir = pid != NULL;
+    tarefa_ref(t);
+    tarefa_cancelar(t, "rejeitado pela pessoa", TRUE);
+    if (pid && !c->fechado && !coding_apos_rejeicao(c, t)) {
+        char *txt = g_strdup_printf("Nada foi feito: você recusou o plano (%s). Nenhum arquivo foi alterado e nada foi executado.", obj);
+        enviar_resposta_final(c, pid, txt, "deterministica", TRUE, NULL, 0);
+        g_free(txt);
+    }
+    tarefa_unref(t);
+    g_free(pid);
+    g_free(obj);
 }
 
 static void tarefa_iniciar(Tarefa *t)
@@ -2559,11 +2700,11 @@ static void tarefa_criar(Cliente *c, const char *em_resposta_a, AgentePlano *pla
     gboolean tem_previa = FALSE;
     for (guint i = 0; i < plano->passos->len && i < AGENTE_MAX_PASSOS; i++) {
         AgentePasso *s = g_ptr_array_index(plano->passos, i);
-        if (!proj_ferramenta_de_escrita(s->ferramenta)) continue;
+        if (!ferramenta_tem_previa(s->ferramenta)) continue;
         JsonParser *pp = json_parser_new();
         char *pv = NULL, *erro_pv = NULL;
         if (json_parser_load_from_data(pp, s->parametros_json, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(pp)) == JSON_NODE_OBJECT)
-            pv = previa_arquivo(s->ferramenta, json_node_get_object(json_parser_get_root(pp)), &t->previa_sha[i], &erro_pv);
+            pv = previa_ferramenta(s->ferramenta, json_node_get_object(json_parser_get_root(pp)), &t->previa_sha[i], &erro_pv);
         g_object_unref(pp);
         if (!tem_previa) { json_builder_set_member_name(b, "previas"); json_builder_begin_array(b); tem_previa = TRUE; }
         json_builder_begin_object(b);
@@ -2750,12 +2891,12 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
     if (!capacidades_permitidas(mf)) {
         /* a única escrita aceita é a do projeto (escrita_projeto), sempre
          * com aprovação e prévia — ver capacidades_permitidas */
-        const char *negada = g_str_has_prefix(mf->nome, "arquivo.") && !proj_raiz()
+        const char *negada = (g_str_has_prefix(mf->nome, "arquivo.") || g_str_has_prefix(mf->nome, "validar.") || g_str_has_prefix(mf->nome, "git.")) && !proj_raiz()
             ? "nenhum projeto definido (LIA_SESSIOND_PROJETO): ferramentas de arquivo indisponíveis" : NULL;
         for (int i = 0; !negada && mf->capacidades[i]; i++) {
             const char *cap = mf->capacidades[i];
             if (strcmp(cap, "leitura_arquivo") != 0 && strcmp(cap, "processo") != 0 && strcmp(cap, "rede") != 0 &&
-                strcmp(cap, "escrita_projeto") != 0)
+                strcmp(cap, "escrita_projeto") != 0 && strcmp(cap, "execucao_projeto") != 0)
                 negada = cap;
         }
         enviar_erro(c, m->id, "capacidade_negada", negada ? negada : "capacidade não permitida");
@@ -2777,9 +2918,9 @@ static void tratar_solicitar(Cliente *c, const LiaMsg *m)
     /* escrita em arquivo: a prévia (diff) é calculada AGORA — se a
      * alteração não for possível como pedida, nada de plano nem aprovação */
     char *previa = NULL, *previa_sha = NULL;
-    if (proj_ferramenta_de_escrita(ferramenta)) {
+    if (ferramenta_tem_previa(ferramenta)) {
         char *erro_pv = NULL;
-        previa = previa_arquivo(ferramenta, params_brutos, &previa_sha, &erro_pv);
+        previa = previa_ferramenta(ferramenta, params_brutos, &previa_sha, &erro_pv);
         if (!previa) {
             enviar_erro(c, m->id, "parametro_invalido", erro_pv ? erro_pv : "alteração impossível");
             g_free(erro_pv);
@@ -2870,7 +3011,7 @@ static void tratar_aprovar(Cliente *c, const LiaMsg *m)
             return;
         }
         if (strcmp(dec, "aprovar") == 0) tarefa_iniciar(t);
-        else tarefa_cancelar(t, "rejeitado pela pessoa", TRUE);
+        else tarefa_rejeitar(t);
         return;
     }
     if (!plano_id || !c->plano_id_pendente || strcmp(plano_id, c->plano_id_pendente) != 0) {
@@ -2894,7 +3035,18 @@ static void tratar_aprovar(Cliente *c, const LiaMsg *m)
         const ExecutorManifesto *mf = g_executor->buscar_manifesto(c->ferramenta_pendente);
         despachar_execucao(c, mf);
     } else {
+        char *pid = c->pergunta_id_origem ? g_strdup(c->pergunta_id_origem) : NULL;
+        char *ferr = g_strdup(c->ferramenta_pendente ? c->ferramenta_pendente : "?");
+        c->resposta_a_seguir = pid != NULL;
         finalizar_plano_cancelado(c, "rejeitado pela pessoa");
+        c->resposta_a_seguir = FALSE;
+        if (pid && !c->fechado) {
+            char *txt = g_strdup_printf("Nada foi feito: você recusou o plano (%s).", ferr);
+            enviar_resposta_final(c, pid, txt, "deterministica", TRUE, NULL, 0);
+            g_free(txt);
+        }
+        g_free(pid);
+        g_free(ferr);
     }
 }
 
@@ -2919,6 +3071,13 @@ static void tratar_cancelar(Cliente *c, const LiaMsg *m)
             return;
         }
         tarefa_cancelar(c->tarefa, "cancelado pelo cliente", TRUE);
+        coding_cancelar(c); /* se a tarefa era de um ciclo de coding: checkpoint e fim, sem mais nada */
+        return;
+    }
+    if (c->coding) {
+        /* o modelo está escrevendo a proposta (nenhuma tarefa em andamento) */
+        coding_cancelar(c);
+        enviar_erro(c, m->id, "cancelado", "tarefa de código cancelada a pedido do cliente (checkpoint guardado)");
         return;
     }
     if (quer_pergunta || (c->estado == ESTADO_CONECTADO && (c->pergunta_pendente_id || c->resumo_pendente_id))) {
@@ -3050,6 +3209,7 @@ static void desconectar_cliente(Cliente *c, const char *motivo)
     }
     if (c->tarefa)
         tarefa_cancelar(c->tarefa, "cliente desconectou", FALSE);
+    coding_cancelar(c);
     g_io_stream_close(G_IO_STREAM(c->conexao), NULL, NULL);
     c->daemon->clientes = g_list_remove(c->daemon->clientes, c);
     cliente_unref(c); /* solta a referência que a lista do daemon mantinha */
@@ -3294,6 +3454,749 @@ static void aquecer_modelo(void)
     g_modelo->perguntar(g_modelo, "aquecimento", "Responda apenas: ok", &op, ao_aquecimento, inicio);
 }
 
+/* ================================================================ coding
+ * Ciclo de coding (sessiond/coding.h): critérios → leitura → proposta do
+ * modelo → aprovação da edição (tarefa com arquivo.criar/escrever e
+ * prévia) → validação (tarefa com validar.executar e prévia) → revisão →
+ * fim, ou novo ciclo de correção (até CODING_MAX_CICLOS). Cada efeito
+ * passa pelas mesmas tarefas/aprovações de sempre; aqui só se decide a
+ * próxima etapa. Sucesso SÓ com diff real, validação que passou depois da
+ * última edição e todos os critérios conferidos. */
+
+#define LIA_MODELO_TOKENS_CODIGO 1400
+
+typedef enum { COD_PLANEJANDO, COD_PROPONDO, COD_AGUARDANDO_EDICAO, COD_AGUARDANDO_VALIDACAO } CodEstado;
+
+struct Coding {
+    char *id, *pedido, *pergunta_id;
+    CodEstado estado;
+    int ciclo;              /* rodadas de edição já propostas */
+    int recusas_proposta;   /* propostas inválidas seguidas */
+    CodingPlano *plano;
+    GHashTable *lidos, *shas;
+    GPtrArray *operacoes;   /* operacao_id de cada gravação (para desfazer) */
+    GString *diffs;
+    GPtrArray *propostas;   /* hash de cada proposta aplicada */
+    char *falha;            /* final da saída da última validação que falhou (para o modelo) */
+    char *falha_sha;
+    char *erro_proposta;
+    gboolean editou, validou_depois, passou;
+    char *validacao_json;
+    char *comando;
+    char *modelo_id;
+    gint64 inicio_us;
+};
+
+static void coding_liberar(Coding *k)
+{
+    if (!k) return;
+    g_free(k->id); g_free(k->pedido); g_free(k->pergunta_id);
+    coding_plano_liberar(k->plano);
+    g_hash_table_unref(k->lidos); g_hash_table_unref(k->shas);
+    g_ptr_array_unref(k->operacoes);
+    g_string_free(k->diffs, TRUE);
+    g_ptr_array_unref(k->propostas);
+    g_free(k->falha); g_free(k->falha_sha); g_free(k->erro_proposta);
+    g_free(k->validacao_json); g_free(k->comando); g_free(k->modelo_id);
+    g_free(k);
+}
+
+static const char *coding_etapa_texto(CodEstado e)
+{
+    switch (e) {
+    case COD_PLANEJANDO: return "criterios";
+    case COD_PROPONDO: return "proposta";
+    case COD_AGUARDANDO_EDICAO: return "aprovacao_edicao";
+    case COD_AGUARDANDO_VALIDACAO: return "validacao";
+    }
+    return "?";
+}
+
+static void coding_progresso(Cliente *c, const char *etapa, const char *mensagem)
+{
+    Coding *k = c->coding;
+    if (!k || c->fechado) return;
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "pergunta_id"); json_builder_add_string_value(b, k->pergunta_id);
+    json_builder_set_member_name(b, "mensagem"); json_builder_add_string_value(b, mensagem);
+    json_builder_set_member_name(b, "codigo");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "id"); json_builder_add_string_value(b, k->id);
+    json_builder_set_member_name(b, "etapa"); json_builder_add_string_value(b, etapa);
+    json_builder_set_member_name(b, "ciclo"); json_builder_add_int_value(b, k->ciclo);
+    json_builder_set_member_name(b, "max_ciclos"); json_builder_add_int_value(b, CODING_MAX_CICLOS);
+    json_builder_end_object(b);
+    json_builder_end_object(b);
+    char *id = lia_novo_id("msg");
+    char *linha = lia_msg_montar(LIA_MSG_PROGRESSO, id, NULL, b);
+    g_free(id);
+    g_object_unref(b);
+    escrever_linha(c, linha);
+}
+
+/* checkpoint privado (~/.lia/projeto/coding/<id>.json, 0600): estado para
+ * retomar, sem conteúdo de arquivo nem saída de testes */
+static void coding_checkpoint(Coding *k, const char *estado)
+{
+    JsonObject *o = json_object_new();
+    json_object_set_string_member(o, "id", k->id);
+    json_object_set_string_member(o, "raiz", proj_raiz() ? proj_raiz() : "");
+    json_object_set_string_member(o, "pedido", k->pedido);
+    json_object_set_string_member(o, "estado", estado);
+    json_object_set_int_member(o, "ciclo", k->ciclo);
+    json_object_set_boolean_member(o, "editou", k->editou);
+    json_object_set_boolean_member(o, "validou_depois_da_ultima_edicao", k->validou_depois);
+    json_object_set_boolean_member(o, "validacao_passou", k->passou);
+    if (k->comando) json_object_set_string_member(o, "comando_validacao", k->comando);
+    JsonArray *cr = json_array_new();
+    for (guint i = 0; k->plano && i < k->plano->criterios->len; i++) {
+        CodingCriterio *c = g_ptr_array_index(k->plano->criterios, i);
+        JsonObject *co = json_object_new();
+        json_object_set_string_member(co, "descricao", c->descricao);
+        json_object_set_string_member(co, "verificacao", c->verificacao);
+        if (c->caminho) json_object_set_string_member(co, "caminho", c->caminho);
+        if (c->texto) json_object_set_string_member(co, "texto", c->texto);
+        json_array_add_object_element(cr, co);
+    }
+    json_object_set_array_member(o, "criterios", cr);
+    JsonObject *lidos = json_object_new();
+    GHashTableIter it;
+    gpointer kk, vv;
+    g_hash_table_iter_init(&it, k->shas);
+    while (g_hash_table_iter_next(&it, &kk, &vv)) json_object_set_string_member(lidos, kk, vv);
+    json_object_set_object_member(o, "arquivos_lidos_sha256", lidos);
+    JsonArray *ops = json_array_new();
+    for (guint i = 0; i < k->operacoes->len; i++) json_array_add_string_element(ops, g_ptr_array_index(k->operacoes, i));
+    json_object_set_array_member(o, "operacoes", ops);
+    JsonArray *pp = json_array_new();
+    for (guint i = 0; i < k->propostas->len; i++) json_array_add_string_element(pp, g_ptr_array_index(k->propostas, i));
+    json_object_set_array_member(o, "propostas_sha256", pp);
+    GDateTime *agora = g_date_time_new_now_local();
+    char *quando = g_date_time_format_iso8601(agora);
+    json_object_set_string_member(o, "atualizado_em", quando);
+    g_free(quando);
+    g_date_time_unref(agora);
+    char *erro = NULL;
+    if (!coding_salvar_checkpoint(k->id, o, &erro)) {
+        g_print("lia-sessiond: coding %s: checkpoint não gravado: %s\n", k->id, erro);
+        g_free(erro);
+    }
+    json_object_unref(o);
+}
+
+/* relatório final (a 'resposta') e fim da sessão de coding */
+static void coding_encerrar(Cliente *c, const char *motivo)
+{
+    Coding *k = c->coding;
+    if (!k) return;
+    GString *o = g_string_new(NULL);
+    GString *crit = g_string_new(NULL);
+    gboolean todos = TRUE;
+    for (guint i = 0; k->plano && i < k->plano->criterios->len; i++) {
+        CodingCriterio *cr = g_ptr_array_index(k->plano->criterios, i);
+        char *como = NULL;
+        gboolean ok = FALSE;
+        if (k->editou) ok = coding_conferir_criterio(cr, k->passou && k->validou_depois, &como);
+        else como = g_strdup("não conferido: nenhuma alteração foi gravada");
+        if (!ok) todos = FALSE;
+        g_string_append_printf(crit, "  %s %s — %s\n", ok ? "✓" : "✗", cr->descricao, como);
+        g_free(como);
+    }
+    gboolean sucesso = !motivo && k->editou && k->diffs->len > 0 && k->passou && k->validou_depois && todos;
+    if (sucesso) {
+        g_string_append_printf(o, "Resposta: concluído — %u gravação(ões) aprovada(s) e a validação \"%s\" passou depois da última edição.\n",
+                               k->operacoes->len, k->comando ? k->comando : "?");
+    } else {
+        g_string_append(o, "Resposta: NÃO concluído — ");
+        if (motivo) g_string_append(o, motivo);
+        else if (!k->editou) g_string_append(o, "nenhuma alteração foi gravada");
+        else if (!k->validou_depois) g_string_append(o, "a validação não rodou depois da última edição");
+        else if (!k->passou) g_string_append(o, "a validação não passou");
+        else g_string_append(o, "há critério de aceite não conferido");
+        g_string_append_c(o, '\n');
+    }
+    if (crit->len) { g_string_append(o, "\nCritérios de aceite:\n"); g_string_append(o, crit->str); }
+    if (k->plano && k->plano->descartados && k->plano->descartados[0]) {
+        g_string_append(o, "Critérios descartados (não verificáveis):\n");
+        for (int i = 0; k->plano->descartados[i]; i++) g_string_append_printf(o, "  – %s\n", k->plano->descartados[i]);
+    }
+    if (k->validacao_json) {
+        JsonParser *jp = json_parser_new();
+        if (json_parser_load_from_data(jp, k->validacao_json, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT) {
+            JsonObject *v = json_node_get_object(json_parser_get_root(jp));
+            g_string_append_printf(o, "\nValidação: \"%s\" %s (código %" G_GINT64_FORMAT ", %" G_GINT64_FORMAT " ms)%s\n",
+                                   json_object_get_string_member_with_default(v, "comando", "?"),
+                                   json_object_get_boolean_member_with_default(v, "passou", FALSE) ? "passou" : "falhou",
+                                   json_object_get_int_member_with_default(v, "codigo_saida", -1), json_object_get_int_member_with_default(v, "tempo_ms", 0),
+                                   k->validou_depois ? ", depois da última edição" : ", ANTES da última edição (não vale como prova)");
+            const char *fim = json_object_get_string_member_with_default(v, "final_saida", "");
+            const char *fe = json_object_get_string_member_with_default(v, "final_erros", "");
+            if (*fe && !json_object_get_boolean_member_with_default(v, "passou", FALSE)) { g_string_append(o, "  erros:\n"); g_string_append(o, fe); if (fe[strlen(fe) - 1] != '\n') g_string_append_c(o, '\n'); }
+            else if (*fim) { g_string_append(o, "  saída:\n"); g_string_append(o, fim); if (fim[strlen(fim) - 1] != '\n') g_string_append_c(o, '\n'); }
+        }
+        g_object_unref(jp);
+    } else {
+        g_string_append(o, "\nValidação: não executada.\n");
+    }
+    if (k->diffs->len) { g_string_append(o, "\nDiff:\n"); g_string_append(o, k->diffs->str); }
+    else g_string_append(o, "\nDiff: nenhum arquivo foi alterado.\n");
+    if (k->operacoes->len) {
+        g_string_append(o, "\nPara desfazer:");
+        for (guint i = k->operacoes->len; i-- > 0;) g_string_append_printf(o, " \"desfaça a operação %s\"%s", (char *)g_ptr_array_index(k->operacoes, i), i ? "," : "");
+        g_string_append_c(o, '\n');
+    }
+    g_string_append_printf(o, "\nCheckpoint: %s%s\n", k->id, sucesso ? "" : " (para continuar: \"retome a tarefa de código <id>\")");
+    gint64 ms = (g_get_monotonic_time() - k->inicio_us) / 1000;
+    g_print("lia-sessiond: coding %s: %s em %" G_GINT64_FORMAT " ms (ciclos %d, gravações %u)%s%s\n", k->id, sucesso ? "concluído" : "não concluído", ms,
+            k->ciclo, k->operacoes->len, motivo ? " — " : "", motivo ? motivo : "");
+    coding_checkpoint(k, sucesso ? "concluido" : "interrompido");
+    char *pid = g_strdup(k->pergunta_id);
+    c->coding = NULL;
+    coding_liberar(k);
+    if (!c->fechado) enviar_resposta_final(c, pid, o->str, "deterministica", TRUE, sucesso ? NULL : "tarefa de código não concluída", 0);
+    g_free(pid);
+    g_string_free(crit, TRUE);
+    g_string_free(o, TRUE);
+}
+
+typedef struct { Cliente *c; char *modelo_id; } CodCtx;
+
+static CodCtx *codctx_novo(Cliente *c, const char *modelo_id)
+{
+    CodCtx *x = g_new0(CodCtx, 1);
+    x->c = cliente_ref(c);
+    x->modelo_id = g_strdup(modelo_id);
+    return x;
+}
+
+static gboolean codctx_valido(CodCtx *x)
+{
+    return !x->c->fechado && x->c->coding && x->c->coding->modelo_id && !strcmp(x->c->coding->modelo_id, x->modelo_id);
+}
+
+static void codctx_liberar(CodCtx *x)
+{
+    cliente_unref(x->c);
+    g_free(x->modelo_id);
+    g_free(x);
+}
+
+static void ao_coding_tokens(gpointer ctx, gint64 tokens)
+{
+    CodCtx *x = ctx;
+    if (!codctx_valido(x)) return;
+    char *m = g_strdup_printf("o modelo está escrevendo a proposta: %" G_GINT64_FORMAT " tokens", tokens);
+    coding_progresso(x->c, coding_etapa_texto(x->c->coding->estado), m);
+    g_free(m);
+}
+
+static void coding_propor(Cliente *c);
+static void coding_validar(Cliente *c);
+
+static void coding_inspecionar(Cliente *c)
+{
+    Coding *k = c->coding;
+    for (int i = 0; k->plano->arquivos_para_ler && k->plano->arquivos_para_ler[i] && g_hash_table_size(k->lidos) < CODING_MAX_ARQUIVOS_LIDOS; i++) {
+        char *abs = proj_resolver(k->plano->arquivos_para_ler[i], FALSE, TRUE, &(char *){ NULL });
+        if (!abs) continue; /* arquivo citado que não existe (será criado) */
+        char *rel = proj_relativo(abs);
+        g_free(abs);
+        if (g_hash_table_contains(k->lidos, rel)) { g_free(rel); continue; }
+        char *sha = NULL, *erro = NULL;
+        char *txt = proj_ler_texto(rel, CODING_MAX_BYTES_ARQUIVO, &sha, &erro);
+        char *m;
+        if (txt) {
+            guint linhas = 0;
+            for (const char *q = txt; *q; q++) if (*q == '\n') linhas++;
+            m = g_strdup_printf("li %s (%u linhas, sha256 %.12s)", rel, linhas, sha);
+            g_hash_table_insert(k->lidos, g_strdup(rel), txt);
+            g_hash_table_insert(k->shas, g_strdup(rel), sha);
+        } else {
+            m = g_strdup_printf("não li %s: %s", rel, erro);
+            g_free(sha);
+        }
+        coding_progresso(c, "inspecao", m);
+        g_free(m); g_free(erro); g_free(rel);
+    }
+    coding_propor(c);
+}
+
+static void ao_coding_plano(gpointer ctx, const ModeloResposta *r)
+{
+    CodCtx *x = ctx;
+    if (!codctx_valido(x)) { codctx_liberar(x); return; }
+    Cliente *c = x->c;
+    Coding *k = c->coding;
+    g_clear_pointer(&k->modelo_id, g_free);
+    char *erro = NULL;
+    k->plano = r->sucesso ? coding_ler_plano(r->resposta_texto, &erro) : NULL;
+    if (!k->plano) {
+        coding_progresso(c, "criterios", "o modelo não devolveu critérios utilizáveis; uso o critério mínimo (a validação precisa passar)");
+        k->plano = coding_plano_padrao(k->pedido);
+    }
+    g_free(erro);
+    coding_filtrar_criterios(k->plano, k->pedido);
+    /* os caminhos citados no pedido também são lidos */
+    char **cit = intencao_caminhos(k->pedido);
+    GPtrArray *todos = g_ptr_array_new();
+    for (int i = 0; k->plano->arquivos_para_ler && k->plano->arquivos_para_ler[i]; i++) g_ptr_array_add(todos, g_strdup(k->plano->arquivos_para_ler[i]));
+    for (int i = 0; cit[i]; i++) if (!g_strv_contains((const char *const *)k->plano->arquivos_para_ler, cit[i])) g_ptr_array_add(todos, g_strdup(cit[i]));
+    g_ptr_array_add(todos, NULL);
+    g_strfreev(k->plano->arquivos_para_ler);
+    k->plano->arquivos_para_ler = (char **)g_ptr_array_free(todos, FALSE);
+    g_strfreev(cit);
+    GString *m = g_string_new("critérios de aceite:");
+    for (guint i = 0; i < k->plano->criterios->len; i++)
+        g_string_append_printf(m, " (%u) %s;", i + 1, ((CodingCriterio *)g_ptr_array_index(k->plano->criterios, i))->descricao);
+    coding_progresso(c, "criterios", m->str);
+    g_string_free(m, TRUE);
+    coding_checkpoint(k, "inspecao");
+    coding_inspecionar(c);
+    codctx_liberar(x);
+}
+
+static void ao_coding_edicoes(gpointer ctx, const ModeloResposta *r)
+{
+    CodCtx *x = ctx;
+    if (!codctx_valido(x)) { codctx_liberar(x); return; }
+    Cliente *c = x->c;
+    Coding *k = c->coding;
+    g_clear_pointer(&k->modelo_id, g_free);
+    codctx_liberar(x);
+    if (!r->sucesso) {
+        char *mot = g_strdup_printf("o modelo não respondeu (%s)", r->erro_codigo ? r->erro_codigo : "erro");
+        coding_encerrar(c, mot);
+        g_free(mot);
+        return;
+    }
+    if (g_strcmp0(g_getenv("LIA_SESSIOND_DEPURAR_CODIGO"), "1") == 0)
+        g_print("lia-sessiond: [depuração] proposta bruta do modelo: %.4000s\n", r->resposta_texto ? r->resposta_texto : "(nenhuma)");
+    char *erro = NULL, *hash = NULL, *expl = NULL;
+    GPtrArray *arqs = coding_aplicar_edicoes(r->resposta_texto, k->lidos, k->shas, &hash, &expl, &erro);
+    if (!arqs) {
+        k->recusas_proposta++;
+        char *m = g_strdup_printf("proposta recusada pelo verificador: %s", erro);
+        coding_progresso(c, "proposta", m);
+        g_free(m);
+        if (k->recusas_proposta >= 2) {
+            char *mot = g_strdup_printf("o modelo não produziu uma proposta válida em duas tentativas (última: %s)", erro);
+            coding_encerrar(c, mot);
+            g_free(mot);
+        } else {
+            g_free(k->erro_proposta);
+            k->erro_proposta = erro;
+            erro = NULL;
+            coding_propor(c);
+        }
+        g_free(erro);
+        return;
+    }
+    /* repetição sem progresso: a mesma proposta já foi aplicada e não resolveu */
+    for (guint i = 0; i < k->propostas->len; i++)
+        if (!strcmp(g_ptr_array_index(k->propostas, i), hash)) {
+            g_ptr_array_unref(arqs);
+            g_free(hash); g_free(expl);
+            coding_encerrar(c, "repetição sem progresso: o modelo propôs exatamente a mesma alteração que já tinha sido aplicada e não resolveu");
+            return;
+        }
+    k->recusas_proposta = 0;
+    g_clear_pointer(&k->erro_proposta, g_free);
+    g_ptr_array_add(k->propostas, hash);
+    k->ciclo++;
+    /* cada arquivo vira UM passo de gravação, preso ao hash observado na leitura */
+    AgentePlano *p = agente_plano_novo(expl && *expl ? expl : "gravar a alteração de código proposta", "codigo_edicao");
+    for (guint i = 0; i < arqs->len; i++) {
+        CodingArquivo *a = g_ptr_array_index(arqs, i);
+        JsonObject *po = json_object_new();
+        json_object_set_string_member(po, "caminho", a->caminho);
+        json_object_set_string_member(po, "conteudo", a->conteudo);
+        if (a->existia) json_object_set_string_member(po, "sha256_esperado", a->sha_lido);
+        JsonNode *n = json_node_alloc();
+        json_node_init_object(n, po);
+        JsonGenerator *g = json_generator_new();
+        json_generator_set_root(g, n);
+        char *pj = json_generator_to_data(g, NULL);
+        g_object_unref(g);
+        json_node_unref(n);
+        json_object_unref(po);
+        char *obj = g_strdup_printf("%s %s", a->existia ? "regravar" : "criar", a->caminho);
+        agente_plano_acrescentar(p, NULL, a->existia ? "arquivo.escrever" : "arquivo.criar", pj, NULL, obj,
+                                 (const char *const[]){ "arquivo_alterado", NULL }, 0, FALSE);
+        g_free(obj);
+        g_free(pj);
+    }
+    p->criterios_sucesso = g_strdupv((char *[]){ (char *)"arquivo_alterado", NULL });
+    g_ptr_array_unref(arqs);
+    g_free(expl);
+    char *erro_plano = agente_plano_validar(p, &AG_MANIFESTO);
+    if (erro_plano) {
+        agente_plano_liberar(p);
+        char *mot = g_strdup_printf("a proposta não pôde virar um plano válido: %s", erro_plano);
+        g_free(erro_plano);
+        coding_encerrar(c, mot);
+        g_free(mot);
+        return;
+    }
+    k->estado = COD_AGUARDANDO_EDICAO;
+    char *m = g_strdup_printf("ciclo %d de %d: proposta pronta (%u arquivo(s)) — veja a prévia e aprove para gravar", k->ciclo, CODING_MAX_CICLOS, p->passos->len);
+    coding_progresso(c, "aprovacao_edicao", m);
+    g_free(m);
+    coding_checkpoint(k, "aprovacao_edicao");
+    tarefa_criar(c, NULL, p, k->pergunta_id, k->pedido);
+}
+
+static void coding_propor(Cliente *c)
+{
+    Coding *k = c->coding;
+    k->estado = COD_PROPONDO;
+    if (k->ciclo >= CODING_MAX_CICLOS) {
+        char *mot = g_strdup_printf("limite de %d ciclos de correção atingido sem a validação passar", CODING_MAX_CICLOS);
+        coding_encerrar(c, mot);
+        g_free(mot);
+        return;
+    }
+    char *praticas = NULL;
+    if (praticas_global()) {
+        GPtrArray *sel = praticas_selecionar(praticas_global(), k->pedido, NULL, 6, 2500);
+        if (sel->len) praticas = praticas_para_prompt(sel, 3000);
+        g_ptr_array_unref(sel);
+    }
+    char *prompt = coding_prompt_edicoes(k->pedido, k->plano->criterios, praticas, k->lidos, k->falha, k->erro_proposta, k->ciclo);
+    g_free(praticas);
+    k->modelo_id = g_strdup_printf("%s-edicao-%d-%d", k->id, k->ciclo + 1, k->recusas_proposta);
+    char *m = g_strdup_printf("pedindo ao modelo a %s (ciclo %d de %d)", k->ciclo ? "correção" : "alteração", k->ciclo + 1, CODING_MAX_CICLOS);
+    coding_progresso(c, "proposta", m);
+    g_free(m);
+    CodCtx *x = codctx_novo(c, k->modelo_id);
+    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = LIA_MODELO_TOKENS_CODIGO, .resumo = TRUE,
+                        .progresso_cb = ao_coding_tokens, .progresso_ctx = x };
+    g_modelo->perguntar(g_modelo, k->modelo_id, prompt, &op, ao_coding_edicoes, x);
+    g_free(prompt);
+}
+
+static void coding_validar(Cliente *c)
+{
+    Coding *k = c->coding;
+    g_free(k->comando);
+    k->comando = NULL;
+    char *padrao = validacao_comando_padrao();
+    if (k->plano->validacao) {
+        /* o nome sugerido pelo modelo só vale se existir na configuração */
+        JsonObject *po = json_object_new();
+        json_object_set_string_member(po, "comando", k->plano->validacao);
+        char *e = NULL;
+        char *pv = validacao_previa(po, &e);
+        if (pv) k->comando = g_strdup(k->plano->validacao);
+        g_free(pv); g_free(e);
+        json_object_unref(po);
+    }
+    if (!k->comando) k->comando = padrao ? g_strdup(padrao) : NULL;
+    g_free(padrao);
+    if (!k->comando) {
+        coding_encerrar(c, "não há comando de validação configurado (crie .lia/validacao.json ou um Makefile com alvo teste) — sem validação não declaro concluído");
+        return;
+    }
+    char *pj = g_strdup_printf("{\"comando\":\"%s\"}", k->comando); /* nome validado: [A-Za-z0-9_-] */
+    AgentePlano *p = agente_plano_novo("validar a alteração (build/testes) em isolamento", "codigo_validacao");
+    agente_plano_acrescentar(p, NULL, "validar.executar", pj, NULL, "rodar a validação depois da última edição",
+                             (const char *const[]){ "validacao_executada", NULL }, 0, FALSE);
+    g_free(pj);
+    p->criterios_sucesso = g_strdupv((char *[]){ (char *)"validacao_executada", NULL });
+    char *erro_plano = agente_plano_validar(p, &AG_MANIFESTO);
+    if (erro_plano) {
+        agente_plano_liberar(p);
+        const char *mot = strstr(erro_plano, "): ") ? strstr(erro_plano, "): ") + 3 : erro_plano;
+        char *m = g_strdup_printf("não foi possível validar: %s", mot);
+        g_free(erro_plano);
+        coding_encerrar(c, m);
+        g_free(m);
+        return;
+    }
+    k->estado = COD_AGUARDANDO_VALIDACAO;
+    char *m = g_strdup_printf("alteração gravada; agora a validação \"%s\" — veja o comando exato e aprove", k->comando);
+    coding_progresso(c, "validacao", m);
+    g_free(m);
+    coding_checkpoint(k, "validacao");
+    tarefa_criar(c, NULL, p, k->pergunta_id, k->pedido);
+}
+
+/* chamado por tarefa_finalizar para as tarefas do ciclo: decide a próxima etapa */
+static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
+{
+    Coding *k = c->coding;
+    if (!k || c->fechado || !g_str_has_prefix(t->plano->intencao, "codigo_")) return FALSE;
+    if (!strcmp(t->plano->intencao, "codigo_edicao")) {
+        guint gravados = 0;
+        const char *erro_passo = NULL;
+        for (guint i = 0; i < t->plano->passos->len; i++) {
+            AgentePasso *s = g_ptr_array_index(t->plano->passos, i);
+            if (s->estado != PASSO_SUCESSO || !s->dados_json) { if (!erro_passo) erro_passo = s->erro ? s->erro : "passo não concluído"; continue; }
+            JsonParser *jp = json_parser_new();
+            if (json_parser_load_from_data(jp, s->dados_json, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT) {
+                JsonObject *o = json_node_get_object(json_parser_get_root(jp));
+                const char *op = json_object_get_string_member_with_default(o, "operacao_id", NULL);
+                const char *df = json_object_get_string_member_with_default(o, "diff", "");
+                if (op) { g_ptr_array_add(k->operacoes, g_strdup(op)); gravados++; }
+                g_string_append(k->diffs, df);
+                if (*df && df[strlen(df) - 1] != '\n') g_string_append_c(k->diffs, '\n');
+            }
+            g_object_unref(jp);
+        }
+        if (gravados) { k->editou = TRUE; k->validou_depois = FALSE; k->passou = FALSE; }
+        /* os arquivos gravados passam a ser os "lidos" (conteúdo e hash novos) */
+        GList *chaves = g_hash_table_get_keys(k->shas);
+        for (guint i = 0; i < t->plano->passos->len; i++) {
+            AgentePasso *s = g_ptr_array_index(t->plano->passos, i);
+            JsonParser *jp = json_parser_new();
+            if (s->estado == PASSO_SUCESSO && json_parser_load_from_data(jp, s->parametros_json, -1, NULL)) {
+                const char *cam = json_object_get_string_member_with_default(json_node_get_object(json_parser_get_root(jp)), "caminho", NULL);
+                char *sha = NULL, *e = NULL;
+                char *txt = cam ? proj_ler_texto(cam, CODING_MAX_BYTES_ARQUIVO, &sha, &e) : NULL;
+                if (txt) { g_hash_table_insert(k->lidos, g_strdup(cam), txt); g_hash_table_insert(k->shas, g_strdup(cam), sha); }
+                else g_free(sha);
+                g_free(e);
+            }
+            g_object_unref(jp);
+        }
+        g_list_free(chaves);
+        if (erro_passo) {
+            char *mot = g_strdup_printf("a gravação não foi feita: %s", erro_passo);
+            coding_encerrar(c, mot);
+            g_free(mot);
+            return TRUE;
+        }
+        coding_validar(c);
+        return TRUE;
+    }
+    /* codigo_validacao */
+    AgentePasso *s = t->plano->passos->len ? g_ptr_array_index(t->plano->passos, 0) : NULL;
+    if (!s || s->estado != PASSO_SUCESSO || !s->dados_json) {
+        char *mot = g_strdup_printf("a validação não rodou: %s", s && s->erro ? s->erro : "falhou");
+        coding_encerrar(c, mot);
+        g_free(mot);
+        return TRUE;
+    }
+    g_free(k->validacao_json);
+    k->validacao_json = g_strdup(s->dados_json);
+    JsonParser *jp = json_parser_new();
+    gboolean passou = FALSE, interrompida = FALSE;
+    char *final = NULL, *sha_saida = NULL;
+    if (json_parser_load_from_data(jp, s->dados_json, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT) {
+        JsonObject *o = json_node_get_object(json_parser_get_root(jp));
+        passou = json_object_get_boolean_member_with_default(o, "passou", FALSE);
+        interrompida = json_object_get_boolean_member_with_default(o, "timeout", FALSE) || json_object_get_boolean_member_with_default(o, "cancelado", FALSE);
+        final = g_strdup_printf("%s%s", json_object_get_string_member_with_default(o, "final_erros", ""), json_object_get_string_member_with_default(o, "final_saida", ""));
+        sha_saida = g_strdup(json_object_get_string_member_with_default(o, "sha256_saida", ""));
+    }
+    g_object_unref(jp);
+    k->validou_depois = TRUE;
+    k->passou = passou;
+    if (passou) {
+        coding_progresso(c, "revisao", "a validação passou; conferindo os critérios de aceite e o diff");
+        coding_encerrar(c, NULL);
+    } else if (interrompida) {
+        coding_encerrar(c, "a validação foi interrompida (tempo esgotado ou cancelada)");
+    } else if (k->falha_sha && sha_saida && !strcmp(k->falha_sha, sha_saida)) {
+        coding_encerrar(c, "repetição sem progresso: a validação falhou exatamente do mesmo jeito depois da correção");
+    } else {
+        g_free(k->falha); k->falha = final; final = NULL;
+        g_free(k->falha_sha); k->falha_sha = sha_saida; sha_saida = NULL;
+        coding_progresso(c, "correcao", "a validação falhou; pedindo uma correção ao modelo com a saída do erro");
+        coding_checkpoint(k, "correcao");
+        coding_propor(c);
+    }
+    g_free(final);
+    g_free(sha_saida);
+    return TRUE;
+}
+
+static gboolean coding_apos_rejeicao(Cliente *c, Tarefa *t)
+{
+    if (!c->coding || !g_str_has_prefix(t->plano->intencao, "codigo_")) return FALSE;
+    coding_encerrar(c, !strcmp(t->plano->intencao, "codigo_validacao")
+                           ? "você recusou a execução da validação — a alteração ficou gravada, mas sem prova de que funciona"
+                           : "você recusou a gravação da proposta — nenhum arquivo foi alterado nesta etapa");
+    return TRUE;
+}
+
+/* cancelamento pela pessoa (/cancelar): guarda o checkpoint e encerra em
+ * silêncio (docs/protocolo.md §11.7: nada chega depois do cancelamento) */
+static void coding_cancelar(Cliente *c)
+{
+    Coding *k = c->coding;
+    if (!k) return;
+    if (k->modelo_id && g_modelo) g_modelo->cancelar(g_modelo, k->modelo_id);
+    coding_checkpoint(k, "cancelado");
+    g_print("lia-sessiond: coding %s: cancelado pela pessoa\n", k->id);
+    c->coding = NULL;
+    coding_liberar(k);
+}
+
+static Coding *coding_novo(const char *id, const char *pergunta_id, const char *pedido)
+{
+    Coding *k = g_new0(Coding, 1);
+    k->id = g_strdup(id);
+    k->pergunta_id = g_strdup(pergunta_id);
+    k->pedido = g_strdup(pedido);
+    k->lidos = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    k->shas = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    k->operacoes = g_ptr_array_new_with_free_func(g_free);
+    k->propostas = g_ptr_array_new_with_free_func(g_free);
+    k->diffs = g_string_new(NULL);
+    k->inicio_us = g_get_monotonic_time();
+    return k;
+}
+
+static void coding_ack(Cliente *c, const char *pergunta_id, const char *texto)
+{
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "pergunta_id"); json_builder_add_string_value(b, pergunta_id);
+    json_builder_set_member_name(b, "tipo_resposta"); json_builder_add_string_value(b, "codigo");
+    json_builder_set_member_name(b, "codigo"); json_builder_add_boolean_value(b, TRUE);
+    json_builder_set_member_name(b, "codigo_id"); json_builder_add_string_value(b, c->coding->id);
+    json_builder_set_member_name(b, "resposta_texto"); json_builder_add_string_value(b, texto);
+    json_builder_set_member_name(b, "ferramenta_proposta"); json_builder_add_null_value(b);
+    json_builder_set_member_name(b, "plano_proposto"); json_builder_add_null_value(b);
+    json_builder_set_member_name(b, "validacao");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "origem"); json_builder_add_string_value(b, "roteador");
+    json_builder_set_member_name(b, "veredito"); json_builder_add_string_value(b, "codigo");
+    json_builder_set_member_name(b, "motivo"); json_builder_add_string_value(b, "tarefa de código: cada gravação e cada execução pedem a sua aprovação");
+    json_builder_end_object(b);
+    json_builder_end_object(b);
+    char *id = lia_novo_id("msg");
+    char *linha = lia_msg_montar(LIA_MSG_PROPOSTA, id, NULL, b);
+    g_free(id);
+    g_object_unref(b);
+    escrever_linha(c, linha);
+}
+
+static void coding_iniciar(Cliente *c, const char *pergunta_id, const char *pedido)
+{
+    GDateTime *agora = g_date_time_new_now_local();
+    char *quando = g_date_time_format(agora, "%Y%m%d-%H%M%S");
+    char *id = g_strdup_printf("codigo-%s-%04x", quando, g_random_int_range(0, 0xffff));
+    g_free(quando);
+    g_date_time_unref(agora);
+    c->coding = coding_novo(id, pergunta_id, pedido);
+    g_free(id);
+    g_print("lia-sessiond: coding %s: iniciado (%s)\n", c->coding->id, pedido);
+    coding_ack(c, pergunta_id, "Tarefa de código: critérios de aceite → leitura dos arquivos → proposta → sua aprovação → validação → revisão.");
+    coding_checkpoint(c->coding, "criterios");
+    GString *lista = g_string_new(NULL);
+    char *erro = NULL;
+    char *js = proj_listar(".", TRUE, NULL, 300, FALSE, &erro);
+    JsonParser *jp = json_parser_new();
+    if (js && json_parser_load_from_data(jp, js, -1, NULL)) {
+        JsonArray *a = json_object_get_array_member(json_node_get_object(json_parser_get_root(jp)), "entradas");
+        for (guint i = 0; a && i < json_array_get_length(a); i++) {
+            JsonObject *e = json_array_get_object_element(a, i);
+            if (!g_strcmp0(json_object_get_string_member_with_default(e, "tipo", ""), "arquivo"))
+                g_string_append_printf(lista, "%s\n", json_object_get_string_member_with_default(e, "caminho", ""));
+        }
+    }
+    g_object_unref(jp);
+    g_free(js); g_free(erro);
+    char *prompt = coding_prompt_plano(pedido, lista->str);
+    g_string_free(lista, TRUE);
+    c->coding->modelo_id = g_strdup_printf("%s-plano", c->coding->id);
+    coding_progresso(c, "criterios", "definindo critérios de aceite e o que ler (modelo local)");
+    CodCtx *x = codctx_novo(c, c->coding->modelo_id);
+    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = 500, .resumo = TRUE, .progresso_cb = NULL };
+    g_modelo->perguntar(g_modelo, c->coding->modelo_id, prompt, &op, ao_coding_plano, x);
+    g_free(prompt);
+}
+
+/* "retome a tarefa de código <id>": recarrega o checkpoint, relê os arquivos
+ * (hash novo) e continua da validação, se houve edição sem validação depois,
+ * ou de uma nova proposta */
+static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id)
+{
+    char *erro = NULL;
+    JsonObject *o = coding_carregar_checkpoint(id, &erro);
+    if (!o || g_strcmp0(json_object_get_string_member_with_default(o, "raiz", ""), proj_raiz())) {
+        char *txt = o ? g_strdup_printf("O checkpoint %s é de outro projeto (%s); não retomo.", id, json_object_get_string_member_with_default(o, "raiz", "?"))
+                      : g_strdup_printf("Não encontrei o checkpoint: %s", erro ? erro : id);
+        enviar_proposta_tarefa(c, pergunta_id, NULL, COMPAT_INEXISTENTE, txt, "roteador", "rejeitada", txt, 0, 0);
+        g_free(txt); g_free(erro);
+        if (o) json_object_unref(o);
+        return;
+    }
+    if (!g_strcmp0(json_object_get_string_member_with_default(o, "estado", ""), "concluido")) {
+        char *txt = g_strdup_printf("A tarefa de código %s já foi concluída (validação passou depois da última edição).", id);
+        enviar_proposta_tarefa(c, pergunta_id, NULL, COMPAT_COMPATIVEL, txt, "roteador", "aceita", txt, 0, 0);
+        g_free(txt);
+        json_object_unref(o);
+        return;
+    }
+    c->coding = coding_novo(id, pergunta_id, json_object_get_string_member_with_default(o, "pedido", ""));
+    Coding *k = c->coding;
+    k->ciclo = (int)json_object_get_int_member_with_default(o, "ciclo", 0);
+    k->editou = json_object_get_boolean_member_with_default(o, "editou", FALSE);
+    k->plano = g_new0(CodingPlano, 1);
+    k->plano->criterios = g_ptr_array_new_with_free_func(g_free);
+    g_ptr_array_set_free_func(k->plano->criterios, NULL);
+    /* critérios: reconstruídos pelo leitor do modelo (mesma validação) */
+    JsonNode *cr = json_object_get_member(o, "criterios");
+    JsonObject *emb = json_object_new();
+    json_object_set_member(emb, "criterios", cr ? json_node_copy(cr) : json_node_new(JSON_NODE_ARRAY));
+    JsonNode *en = json_node_alloc();
+    json_node_init_object(en, emb);
+    JsonGenerator *g = json_generator_new();
+    json_generator_set_root(g, en);
+    char *ct = json_generator_to_data(g, NULL);
+    g_object_unref(g);
+    json_node_unref(en);
+    json_object_unref(emb);
+    char *e2 = NULL;
+    CodingPlano *lido = coding_ler_plano(ct, &e2);
+    g_free(ct); g_free(e2);
+    g_ptr_array_unref(k->plano->criterios);
+    g_free(k->plano);
+    k->plano = lido ? lido : coding_plano_padrao(k->pedido);
+    coding_filtrar_criterios(k->plano, k->pedido);
+    if (json_object_has_member(o, "comando_validacao")) k->plano->validacao = g_strdup(json_object_get_string_member(o, "comando_validacao"));
+    JsonObject *shas = json_object_get_object_member(o, "arquivos_lidos_sha256");
+    GPtrArray *ler = g_ptr_array_new();
+    if (shas) { GList *ks = json_object_get_members(shas); for (GList *it = ks; it; it = it->next) g_ptr_array_add(ler, g_strdup(it->data)); g_list_free(ks); }
+    g_ptr_array_add(ler, NULL);
+    g_strfreev(k->plano->arquivos_para_ler);
+    k->plano->arquivos_para_ler = (char **)g_ptr_array_free(ler, FALSE);
+    JsonArray *ops = json_object_get_array_member(o, "operacoes");
+    for (guint i = 0; ops && i < json_array_get_length(ops); i++) g_ptr_array_add(k->operacoes, g_strdup(json_array_get_string_element(ops, i)));
+    JsonArray *pp = json_object_get_array_member(o, "propostas_sha256");
+    for (guint i = 0; pp && i < json_array_get_length(pp); i++) g_ptr_array_add(k->propostas, g_strdup(json_array_get_string_element(pp, i)));
+    g_string_append(k->diffs, k->editou ? "(alterações gravadas antes da retomada; veja-as com \"mostre o diff\")\n" : "");
+    /* com edição gravada, a retomada sempre valida de novo: o projeto pode
+     * ter mudado desde o checkpoint, e a prova precisa ser de agora */
+    gboolean validar = k->editou;
+    coding_ack(c, pergunta_id, "Retomando a tarefa de código a partir do checkpoint.");
+    char *m = g_strdup_printf("retomando %s: ciclo %d, %u gravação(ões) anteriores; próxima etapa: %s", id, k->ciclo, k->operacoes->len,
+                              validar ? "validação" : "nova proposta");
+    coding_progresso(c, "retomada", m);
+    g_free(m);
+    /* relê os arquivos (hash novo), avisando o que mudou desde o checkpoint */
+    for (int i = 0; k->plano->arquivos_para_ler[i]; i++) {
+        const char *rel = k->plano->arquivos_para_ler[i];
+        char *sha = NULL, *er = NULL;
+        char *txt = proj_ler_texto(rel, CODING_MAX_BYTES_ARQUIVO, &sha, &er);
+        if (txt) {
+            const char *antigo = json_object_get_string_member_with_default(shas, rel, "");
+            if (strcmp(antigo, sha)) { char *aviso = g_strdup_printf("%s mudou desde o checkpoint (relido)", rel); coding_progresso(c, "retomada", aviso); g_free(aviso); }
+            g_hash_table_insert(k->lidos, g_strdup(rel), txt);
+            g_hash_table_insert(k->shas, g_strdup(rel), sha);
+        } else {
+            g_free(sha);
+        }
+        g_free(er);
+    }
+    json_object_unref(o);
+    if (validar) coding_validar(c);
+    else coding_propor(c);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -3337,8 +4240,11 @@ int main(int argc, char **argv)
      * Duas arenas bastam para este daemon (laço principal + executor). */
     mallopt(M_ARENA_MAX, 2);
     if (!g_getenv("LIA_SESSIOND_SEM_RLIMIT_PARA_TESTE")) {
+        /* limite rígido maior que o do daemon: os processos de build/teste
+         * (projeto/processo.c) recebem o PRÓPRIO limite explícito
+         * (PROC_MEMORIA_PADRAO_MB), que não pode passar do rígido */
         struct rlimit rl = { .rlim_cur = (rlim_t)LIA_SESSIOND_RLIMIT_AS_MB * 1024 * 1024,
-                              .rlim_max = (rlim_t)LIA_SESSIOND_RLIMIT_AS_MB * 1024 * 1024 };
+                              .rlim_max = (rlim_t)PROC_MEMORIA_PADRAO_MB * 1024 * 1024 };
         if (setrlimit(RLIMIT_AS, &rl) != 0)
             g_printerr("lia-sessiond: aviso: não foi possível aplicar RLIMIT_AS: %s\n", g_strerror(errno));
     }
@@ -3374,9 +4280,14 @@ int main(int argc, char **argv)
     const char *projeto = g_getenv("LIA_SESSIOND_PROJETO");
     if (projeto && *projeto) {
         char *erro_proj = NULL;
-        if (proj_definir_raiz(projeto, &erro_proj))
+        if (proj_definir_raiz(projeto, &erro_proj)) {
             g_print("lia-sessiond: projeto: %s (leitura livre; criar/editar/apagar/mover só com aprovação e prévia; nunca .git/ nem fora dele)\n", proj_raiz());
-        else
+            char *det_iso = NULL;
+            gboolean iso = proc_isolamento_disponivel(&det_iso);
+            g_print("lia-sessiond: execução de build/testes e Git: %s — %s\n", iso ? "isolada" : "DESLIGADA", det_iso);
+            g_free(det_iso);
+            git_definir_autor(g_getenv("LIA_SESSIOND_GIT_AUTOR"));
+        } else
             g_print("lia-sessiond: projeto RECUSADO: %s — ferramentas de arquivo desligadas\n", erro_proj);
         g_free(erro_proj);
     } else {

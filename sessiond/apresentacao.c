@@ -389,6 +389,99 @@ static void render_praticas(GString *out, JsonObject *d)
     }
 }
 
+static gboolean booleano(JsonObject *o, const char *k)
+{
+    return o && json_object_has_member(o, k) && JSON_NODE_TYPE(json_object_get_member(o, k)) == JSON_NODE_VALUE &&
+           json_node_get_value_type(json_object_get_member(o, k)) == G_TYPE_BOOLEAN && json_object_get_boolean_member(o, k);
+}
+
+static void render_validacao(GString *out, const char *f, JsonObject *d)
+{
+    if (!strcmp(f, "validar.listar")) {
+        JsonObject *iso = objeto(d, "isolamento");
+        g_string_append_printf(out, "Isolamento: %s — ", booleano(iso, "disponivel") ? "disponível" : "INDISPONÍVEL (nada é executado)");
+        anexar_codigo(out, texto(iso, "detalhe", "?"));
+        g_string_append(out, "\nComandos de validação (origem: ");
+        anexar_codigo(out, texto(d, "origem", "?"));
+        g_string_append(out, "):\n");
+        JsonArray *a = lista(d, "comandos");
+        for (guint i = 0; a && i < json_array_get_length(a); i++) {
+            JsonObject *c = json_array_get_object_element(a, i);
+            g_string_append(out, "  ");
+            anexar_codigo(out, texto(c, "nome", "?"));
+            g_string_append(out, ": ");
+            JsonArray *av = lista(c, "argv");
+            for (guint k = 0; av && k < json_array_get_length(av); k++) { if (k) g_string_append_c(out, ' '); anexar_codigo(out, json_array_get_string_element(av, k)); }
+            if (booleano(c, "permitido")) g_string_append_printf(out, "  (tempo máx. %" G_GINT64_FORMAT " s)\n", inteiro(c, "timeout_segundos", 0));
+            else { g_string_append(out, "  — RECUSADO: "); anexar_codigo(out, texto(c, "motivo", "?")); g_string_append_c(out, '\n'); }
+        }
+        if (!a || !json_array_get_length(a)) g_string_append(out, "  (nenhum)\n");
+        return;
+    }
+    gboolean passou = booleano(d, "passou");
+    g_string_append_printf(out, "%s validação \"", passou ? "✓" : "✗");
+    anexar_codigo(out, texto(d, "comando", "?"));
+    g_string_append(out, "\" (");
+    JsonArray *av = lista(d, "argv");
+    for (guint k = 0; av && k < json_array_get_length(av); k++) { if (k) g_string_append_c(out, ' '); anexar_codigo(out, json_array_get_string_element(av, k)); }
+    gint64 ms = inteiro(d, "tempo_ms", 0);
+    g_string_append_printf(out, ") %s em %" G_GINT64_FORMAT ",%01" G_GINT64_FORMAT " s", passou ? "passou" : "FALHOU", ms / 1000, (ms % 1000) / 100);
+    if (booleano(d, "timeout")) g_string_append(out, " — tempo esgotado, processo encerrado");
+    else if (booleano(d, "cancelado")) g_string_append(out, " — cancelado, processo encerrado");
+    else if (inteiro(d, "sinal", 0)) g_string_append_printf(out, " — encerrado pelo sinal %" G_GINT64_FORMAT, inteiro(d, "sinal", 0));
+    else g_string_append_printf(out, " — código de saída %" G_GINT64_FORMAT, inteiro(d, "codigo_saida", 0));
+    g_string_append_c(out, '\n');
+    const char *fe = texto(d, "final_erros", ""), *fo = texto(d, "final_saida", "");
+    if (*fe) { g_string_append(out, "  últimas linhas de erro:\n"); anexar_codigo(out, fe); if (fe[strlen(fe) - 1] != '\n') g_string_append_c(out, '\n'); }
+    if (*fo) { g_string_append(out, "  últimas linhas da saída:\n"); anexar_codigo(out, fo); if (fo[strlen(fo) - 1] != '\n') g_string_append_c(out, '\n'); }
+    if (booleano(d, "saida_truncada") || booleano(d, "erros_truncados")) g_string_append(out, "  (saída cortada no limite de 256 KiB por fluxo)\n");
+}
+
+static void render_git(GString *out, const char *f, JsonObject *d)
+{
+    if (!strcmp(f, "git.status")) {
+        g_string_append(out, "Ramo: ");
+        anexar_codigo(out, texto(d, "ramo", "?"));
+        g_string_append_c(out, '\n');
+        JsonArray *a = lista(d, "arquivos");
+        if (!a || !json_array_get_length(a)) { g_string_append(out, "Árvore limpa: nada alterado.\n"); return; }
+        for (guint i = 0; i < json_array_get_length(a); i++) {
+            JsonObject *o = json_array_get_object_element(a, i);
+            g_string_append(out, "  ");
+            anexar_codigo(out, texto(o, "estado", "??"));
+            g_string_append_c(out, ' ');
+            anexar_codigo(out, texto(o, "caminho", "?"));
+            g_string_append_c(out, '\n');
+        }
+        g_string_append(out, "  (M modificado, A adicionado, D removido, ?? não rastreado; 1ª coluna = preparado, 2ª = na pasta)\n");
+    } else if (!strcmp(f, "git.diff")) {
+        const char *df = texto(d, "diff", "");
+        if (!*df) g_string_append(out, "Nenhuma alteração.\n");
+        else { anexar_codigo(out, df); if (df[strlen(df) - 1] != '\n') g_string_append_c(out, '\n'); }
+        if (booleano(d, "truncado")) g_string_append(out, "… (diff cortado no limite)\n");
+    } else if (!strcmp(f, "git.log")) {
+        JsonArray *a = lista(d, "commits");
+        if (!a || !json_array_get_length(a)) { g_string_append(out, "Nenhum commit ainda.\n"); return; }
+        for (guint i = 0; i < json_array_get_length(a); i++) {
+            JsonObject *o = json_array_get_object_element(a, i);
+            g_string_append_printf(out, "  %.10s  %.10s  ", texto(o, "commit", "?"), texto(o, "data", "?"));
+            anexar_codigo(out, texto(o, "assunto", ""));
+            g_string_append(out, "  — ");
+            anexar_codigo(out, texto(o, "autor", ""));
+            g_string_append_c(out, '\n');
+        }
+    } else if (!strcmp(f, "git.commit")) {
+        g_string_append_printf(out, "✓ commit %.12s no ramo ", texto(d, "commit", "?"));
+        anexar_codigo(out, texto(d, "ramo", "?"));
+        g_string_append(out, ": ");
+        anexar_codigo(out, texto(d, "mensagem", ""));
+        g_string_append_c(out, '\n');
+        JsonArray *a = lista(d, "arquivos");
+        for (guint i = 0; a && i < json_array_get_length(a); i++) { g_string_append(out, "  "); anexar_codigo(out, json_array_get_string_element(a, i)); g_string_append_c(out, '\n'); }
+        g_string_append(out, "  (commit local; nada foi enviado — não existe push)\n");
+    }
+}
+
 static void render_web(GString *out, JsonObject *d)
 {
     JsonArray *arr = lista(d, "resultados");
@@ -499,6 +592,10 @@ char *apresentacao_renderizar(const char *ferramenta, const char *dados_json, gb
             render_arquivo(out, f, json_node_get_object(carga));
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT && strcmp(f, "praticas.consultar") == 0)
             render_praticas(out, json_node_get_object(carga));
+        else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT && g_str_has_prefix(f, "validar."))
+            render_validacao(out, f, json_node_get_object(carga));
+        else if (JSON_NODE_TYPE(carga) == JSON_NODE_OBJECT && g_str_has_prefix(f, "git."))
+            render_git(out, f, json_node_get_object(carga));
         else if (JSON_NODE_TYPE(carga) == JSON_NODE_VALUE && json_node_get_value_type(carga) == G_TYPE_STRING) {
             for (const char *q = json_node_get_string(carga); *q; q++) /* texto humano da ferramenta: tira controle, mantém \n e \t */
                 g_string_append_c(out, ((unsigned char)*q < 0x20 && *q != '\n' && *q != '\t') || *q == 0x7f ? '?' : *q);
@@ -821,6 +918,31 @@ char *apresentacao_frase(const char *ferramenta, const char *dados_json)
         if (pci) g_string_append_printf(out, "Existem %u dispositivos PCI, listados acima com fabricante e identificador.", pci);
         g_string_free(nomes_rede, TRUE);
         g_string_free(nomes_bloco, TRUE);
+    } else if (d && !strcmp(f, "validar.executar")) {
+        gboolean passou = booleano(d, "passou");
+        g_string_append_printf(out, "A validação \"%s\" %s", texto(d, "comando", "?"), passou ? "passou" : "falhou");
+        if (booleano(d, "timeout")) g_string_append(out, " por tempo esgotado");
+        else if (booleano(d, "cancelado")) g_string_append(out, " (cancelada)");
+        else g_string_append_printf(out, " (código de saída %" G_GINT64_FORMAT ")", inteiro(d, "codigo_saida", 0));
+        g_string_append(out, passou ? "; a saída está acima." : "; as últimas linhas de erro estão acima.");
+    } else if (d && !strcmp(f, "validar.listar")) {
+        JsonArray *a = lista(d, "comandos");
+        g_string_append_printf(out, "Há %u comando(s) de validação; o isolamento está %s.", a ? json_array_get_length(a) : 0,
+                               booleano(objeto(d, "isolamento"), "disponivel") ? "disponível" : "indisponível (nada é executado)");
+    } else if (d && !strcmp(f, "git.status")) {
+        JsonArray *a = lista(d, "arquivos");
+        guint n = a ? json_array_get_length(a) : 0;
+        if (!n) g_string_append_printf(out, "O ramo %s está limpo.", texto(d, "ramo", "?"));
+        else g_string_append_printf(out, "No ramo %s há %u arquivo(s) com alterações (listados acima).", texto(d, "ramo", "?"), n);
+    } else if (d && !strcmp(f, "git.diff")) {
+        g_string_append(out, *texto(d, "diff", "") ? "As alterações ainda não commitadas estão acima." : "Não há alterações ainda não commitadas.");
+    } else if (d && !strcmp(f, "git.log")) {
+        JsonArray *a = lista(d, "commits");
+        g_string_append_printf(out, "Mostrei os últimos %u commit(s).", a ? json_array_get_length(a) : 0);
+    } else if (d && !strcmp(f, "git.commit")) {
+        JsonArray *a = lista(d, "arquivos");
+        g_string_append_printf(out, "Commit %.12s criado no ramo %s com %u arquivo(s). Foi só local: nada foi enviado.", texto(d, "commit", "?"),
+                               texto(d, "ramo", "?"), a ? json_array_get_length(a) : 0);
     } else if (d && strcmp(f, "praticas.consultar") == 0) {
         JsonArray *a = lista(d, "praticas");
         guint n = a ? json_array_get_length(a) : 0;
@@ -877,7 +999,8 @@ RespostaModo apresentacao_modo_resposta(const char *ferramenta)
     const char *f = ferramenta ? ferramenta : "";
     if (e_ranking(f) || strcmp(f, "sistema.dispositivos") == 0)
         return RESPOSTA_DETERMINISTICA;
-    if (strcmp(f, "web.pesquisar") == 0 || strcmp(f, "web.abrir") == 0 || g_str_has_prefix(f, "arquivo.") || strcmp(f, "praticas.consultar") == 0)
+    if (strcmp(f, "web.pesquisar") == 0 || strcmp(f, "web.abrir") == 0 || g_str_has_prefix(f, "arquivo.") || strcmp(f, "praticas.consultar") == 0 ||
+        g_str_has_prefix(f, "validar.") || g_str_has_prefix(f, "git."))
         return RESPOSTA_DETERMINISTICA;
     if (strcmp(f, "sistema.recursos") == 0 || strcmp(f, "sistema.diagnosticar") == 0)
         return RESPOSTA_EXTRATIVA;

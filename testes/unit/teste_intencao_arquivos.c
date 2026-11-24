@@ -121,6 +121,19 @@ int main(void)
     espera("torne deploy.sh executável", "arquivo.permissoes", P("caminho", "deploy.sh", "executavel", "true"));
     espera("desfaça a operação 20261123-204201-a1b2c3", "arquivo.desfazer", P("operacao_id", "20261123-204201-a1b2c3"));
 
+    /* validação e Git */
+    espera("rode os testes", "validar.executar", P(NULL));
+    espera("compile o projeto", "validar.executar", P("comando", "build"));
+    espera("rode a validação \"lint\"", "validar.executar", P("comando", "lint"));
+    espera("quais os comandos de validação do projeto?", "validar.listar", P(NULL));
+    espera("git status", "git.status", P(NULL));
+    espera("quais arquivos alterados no repositório?", "git.status", P(NULL));
+    espera("mostre o diff de src/main.c", "git.diff", P("caminho", "src/main.c"));
+    espera("mostre os 5 últimos commits", "git.log", P("limite", "5"));
+    espera("qual foi o último commit?", "git.log", P("limite", "1"));
+    espera("faça commit de src/main.c com a mensagem \"Corrige o cálculo\"", "git.commit", P("mensagem", "Corrige o cálculo"));
+    pergunta("faça um commit", "mensagem do commit");
+
     /* esclarecimentos */
     pergunta("apague o arquivo", "Qual arquivo");
     pergunta("renomeie o arquivo main.c", "origem e do destino");
@@ -138,6 +151,8 @@ int main(void)
     nada("crie um programa em C que soma dois números"); /* sem caminho: geração de código, não deste planejador */
     nada("oi, tudo bem?");
     nada("quanto é 2+2?");
+    nada("o que mudou na versão 3 do python?");
+    nada("compile uma lista de livros sobre história");
 
     printf("\n%d testes, %d falhas\n", total, falhas);
     return falhas ? 1 : 0;

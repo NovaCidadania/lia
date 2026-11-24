@@ -7,6 +7,9 @@ static const char *const CAP_REDE[] = { "rede", NULL };
 static const char *const CAP_LER_PROJETO[] = { "leitura_arquivo", NULL };
 static const char *const CAP_ESCREVER_PROJETO[] = { "escrita_projeto", NULL };
 static const char *const EOLS[] = { "LF", "CRLF", "CR", NULL };
+static const char *const CAP_EXECUTAR_PROJETO[] = { "execucao_projeto", NULL };
+static const char *const CAP_LER_GIT[] = { "leitura_arquivo", "processo", NULL };
+static const char *const CAP_COMMIT[] = { "escrita_projeto", "processo", NULL };
 
 static const char *const ESTADOS_TOOLS[] = {
     "DISCOVERED", "ACCESSIBLE", "PROBE_SUCCESS", "PROBE_FAILED",
@@ -139,6 +142,25 @@ static const ParametroManifesto PARAM_PRATICAS[] = {
     { .nome = "tarefa", .tipo = PARAM_STRING, .obrigatorio = TRUE },
     { .nome = "linguagem", .tipo = PARAM_STRING },
     { .nome = "limite", .tipo = PARAM_INTEIRO, .min = 1, .max = 12 },
+    { .nome = NULL },
+};
+
+static const ParametroManifesto PARAM_VALIDAR[] = {
+    { .nome = "comando", .tipo = PARAM_STRING },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_GIT_DIFF[] = {
+    { .nome = "caminho", .tipo = PARAM_STRING },
+    { .nome = "preparado", .tipo = PARAM_BOOLEANO },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_GIT_LOG[] = {
+    { .nome = "limite", .tipo = PARAM_INTEIRO, .min = 1, .max = 100 },
+    { .nome = NULL },
+};
+static const ParametroManifesto PARAM_GIT_COMMIT[] = {
+    { .nome = "mensagem", .tipo = PARAM_STRING, .obrigatorio = TRUE },
+    { .nome = "arquivos", .tipo = PARAM_LISTA_TEXTO, .max = 200 },
     { .nome = NULL },
 };
 
@@ -500,6 +522,67 @@ static const ManifestoReal TABELA[] = {
         },
         .parametros = PARAM_PRATICAS,
     },
+    {
+        .base = {
+            .nome = "validar.listar", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_PROJETO,
+            .efeitos = "lê a configuração de validação do projeto (.lia/validacao.json ou Makefile) e confere o isolamento; não executa nada",
+            .timeout_padrao_ms = 15000, .somente_leitura = TRUE,
+            .uso = "listar os comandos de build/teste do projeto e se o isolamento para executá-los está disponível",
+        },
+        .parametros = PARAM_VAZIO,
+    },
+    {
+        .base = {
+            .nome = "validar.executar", .risco = "alto", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "nao", .capacidades = CAP_EXECUTAR_PROJETO,
+            .efeitos = "executa um comando de build/teste configurado (que roda código do próprio projeto) em isolamento: sem rede, sem /home, "
+                       "ambiente limpo, só o projeto gravável e .git/ somente leitura, com limites de tempo, memória e saída",
+            .timeout_padrao_ms = 1800000, .somente_leitura = FALSE,
+            .uso = "rodar o build ou os testes do projeto (parâmetro comando: teste, build...); exige aprovação a cada execução",
+        },
+        .parametros = PARAM_VALIDAR,
+    },
+    {
+        .base = {
+            .nome = "git.status", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_GIT,
+            .efeitos = "roda git status em isolamento com o projeto somente leitura e a configuração do Git controlada; não grava nada",
+            .timeout_padrao_ms = 70000, .somente_leitura = TRUE,
+            .uso = "ver o ramo atual e os arquivos alterados, preparados e não rastreados",
+        },
+        .parametros = PARAM_VAZIO,
+    },
+    {
+        .base = {
+            .nome = "git.diff", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_GIT,
+            .efeitos = "roda git diff (sem diff externo nem textconv) em isolamento, projeto somente leitura; não grava nada",
+            .timeout_padrao_ms = 70000, .somente_leitura = TRUE,
+            .uso = "ver as alterações ainda não commitadas (caminho opcional; preparado=true para o que já está no índice)",
+        },
+        .parametros = PARAM_GIT_DIFF,
+    },
+    {
+        .base = {
+            .nome = "git.log", .risco = "nenhum", .requer_aprovacao = FALSE,
+            .versao = "0.1.0", .idempotente = TRUE, .reversivel = "nao_aplicavel", .capacidades = CAP_LER_GIT,
+            .efeitos = "roda git log em isolamento, projeto somente leitura; não grava nada",
+            .timeout_padrao_ms = 70000, .somente_leitura = TRUE,
+            .uso = "ver os últimos commits (limite 1..100)",
+        },
+        .parametros = PARAM_GIT_LOG,
+    },
+    {
+        .base = {
+            .nome = "git.commit", .risco = "medio", .requer_aprovacao = TRUE,
+            .versao = "0.1.0", .idempotente = FALSE, .reversivel = "nao", .capacidades = CAP_COMMIT,
+            .efeitos = "cria um commit local só com os arquivos mostrados na prévia (ganchos desativados, sem assinatura, sem push), em isolamento",
+            .timeout_padrao_ms = 130000, .somente_leitura = FALSE,
+            .uso = "fazer commit local com mensagem e lista de arquivos (sem lista: todos os alterados, mostrados um a um); exige aprovação; nunca faz push",
+        },
+        .parametros = PARAM_GIT_COMMIT,
+    },
 };
 #define N_TABELA (sizeof(TABELA) / sizeof(TABELA[0]))
 
@@ -548,12 +631,30 @@ char *manifesto_real_validar_parametros(const ManifestoReal *m, JsonObject *para
             return g_strdup_printf("parâmetro desconhecido: '%s'", chave);
         }
         JsonNode *n = json_object_get_member(parametros, chave);
+        if (p->tipo == PARAM_LISTA_TEXTO) {
+            gint64 max = p->max > 0 ? p->max : 200;
+            if (JSON_NODE_TYPE(n) != JSON_NODE_ARRAY || json_array_get_length(json_node_get_array(n)) > (guint)max) {
+                g_list_free(chaves);
+                return g_strdup_printf("parâmetro '%s': esperada lista de até %" G_GINT64_FORMAT " textos", chave, max);
+            }
+            JsonArray *a = json_node_get_array(n);
+            for (guint i = 0; i < json_array_get_length(a); i++) {
+                JsonNode *e = json_array_get_element(a, i);
+                if (JSON_NODE_TYPE(e) != JSON_NODE_VALUE || json_node_get_value_type(e) != G_TYPE_STRING) {
+                    g_list_free(chaves);
+                    return g_strdup_printf("parâmetro '%s': item %u não é texto", chave, i + 1);
+                }
+            }
+            continue;
+        }
         if (JSON_NODE_TYPE(n) != JSON_NODE_VALUE) {
             g_list_free(chaves);
             return g_strdup_printf("parâmetro '%s': tipo inválido", chave);
         }
         GType tipo_json = json_node_get_value_type(n);
         switch (p->tipo) {
+        case PARAM_LISTA_TEXTO: /* tratado antes do switch */
+            break;
         case PARAM_BOOLEANO:
             if (tipo_json != G_TYPE_BOOLEAN) {
                 g_list_free(chaves);

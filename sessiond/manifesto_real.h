@@ -18,6 +18,7 @@ typedef enum {
     PARAM_BOOLEANO,
     PARAM_ENUM,
     PARAM_INTEIRO,
+    PARAM_LISTA_TEXTO, /* lista de textos (até 'max' itens, padrão 200) */
 } ParametroTipo;
 
 typedef struct {

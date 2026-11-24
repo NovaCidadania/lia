@@ -2,6 +2,7 @@
 #include "intencao_arquivos.h"
 
 #include <json-glib/json-glib.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define L(...) ((const char *const[]){ __VA_ARGS__, NULL })
@@ -324,6 +325,90 @@ AgentePlano *agente_planejar_arquivos(const char *pedido, char **texto_direto)
     char *bloco = bloco_de_codigo(pedido, NULL, NULL);
 
     if (web) goto fim;
+
+    /* ---- validação: build e testes (sempre com aprovação, em isolamento) ---- */
+    gboolean de_codigo = fala_de_arquivo || ncam > 0 || tem(t, L(" codigo", " programa", " make ", " build", " teste"));
+    if (tem(t, L(" rode os testes", " rodar os testes", " roda os testes", " execute os testes", " executar os testes", " rode o teste",
+                 " rode a validacao", " rodar a validacao", " valide o projeto", " compile o projeto", " compilar o projeto",
+                 " rode o build", " rodar o build", " faca o build", " make teste", " make test", " rode o make", " passa nos testes")) ||
+        (tem(t, L(" compile ", " compilar ")) && de_codigo)) {
+        const char *cmd = tem(t, L(" compile", " compilar", " build", " rode o make ")) && !tem(t, L(" teste")) ? "build" : NULL;
+        /* nome explícito entre aspas: rode a validação "lint" */
+        if (ncit >= 1) cmd = cit[0];
+        char *pj = json_params("comando", cmd, NULL, NULL, NULL, NULL);
+        char *obj = g_strdup_printf("rodar a validação %s%s%s do projeto em isolamento", cmd ? "\"" : "padrão", cmd ? cmd : "", cmd ? "\"" : "");
+        p = plano_um_passo(obj, "validar", "validar.executar", pj, "validacao_executada");
+        g_free(obj);
+        goto fim;
+    }
+    if (tem(t, L(" comandos de validacao", " como rodar os testes", " como compilar", " quais testes", " comandos de teste", " comandos de build"))) {
+        p = plano_um_passo("listar os comandos de validação do projeto", "validar", "validar.listar", g_strdup("{}"), "validacao_listada");
+        goto fim;
+    }
+
+    /* ---- Git: consultas e commit ---- */
+    gboolean fala_git = tem(t, L(" git ", " commit", " commite", " ramo", " branch", " historico", " repositorio"));
+    if (tem(t, L(" faca commit", " faca um commit", " fazer commit", " fazer um commit", " commite ", " commitar ", " de commit", " git commit"))) {
+        const char *msg = NULL;
+        /* a mensagem é o trecho citado que não é caminho */
+        for (guint i = 0; i < ncit && !msg; i++) {
+            gboolean e_caminho = FALSE;
+            for (guint k = 0; k < ncam; k++) if (!strcmp(cam[k], cit[i])) e_caminho = TRUE;
+            if (!e_caminho) msg = cit[i];
+        }
+        if (!msg) { falta = "Qual a mensagem do commit? Por exemplo: faça commit de src/main.c com a mensagem \"Corrige o cálculo\". Sem lista de arquivos, entram todos os alterados (mostrados antes de você aprovar)."; goto fim; }
+        JsonBuilder *b = json_builder_new();
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "mensagem");
+        json_builder_add_string_value(b, msg);
+        guint n_arq = 0;
+        for (guint k = 0; k < ncam; k++) if (strcmp(cam[k], msg)) n_arq++;
+        if (n_arq) {
+            json_builder_set_member_name(b, "arquivos");
+            json_builder_begin_array(b);
+            for (guint k = 0; k < ncam; k++) if (strcmp(cam[k], msg)) json_builder_add_string_value(b, cam[k]);
+            json_builder_end_array(b);
+        }
+        json_builder_end_object(b);
+        JsonGenerator *g = json_generator_new();
+        JsonNode *raiz = json_builder_get_root(b);
+        json_generator_set_root(g, raiz);
+        char *pj = json_generator_to_data(g, NULL);
+        json_node_unref(raiz);
+        g_object_unref(g);
+        g_object_unref(b);
+        p = plano_um_passo("fazer um commit local (sem push) com os arquivos mostrados na prévia", "git_commit", "git.commit", pj, "commit_criado");
+        goto fim;
+    }
+    if (tem(t, L(" git status", " status do git", " status do repositorio", " arquivos alterados", " arquivos modificados",
+                 " em que ramo", " qual ramo", " qual branch")) ||
+        ((fala_git || fala_de_arquivo) && tem(t, L(" o que mudou", " o que foi alterado")) && !ncam)) {
+        p = plano_um_passo("ver o status do Git", "git_ler", "git.status", g_strdup("{}"), "git_status");
+        goto fim;
+    }
+    if (tem(t, L(" git diff", " mostre o diff", " mostrar o diff", " ver o diff", " diff do", " diff de", " alteracoes nao commitadas")) ||
+        (tem(t, L(" o que mudou em", " o que foi alterado em")) && ncam)) {
+        char *pj = json_params("caminho", ncam ? cam[0] : NULL, NULL, NULL, NULL, NULL);
+        if (tem(t, L(" preparad", " staged", " cached", " no indice"))) pj = json_com(pj, "preparado", "true");
+        p = plano_um_passo("ver as alterações (git diff)", "git_ler", "git.diff", pj, "git_diff");
+        goto fim;
+    }
+    if (tem(t, L(" git log", " historico de commits", " historico do git", " ultimos commits", " ultimo commit", " commits recentes")) ||
+        (fala_git && tem(t, L(" historico")))) {
+        int n = 10;
+        GRegex *re = g_regex_new("(\\d+)\\s+(?:últimos|ultimos)?\\s*commits", G_REGEX_CASELESS, 0, NULL);
+        GMatchInfo *mi = NULL;
+        if (g_regex_match(re, pedido, 0, &mi)) { char *x = g_match_info_fetch(mi, 1); n = atoi(x); g_free(x); }
+        g_match_info_free(mi);
+        g_regex_unref(re);
+        if (tem(t, L(" ultimo commit"))) n = 1;
+        if (n < 1) n = 1;
+        if (n > 100) n = 100;
+        char lim[16];
+        g_snprintf(lim, sizeof lim, "%d", n);
+        p = plano_um_passo("ver os últimos commits (git log)", "git_ler", "git.log", json_com(g_strdup("{}"), "limite", lim), "git_log");
+        goto fim;
+    }
 
     /* ---- desfazer uma operação anterior ---- */
     if (tem(t, L(" desfaca ", " desfazer ", " desfaz ", " reverta a operacao", " reverter a operacao"))) {

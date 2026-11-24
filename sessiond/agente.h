@@ -30,6 +30,8 @@
 #define AGENTE_MAX_PASSOS          8      /* passos por plano, contando os de replanejamento */
 #define AGENTE_MAX_REPLANEJAMENTOS 3
 #define AGENTE_ORCAMENTO_TEMPO_MS  60000  /* por tarefa de leitura */
+/* teto para tarefas com passos longos declarados no manifesto (build/testes) */
+#define AGENTE_ORCAMENTO_TEMPO_MAX_MS (40 * 60 * 1000)
 #define AGENTE_MAX_PARALELO        4      /* passos de leitura pura simultâneos */
 #define AGENTE_MAX_TENTATIVAS_IGUAIS 2    /* mesma ferramenta+parâmetros: no máx. duas vezes (impede repetição infinita) */
 
