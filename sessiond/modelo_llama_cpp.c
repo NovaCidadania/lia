@@ -76,6 +76,19 @@ static void ao_concluir_llama_cpp(gpointer ctx, LlamaCppErro erro, const char *t
     g_free(t);
 }
 
+/* Modelos "instruct" esperam o modelo de conversa deles; sem isso, o
+ * /completion só CONTINUA o texto (o modelo repete as regras do prompt em
+ * vez de responder). LIA_LLAMACPP_FORMATO: "cru" (padrão, texto como está),
+ * "chatml" (Qwen, muitos outros) ou "llama3". */
+char *llama_cpp_formatar_prompt(const char *formato, const char *prompt)
+{
+    if (formato && !g_ascii_strcasecmp(formato, "chatml"))
+        return g_strdup_printf("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", prompt);
+    if (formato && !g_ascii_strcasecmp(formato, "llama3"))
+        return g_strdup_printf("<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", prompt);
+    return g_strdup(prompt);
+}
+
 static void llama_cpp_perguntar(const ModeloBackend *self, const char *pergunta_id,
                                  const char *prompt_montado, const ModeloOpcoes *opcoes,
                               ModeloConcluidoCb concluido_cb, gpointer ctx)
@@ -90,8 +103,10 @@ static void llama_cpp_perguntar(const ModeloBackend *self, const char *pergunta_
     t->ctx = ctx;
     g_hash_table_insert(g_em_andamento, t->pergunta_id, t);
     t->resumo = opcoes && opcoes->resumo;
-    t->req = llama_cpp_gerar_opcoes(obter_config(), prompt_montado, opcoes ? opcoes->esquema_json : NULL,
+    char *prompt = llama_cpp_formatar_prompt(g_getenv("LIA_LLAMACPP_FORMATO"), prompt_montado);
+    t->req = llama_cpp_gerar_opcoes(obter_config(), prompt, opcoes ? opcoes->esquema_json : NULL,
                                   opcoes ? opcoes->max_tokens : 0, ao_concluir_llama_cpp, t);
+    g_free(prompt);
 }
 
 static void llama_cpp_cancelar_pergunta(const ModeloBackend *self, const char *pergunta_id)

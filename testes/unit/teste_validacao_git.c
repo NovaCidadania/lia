@@ -293,6 +293,52 @@ int main(void)
     g_unlink(mh);
     g_free(mh);
 
+    /* ---------------- repositório com pack maior que o limite de memória ---------------- */
+    {
+        char *grande = g_strdup_printf("%s-grande", raiz);
+        g_mkdir_with_parents(grande, 0755);
+        char *cmd_g = g_strdup_printf("cd '%s' && git init -q -b principal && head -c 180000000 /dev/urandom > dados.bin && "
+                                      "git -c user.name=T -c user.email=t@t add dados.bin && git -c user.name=T -c user.email=t@t commit -q -m grande && "
+                                      "git -c gc.auto=0 repack -q -a -d", grande);
+        int rc = system(cmd_g);
+        g_free(cmd_g);
+        char *e2 = NULL;
+        proj_definir_raiz(grande, &e2);
+        g_setenv("LIA_SESSIOND_GIT_MEMORIA_MB", "128", TRUE);
+        checar(rc == 0 && git_memoria_mb() == 128, "pack grande: repositório de ~180 MB criado; git isolado limitado a 128 MiB");
+        /* controle negativo: o git SEM janelas de mmap limitadas falha como no POC */
+        char *gitbin = g_strdup("/usr/bin/git");
+        char *argv_neg[] = { gitbin, (char *)"status", (char *)"--porcelain", NULL };
+        char *env_neg[] = { (char *)"GIT_CONFIG_NOSYSTEM=1", (char *)"GIT_CONFIG_GLOBAL=/dev/null", NULL };
+        ProcPedido pn = { .argv = argv_neg, .raiz = grande, .env_extra = env_neg, .timeout_ms = 60000, .max_saida = 65536, .memoria_mb = 128 };
+        ProcResultado rn;
+        proc_executar(&pn, &rn);
+        checar(rn.executou && rn.codigo_saida != 0 && rn.erros && strstr(rn.erros, "cannot be mapped"),
+               "controle: sem janelas limitadas, o git isolado falha ('packfile cannot be mapped'), como no POC");
+        proc_resultado_liberar(&rn);
+        g_free(gitbin);
+        char *st = git_status(NULL, &e2);
+        checar(st && tem(st, "\"limpo\":true"), "git.status da Lia funciona no mesmo repositório e limite (janelas de mmap limitadas)");
+        if (!st) printf("      %s\n", e2);
+        g_free(st);
+        g_clear_pointer(&e2, g_free);
+        JsonObject *pl = params("{\"limite\":1}");
+        st = git_log(pl, NULL, &e2);
+        checar(st && tem(st, "\"assunto\":\"grande\""), "git.log também funciona no repositório grande");
+        g_free(st);
+        json_object_unref(pl);
+        g_unsetenv("LIA_SESSIOND_GIT_MEMORIA_MB");
+        g_setenv("LIA_SESSIOND_GIT_MEMORIA_MB", "999999", TRUE);
+        checar(git_memoria_mb() == 4096, "limite configurável com teto (999999 -> 4096 MiB)");
+        g_setenv("LIA_SESSIOND_GIT_MEMORIA_MB", "1", TRUE);
+        checar(git_memoria_mb() == 128, "limite configurável com piso (1 -> 128 MiB)");
+        g_unsetenv("LIA_SESSIOND_GIT_MEMORIA_MB");
+        char *rm = g_strdup_printf("rm -rf -- '%s'", grande);
+        if (g_str_has_prefix(grande, "/tmp/lia-valgit-")) { int r2 = system(rm); (void)r2; }
+        g_free(rm);
+        g_free(grande);
+    }
+
     printf("\n%d testes, %d falhas\n", total, falhas);
     char *cmd = g_strdup_printf("rm -rf -- '%s' '%s'", raiz, desf);
     if (g_str_has_prefix(raiz, "/tmp/lia-valgit-")) { int rc = system(cmd); (void)rc; }

@@ -19,6 +19,9 @@
  * pergunta de esclarecimento. */
 AgentePlano *agente_planejar_arquivos(const char *pedido, char **texto_direto);
 
+/* o pedido proíbe o Git ("não rode git", "sem git"...) */
+gboolean intencao_proibe_git(const char *pedido);
+
 /* exposto para testes: trechos entre aspas/crases, na ordem em que aparecem */
 char **intencao_trechos_citados(const char *pedido);
 /* exposto para testes: palavras com cara de caminho de arquivo */

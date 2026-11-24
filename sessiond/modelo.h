@@ -111,5 +111,7 @@ struct ModeloBackend {
 const ModeloBackend *modelo_mock_obter(void);
 const ModeloBackend *modelo_ollama_obter(void);
 const ModeloBackend *modelo_llama_cpp_obter(void);
+/* LIA_LLAMACPP_FORMATO: "cru" (padrão), "chatml" ou "llama3" — embrulha o prompt no modelo de conversa */
+char *llama_cpp_formatar_prompt(const char *formato, const char *prompt);
 
 #endif

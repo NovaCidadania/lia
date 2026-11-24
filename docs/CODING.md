@@ -170,7 +170,14 @@ Comandos nomeados vêm de `<projeto>/.lia/validacao.json`
 {"comandos": {"teste": ["make", "teste"], "build": {"argv": ["make"], "timeout_segundos": 300}}}
 ```
 
-ou, sem ele, do Makefile (`build` = `make`; alvos `teste`/`test`/`check`).
+ou, sem ele, do Makefile (`build` = `make`; alvos `teste`/`test`/`check`)
+ou do Composer: com `vendor/bin/phpunit`, `teste` = `php vendor/bin/phpunit
+--do-not-cache-result` e `sintaxe-php` = `php -l`. Esses dois aceitam
+`alvos` (arquivos do projeto acrescentados ao argv, visíveis na prévia):
+cada alvo é resolvido dentro do projeto e não pode começar com `-`, estar
+em `.git/`, ser arquivo sensível nem pasta. No `validacao.json`, a forma de
+objeto aceita `"alvo": true`. Para `php`, código em linha (`-r`, `-a`, `-B`,
+`-R`, `-F`, `-E`) continua proibido.
 Esse arquivo é **dado não confiável** do repositório: só nomeia comandos.
 Quem autoriza é a pessoa, a cada execução, vendo a prévia (executável,
 argv, diretório, ambiente, isolamento, limites e o aviso de que o comando
@@ -204,6 +211,14 @@ clean, rebase, checkout de arquivos ou reescrita de histórico. Autor:
 `LIA_GIT_AUTOR="Nome <email>"` no `rodar_local.sh` (padrão: `user.name`/
 `user.email` do repositório).
 
+Memória: o git isolado roda com limite de memória próprio
+(`LIA_SESSIOND_GIT_MEMORIA_MB`, padrão 1024, entre 128 e 4096) e com
+janelas de mmap e threads limitadas (`core.packedGitWindowSize=32m`,
+`core.packedGitLimit=192m`, `core.deltaBaseCacheLimit=48m`,
+`core.bigFileThreshold=32m`, `core.preloadIndex=false`, `index.threads=1`
+e afins). Sem isso, repositórios com packs grandes falhavam com "packfile
+cannot be mapped". O teste cria um pack de ~180 MB e roda com 128 MiB.
+
 ### Ciclo de coding
 
 ```
@@ -214,6 +229,13 @@ retome a tarefa de código codigo-20261124-101010-ab12
 
 Etapas, cada uma visível no chat (`progresso` com `codigo.etapa`):
 
+0. **preparo** (em segundo plano) — `git status` como pré-condição (salvo
+   quando o pedido proíbe o Git: "não rode git", "sem git"); se falhar, a
+   tarefa segue e o relatório diz que o estado do Git não foi lido. Um
+   pedido de código nunca vira só `git.status`. A Lia também explora o
+   projeto (sem vendor/, node_modules/ e arquivos sensíveis) e acha quem
+   DEFINE os símbolos citados (`Classe::metodo`, `função`), para ler só a
+   região relevante de arquivos grandes.
 1. **critérios** — o modelo propõe critérios de aceite verificáveis
    (`validacao`: conferido pelos testes; `contem`: o arquivo deve conter um
    texto) e quais arquivos ler; sem resposta utilizável, vale o critério
@@ -221,12 +243,23 @@ Etapas, cada uma visível no chat (`progresso` com `codigo.etapa`):
 2. **inspeção** — a Lia lê os arquivos (registra o sha256 de cada um).
 3. **proposta** — o modelo propõe edições, com as boas práticas
    recuperadas no prompt e tudo delimitado como dado. O verificador só
-   aceita `criar` (arquivo novo) e `editar` (trecho exato e único) de
-   arquivo **lido nesta tarefa**, dentro do projeto; aplica em memória e
-   gera UMA gravação por arquivo, presa ao hash lido.
+   aceita `criar` (arquivo novo, com `criar_pastas` para as pastas que
+   faltam, visíveis na prévia), `editar` (trecho exato e único; trecho
+   abreviado com "..." é recusado) e `substituir_funcao` (a função inteira
+   reescrita, chaves balanceadas, só a função citada muda) de arquivo
+   **lido nesta tarefa**, dentro do projeto; aplica em memória e gera UMA
+   gravação por arquivo, presa ao hash lido. Critérios `contem` sobre
+   arquivo que o pedido não cita são descartados (e listados no relatório).
+   **Receita determinística:** em pedidos sobre SQL injection/bind em PHP,
+   antes do modelo a Lia tenta uma regra fixa: na função citada, `$var`
+   interpolada na SQL vira `?` e `->query($sql)` passa a receber
+   `array($var)`; com pedido de teste, cria um PHPUnit com banco falso (sem
+   conexão). A proposta passa pelo mesmo verificador, prévia e aprovação, e
+   o relatório diz a origem ("receita determinística" ou "modelo local").
 4. **aprovação da gravação** — plano com a prévia (diff); nada é gravado
    antes do "s"; arquivo alterado depois da prévia = nada gravado.
-5. **validação** — plano com a prévia do comando; outra aprovação.
+5. **validação** — plano com a prévia do comando; outra aprovação. Em PHP,
+   `sintaxe-php` nos arquivos tocados e `teste` só nos arquivos de teste.
 6. **revisão** — se passou: critérios conferidos (lendo os arquivos) e
    relatório com diff, saída da validação, como desfazer e o checkpoint.
    Se falhou: novo ciclo com a saída do erro (até 3), cada um com nova
@@ -250,6 +283,32 @@ recusa e pede de novo, uma vez) e demora minutos para escrever código. A
 segurança não depende do modelo: nada grava nem executa sem passar pelo
 verificador e pela sua aprovação.
 
+### Perguntas analíticas sobre arquivos
+
+"Leia X e explique por que...", "há SQL injection em...?", "leia os
+manifests Docker e explique serviços, volumes e riscos": a Lia lê, mostra
+as linhas e responde com **Resposta / Evidência / Achados por regra fixa /
+Hipóteses / Como foi montada**. Cada referência `arquivo:linha` do modelo é
+conferida contra as janelas lidas (fora delas é descartada, com aviso);
+evidência = está escrito nas linhas, hipótese = depende do que não foi lido.
+Limite honesto: a Lia confere que a linha citada foi lida, não que ela diz
+o que o modelo afirma — confira nas linhas mostradas.
+
+Arquivos sensíveis (`.env*`, `*pgpass*`, chaves, dumps, `config/database.php`,
+`wp-config.php`...) não são lidos nem entram em buscas. Em arquivos de
+configuração, valores de chaves como senha/token/secret viram «omitido»;
+em compose e Dockerfile, **todo** valor de `environment:` (inclusive
+entradas comentadas) e de `ENV`/`ARG` é omitido — os nomes ficam.
+
+### Modelo local via llama.cpp
+
+`LIA_SESSIOND_MODELO=llama_cpp` usa um `llama-server` em loopback
+(`LIA_LLAMACPP_PORTA`, `LIA_LLAMACPP_TIMEOUT_MS` até o máximo validado).
+Modelos instruct precisam do formato de conversa deles:
+`LIA_LLAMACPP_FORMATO=chatml` (Qwen) ou `llama3`; sem isso (`cru`, padrão)
+o `/completion` só continua o texto. Em máquina sem GPU suportada, suba o
+servidor com `--device none -ngl 0`.
+
 ### Testes da fase 2
 
 ```
@@ -257,4 +316,5 @@ make teste-processo        # isolamento real: argv literal, ambiente, rede, limi
 make teste-validacao-git   # validação e Git num projeto C temporário (38)
 make teste-coding-unit     # partes puras do ciclo (42)
 make teste-coding          # ciclo completo com modelo mock roteirizado, rejeições, retomada, Git, chat (43)
+make teste-coding-php      # PHP: receita, modelo, Git quebrado/erro/proibido, análise, phpunit sem banco, Docker, .env (30)
 ```

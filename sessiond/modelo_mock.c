@@ -46,6 +46,34 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
          * ferramenta não devolveu — testa a checagem de fundamentação. */
         ModeloResposta rr = { 0 };
         rr.sucesso = TRUE;
+        if (strstr(prompt_montado_completo, "----- linhas lidas -----")) {
+            /* análise de arquivos lidos: cita a primeira linha lida (válida)
+             * e uma linha que não foi lida (o daemon precisa descartá-la);
+             * MOCK_ANALISE_INVALIDA na pergunta devolve texto que não é JSON */
+            const char *pp = prompt_montado_completo;
+            if (strstr(pp, "MOCK_ANALISE_INVALIDA")) {
+                rr.sucesso = TRUE;
+                rr.resposta_texto = g_strdup("não sei responder em JSON");
+            } else {
+                const char *j = strstr(pp, "=== ");
+                char *arq = NULL;
+                long ini = 1;
+                if (j) {
+                    const char *fim = strstr(j + 4, " (linhas ");
+                    if (fim) { arq = g_strndup(j + 4, (gsize)(fim - (j + 4))); ini = strtol(fim + 9, NULL, 10); }
+                }
+                rr.sucesso = TRUE;
+                rr.resposta_texto = g_strdup_printf(
+                    "{\"resposta\":\"(mock) a pergunta foi respondida a partir das linhas lidas.\","
+                    "\"evidencias\":[{\"arquivo\":\"%s\",\"linhas\":\"%ld\",\"explicacao\":\"(mock) primeira linha lida\"},"
+                    "{\"arquivo\":\"%s\",\"linhas\":\"99999\",\"explicacao\":\"(mock) linha que não foi lida\"}],"
+                    "\"hipoteses\":[\"(mock) depende de código que não foi lido\"]}", arq ? arq : "?", ini, arq ? arq : "?");
+                g_free(arq);
+            }
+            concluido_cb(ctx, &rr);
+            modelo_resposta_liberar(&rr);
+            return;
+        }
         if (strstr(prompt_montado_completo, "\"arquivos_para_ler\"") || strstr(prompt_montado_completo, "\"edicoes\"")) {
             /* ciclo de coding (sessiond/coding.h): respostas roteirizadas por
              * LIA_MOCK_CODIGO=<arquivo.json> {"plano": ..., "edicoes": [..., ...]}

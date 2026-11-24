@@ -30,6 +30,20 @@ static int modo_config_validar(void)
     cfg = llama_cpp_config_novo("127.0.0.1", 8080);
     char *erro = llama_cpp_config_validar(cfg);
     checar(erro == NULL, "config válida (127.0.0.1:8080) -> aceita");
+    {
+        char *f = llama_cpp_formatar_prompt(NULL, "oi");
+        checar(!strcmp(f, "oi"), "formato padrão (cru): prompt sem modelo de conversa");
+        g_free(f);
+        f = llama_cpp_formatar_prompt("chatml", "oi");
+        checar(!strcmp(f, "<|im_start|>user\noi<|im_end|>\n<|im_start|>assistant\n"), "formato chatml embrulha o prompt");
+        g_free(f);
+        f = llama_cpp_formatar_prompt("llama3", "oi");
+        checar(g_str_has_prefix(f, "<|start_header_id|>user") && strstr(f, "oi<|eot_id|>"), "formato llama3 embrulha o prompt");
+        g_free(f);
+        f = llama_cpp_formatar_prompt("desconhecido", "oi");
+        checar(!strcmp(f, "oi"), "formato desconhecido -> cru");
+        g_free(f);
+    }
     g_free(erro);
     llama_cpp_config_liberar(cfg);
 

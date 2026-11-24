@@ -41,6 +41,16 @@ void proj_definir_dir_desfazer(const char *dir);
 /* Caminho absoluto canônico dentro da raiz; NULL + erro se escapar dela,
  * se tocar .git/ numa escrita, etc. 'deve_existir' exige que exista. */
 char *proj_resolver(const char *caminho, gboolean escrita, gboolean deve_existir, char **erro);
+/* Arquivo sensível (segredos e dados): .env*, *pgpass*, .netrc, chaves
+ * privadas e certificados (*.pem, *.key, id_rsa*, *.p12...), credenciais e
+ * dumps de banco (*.dump, *dump*.sql, *backup*.sql, *.sql.gz...). Não é
+ * lido, buscado nem enviado ao modelo; listar mostra só o nome. */
+gboolean proj_sensivel(const char *caminho);
+/* Oculta valores que parecem segredo numa linha de texto ("SENHA=x",
+ * "password: x", "Authorization: Bearer x"...). Devolve nova string; *n
+ * é incrementado a cada valor ocultado. */
+char *proj_ocultar_segredos(const char *texto, guint *n);
+
 /* caminho relativo à raiz (para exibir) */
 char *proj_relativo(const char *absoluto);
 

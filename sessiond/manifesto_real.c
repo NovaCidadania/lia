@@ -78,6 +78,7 @@ static const ParametroManifesto PARAM_ARQ_CRIAR[] = {
     { .nome = "quebra_de_linha", .tipo = PARAM_ENUM, .valores_enum = EOLS },
     { .nome = "bom", .tipo = PARAM_BOOLEANO },
     { .nome = "executavel", .tipo = PARAM_BOOLEANO },
+    { .nome = "criar_pastas", .tipo = PARAM_BOOLEANO },
     { .nome = NULL },
 };
 static const ParametroManifesto PARAM_ARQ_ESCREVER[] = {
@@ -147,6 +148,7 @@ static const ParametroManifesto PARAM_PRATICAS[] = {
 
 static const ParametroManifesto PARAM_VALIDAR[] = {
     { .nome = "comando", .tipo = PARAM_STRING },
+    { .nome = "alvos", .tipo = PARAM_LISTA_TEXTO, .max = 20 },
     { .nome = NULL },
 };
 static const ParametroManifesto PARAM_GIT_DIFF[] = {

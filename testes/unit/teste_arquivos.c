@@ -294,6 +294,17 @@ static void testes_escrita(void)
     r = aplicar("arquivo.criar", "{\"caminho\":\"pasta/que/falta/a.c\",\"conteudo\":\"x\"}", &e);
     checar(!r && e && strstr(e, "não existe"), "criar: pasta inexistente é erro (não cria pastas escondido)");
     g_clear_pointer(&e, g_free);
+    pv = previa("arquivo.criar", "{\"caminho\":\"nova/sub/a.c\",\"conteudo\":\"x\",\"criar_pastas\":true}", &e);
+    checar(pv && strstr(pv, "criar a pasta nova\n") && strstr(pv, "criar a pasta nova/sub") && !existe("nova"), "criar_pastas: pastas que faltam aparecem na prévia");
+    g_free(pv);
+    r = aplicar("arquivo.criar", "{\"caminho\":\"nova/sub/a.c\",\"conteudo\":\"x\",\"criar_pastas\":true}", &e);
+    char *op_pastas = campo(r, "operacao_id");
+    checar(r && existe("nova/sub/a.c"), "criar_pastas: cria as pastas e o arquivo");
+    g_free(r);
+    char *pdp = g_strdup_printf("{\"operacao_id\":\"%s\"}", op_pastas);
+    r = aplicar("arquivo.desfazer", pdp, &e);
+    checar(r && !existe("nova"), "criar_pastas: desfazer remove arquivo e pastas criadas");
+    g_free(r); g_free(pdp); g_free(op_pastas);
     r = aplicar("arquivo.criar", "{\"caminho\":\"../fora.c\",\"conteudo\":\"x\"}", &e);
     checar(!r && e && strstr(e, "fora do projeto"), "criar: fora do projeto recusado");
     g_clear_pointer(&e, g_free);

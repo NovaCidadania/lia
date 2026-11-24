@@ -150,6 +150,139 @@ char *proj_resolver(const char *caminho, gboolean escrita, gboolean deve_existir
     return abs;
 }
 
+/* ============================================================ sensíveis */
+
+gboolean proj_sensivel(const char *caminho)
+{
+    if (!caminho) return FALSE;
+    char *base = g_path_get_basename(caminho);
+    char *b = g_ascii_strdown(base, -1);
+    g_free(base);
+    static const char *const EXATOS[] = { ".netrc", ".pgpass", "pgpass", ".npmrc", ".pypirc", "credentials", "credentials.json",
+                                          "secrets.json", "secrets.yml", "secrets.yaml", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+                                          ".git-credentials", "auth.json", NULL };
+    static const char *const SUFIXOS[] = { ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".dump", ".sql.gz", ".sql.bz2",
+                                           ".sql.xz", ".sql.zip", ".kdbx", ".gpg", ".asc", NULL };
+    gboolean r = g_strv_contains(EXATOS, b) || g_str_has_prefix(b, ".env") || strstr(b, "pgpass") != NULL ||
+                 g_str_has_prefix(b, "id_rsa") || g_str_has_prefix(b, "id_ed25519") ||
+                 ((strstr(b, "dump") || strstr(b, "backup") || strstr(b, "bkp")) && (g_str_has_suffix(b, ".sql") || strstr(b, ".sql.")));
+    for (int i = 0; !r && SUFIXOS[i]; i++) if (g_str_has_suffix(b, SUFIXOS[i])) r = TRUE;
+    /* configuração com credenciais embutidas: CodeIgniter/Laravel
+     * (config/database.php), WordPress, Django, Symfony, Rails */
+    static const char *const CREDENCIAIS[] = { "wp-config.php", "local_settings.py", "parameters.yml", "parameters.yaml", "master.key",
+                                               "credentials.yml.enc", "secrets.php", "local.php", NULL };
+    if (!r && g_strv_contains(CREDENCIAIS, b)) r = TRUE;
+    if (!r && (!strcmp(b, "database.php") || !strcmp(b, "database.yml") || !strcmp(b, "settings.py") || !strcmp(b, "config.inc.php"))) {
+        char *baixo = g_ascii_strdown(caminho, -1);
+        if (strstr(baixo, "config") || strstr(baixo, "settings") || !strcmp(b, "settings.py") || !strcmp(b, "config.inc.php")) r = TRUE;
+        g_free(baixo);
+    }
+    g_free(b);
+    return r;
+}
+
+static gboolean arquivo_de_configuracao(const char *rel)
+{
+    char *base = g_path_get_basename(rel);
+    char *b = g_ascii_strdown(base, -1);
+    g_free(base);
+    static const char *const SUF[] = { ".yml", ".yaml", ".ini", ".conf", ".cfg", ".toml", ".json", ".xml", ".properties", ".env",
+                                       ".neon", ".config", NULL };
+    gboolean r = g_str_has_prefix(b, "dockerfile") || g_str_has_prefix(b, "containerfile") || strstr(b, "compose") != NULL;
+    for (int i = 0; !r && SUF[i]; i++) if (g_str_has_suffix(b, SUF[i])) r = TRUE;
+    g_free(b);
+    return r;
+}
+
+/* Manifests de contêiner: TODO valor de variável de ambiente some — em
+ * compose, as entradas dentro de "environment:" (KEY: v e - KEY=v); em
+ * Dockerfile, ENV/ARG KEY=v. Os nomes ficam (fazem parte da análise). */
+static char *ocultar_ambiente(const char *texto, gboolean compose, guint *n)
+{
+    char **l = g_strsplit(texto, "\n", -1);
+    GString *o = g_string_new(NULL);
+    int recuo_env = -1;
+    GRegex *kv = g_regex_new("^(\\s*-?\\s*[A-Za-z_][A-Za-z0-9_.-]*\\s*(?:=|:\\s))(.+)$", 0, 0, NULL);
+    GRegex *denv = g_regex_new("^(\\s*(?:ENV|ARG)\\s+)(.*)$", G_REGEX_CASELESS, 0, NULL);
+    GRegex *par = g_regex_new("([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|\\S+)", 0, 0, NULL);
+    for (int i = 0; l[i]; i++) {
+        const char *x = l[i];
+        int recuo = 0;
+        while (x[recuo] == ' ') recuo++;
+        gboolean vazia = !x[recuo] || x[recuo] == '#';
+        GMatchInfo *mi = NULL;
+        if (compose) {
+            if (recuo_env >= 0 && !vazia && recuo <= recuo_env) recuo_env = -1;
+            /* entrada comentada dentro do bloco ("#- KEY=valor") também pode guardar um valor real */
+            const char *corpo = x + recuo;
+            gboolean comentada = recuo_env >= 0 && recuo > recuo_env && corpo[0] == '#';
+            if (recuo_env >= 0 && !vazia && g_regex_match(kv, x, 0, &mi)) {
+                char *k = g_match_info_fetch(mi, 1);
+                g_string_append_printf(o, "%s«omitido»", k);
+                if (n) (*n)++;
+                g_free(k);
+            } else if (comentada && g_regex_match(kv, corpo + 1, 0, &mi)) {
+                char *k = g_match_info_fetch(mi, 1);
+                g_string_append_printf(o, "%.*s#%s«omitido»", recuo, x, k);
+                if (n) (*n)++;
+                g_free(k);
+            } else {
+                g_string_append(o, x);
+            }
+            g_match_info_free(mi);
+            char *t = g_strstrip(g_strdup(x));
+            if (!strcmp(t, "environment:")) recuo_env = recuo;
+            g_free(t);
+        } else if (g_regex_match(denv, x, 0, &mi)) {
+            char *cab = g_match_info_fetch(mi, 1), *resto = g_match_info_fetch(mi, 2);
+            guint antes = n ? *n : 0;
+            char *sem = g_regex_replace(par, resto, -1, 0, "\\1=«omitido»", 0, NULL);
+            if (n && sem && strcmp(sem, resto)) *n = antes + 1;
+            g_string_append_printf(o, "%s%s", cab, sem ? sem : resto);
+            g_free(cab); g_free(resto); g_free(sem);
+            g_match_info_free(mi);
+        } else {
+            g_match_info_free(mi);
+            g_string_append(o, x);
+        }
+        if (l[i + 1]) g_string_append_c(o, '\n');
+    }
+    g_regex_unref(kv); g_regex_unref(denv); g_regex_unref(par);
+    g_strfreev(l);
+    return g_string_free(o, FALSE);
+}
+
+char *proj_ocultar_segredos(const char *texto, guint *n)
+{
+    static GRegex *re = NULL;
+    if (!re)
+        re = g_regex_new("(?i)((?:[A-Z0-9_.-]*(?:pass(?:word|wd)?|senha|secret|segredo|token|api[_-]?key|access[_-]?key|private[_-]?key|"
+                         "client[_-]?secret|auth|credential|dsn|database_url|db_url|connection_string)[A-Z0-9_.-]*)\\s*[:=]\\s*)"
+                         "(\"[^\"\\n]*\"|'[^'\\n]*'|[^\\s#,;}\\n][^\\n#]*)", G_REGEX_OPTIMIZE, 0, NULL);
+    GMatchInfo *mi = NULL;
+    GString *o = g_string_new(NULL);
+    const char *ultimo = texto;
+    g_regex_match(re, texto, 0, &mi);
+    while (g_match_info_matches(mi)) {
+        gint ini2 = 0, fim2 = 0;
+        g_match_info_fetch_pos(mi, 2, &ini2, &fim2);
+        const char *valor = texto + ini2;
+        /* referências a variável (${X}, $X, getenv(...)) não são o segredo em si */
+        gboolean referencia = valor[0] == '$' || g_str_has_prefix(valor, "\"${") || g_str_has_prefix(valor, "getenv") ||
+                              g_str_has_prefix(valor, "env(") || g_str_has_prefix(valor, "os.environ");
+        if (!referencia && fim2 > ini2) {
+            g_string_append_len(o, ultimo, valor - ultimo);
+            g_string_append(o, "«omitido»");
+            ultimo = texto + fim2;
+            if (n) (*n)++;
+        }
+        g_match_info_next(mi, NULL);
+    }
+    g_string_append(o, ultimo);
+    g_match_info_free(mi);
+    return g_string_free(o, FALSE);
+}
+
 /* ========================================================= codificação */
 
 const char *proj_confianca_texto(ProjConfianca c)
@@ -643,6 +776,11 @@ char *proj_ler(const char *caminho, gint64 linha_inicial, gint64 n_linhas, const
     char *abs = proj_resolver(caminho, FALSE, TRUE, erro);
     if (!abs) return NULL;
     char *rel = proj_relativo(abs);
+    if (proj_sensivel(rel)) {
+        *erro = g_strdup_printf("'%s' parece conter segredos ou dados (variáveis de ambiente, senhas, chaves ou dump de banco) — não leio esse tipo de arquivo", rel);
+        g_free(abs); g_free(rel);
+        return NULL;
+    }
     GBytes *b = ler_bytes(abs, erro);
     if (!b) { g_free(abs); g_free(rel); return NULL; }
     gsize n = 0;
@@ -710,7 +848,21 @@ char *proj_ler(const char *caminho, gint64 linha_inicial, gint64 n_linhas, const
         b_int(jb, "linha_inicial", linha_inicial);
         b_int(jb, "linhas_lidas", lidas);
         b_bool(jb, "truncado", linha_inicial + lidas - 1 < total);
-        b_str(jb, "conteudo", jan->str);
+        /* em arquivos de CONFIGURAÇÃO, valores com cara de segredo nunca
+         * saem na leitura (em código, "auth = ..." é código, não segredo) */
+        guint ocultos = 0;
+        char *seguro = arquivo_de_configuracao(rel) ? proj_ocultar_segredos(jan->str, &ocultos) : g_strdup(jan->str);
+        {
+            char *base = g_path_get_basename(rel);
+            char *b = g_ascii_strdown(base, -1);
+            gboolean compose = strstr(b, "compose") && (g_str_has_suffix(b, ".yml") || g_str_has_suffix(b, ".yaml"));
+            gboolean dockerfile = g_str_has_prefix(b, "dockerfile") || g_str_has_suffix(b, ".dockerfile") || g_str_has_prefix(b, "containerfile");
+            if (compose || dockerfile) { char *x = ocultar_ambiente(seguro, compose, &ocultos); g_free(seguro); seguro = x; }
+            g_free(base); g_free(b);
+        }
+        b_str(jb, "conteudo", seguro);
+        g_free(seguro);
+        if (ocultos) b_int(jb, "valores_ocultados", ocultos);
         g_string_free(jan, TRUE);
         g_free(t);
     }
@@ -821,7 +973,7 @@ static void buscar_em(Busca *B, const char *abs)
         g_ptr_array_unref(nomes);
         return;
     }
-    if (!S_ISREG(st.st_mode) || st.st_size > 2 * 1024 * 1024) return;
+    if (!S_ISREG(st.st_mode) || st.st_size > 2 * 1024 * 1024 || proj_sensivel(abs)) return;
     char *base = g_path_get_basename(abs);
     gboolean casa = !B->padrao || g_pattern_spec_match_string(B->padrao, base);
     g_free(base);
@@ -962,6 +1114,7 @@ char *proj_ler_texto(const char *caminho, gsize max_bytes, char **sha256, char *
 {
     char *abs = proj_resolver(caminho, FALSE, TRUE, erro);
     if (!abs) return NULL;
+    if (proj_sensivel(abs)) { *erro = g_strdup_printf("'%s' parece conter segredos ou dados — não leio", caminho); g_free(abs); return NULL; }
     struct stat st;
     if (stat(abs, &st) != 0 || !S_ISREG(st.st_mode)) { *erro = g_strdup_printf("não é um arquivo comum: %s", caminho); g_free(abs); return NULL; }
     if ((gsize)st.st_size > max_bytes) { *erro = g_strdup_printf("%s tem %lld bytes (limite %zu)", caminho, (long long)st.st_size, max_bytes); g_free(abs); return NULL; }
@@ -1309,7 +1462,24 @@ static Plano *planejar(const char *f, JsonObject *params, char **erro)
         if (!(abs = proj_resolver(caminho, TRUE, FALSE, erro))) goto falha;
         rel = proj_relativo(abs);
         if (existe(abs)) { *erro = g_strdup_printf("'%s' já existe — para substituir use arquivo.escrever; para mudar um trecho, arquivo.editar", rel); goto falha; }
-        if (!pai_existe(abs, rel, erro)) goto falha;
+        if (p_bool(params, "criar_pastas", FALSE)) {
+            /* pastas que faltam: aparecem na prévia e entram no desfazer */
+            char *pai = g_path_get_dirname(abs);
+            GPtrArray *faltam = g_ptr_array_new_with_free_func(g_free);
+            char *q = g_strdup(pai);
+            while (!existe(q) && strcmp(q, g_raiz)) { g_ptr_array_insert(faltam, 0, g_strdup(q)); char *x = g_path_get_dirname(q); g_free(q); q = x; }
+            g_free(q);
+            for (guint i = 0; i < faltam->len; i++) {
+                Efeito *e = g_new0(Efeito, 1);
+                e->tipo = EF_MKDIR; e->abs = g_strdup(g_ptr_array_index(faltam, i)); e->rel = proj_relativo(e->abs);
+                if (componente_git(e->rel)) { *erro = g_strdup("recusado: pasta dentro de .git/"); efeito_liberar(e); g_ptr_array_unref(faltam); g_free(pai); goto falha; }
+                e->resumo = g_strdup_printf("criar a pasta %s", e->rel);
+                previa_cabecalho(p, e->resumo);
+                g_ptr_array_add(p->efeitos, e);
+            }
+            g_ptr_array_unref(faltam);
+            g_free(pai);
+        } else if (!pai_existe(abs, rel, erro)) goto falha;
         const char *cod = p_str(params, "codificacao") ? p_str(params, "codificacao") : "UTF-8";
         const char *eol = eol_param(params, "LF", erro);
         if (!eol) goto falha;

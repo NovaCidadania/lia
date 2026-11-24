@@ -11,7 +11,10 @@ typedef struct {
     char *nome;
     char **argv;
     int timeout_s;
+    gboolean aceita_alvo; /* aceita arquivos do projeto como últimos argumentos ("alvos") */
 } Comando;
+
+static Comando *achar_nome(GPtrArray *cmds, const char *nome);
 
 static void comando_liberar(gpointer p)
 {
@@ -27,13 +30,13 @@ static const char *const PROIBIDOS[] = {
     "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "csh", "tcsh", "busybox", "toybox", "env", "xargs", "nohup", "sudo",
     "doas", "pkexec", "su", "runuser", "timeout", "nice", "ionice", "setsid", "chroot", "unshare", "bwrap", "strace", "ltrace",
     "gdb", "ssh", "scp", "rsync", "curl", "wget", "nc", "ncat", "socat", "eval", "exec", "watch", "flock", "stdbuf", "script",
-    "expect", "find", "awk", "gawk", "sed", "perl", "ruby", "lua", "php", "tclsh", "osascript", NULL,
+    "expect", "find", "awk", "gawk", "sed", "perl", "ruby", "lua", "tclsh", "osascript", NULL,
 };
 
 /* padrão; a pessoa pode trocar com LIA_SESSIOND_VALIDACAO_PERMITIDOS (vírgulas) */
 static const char *const PERMITIDOS_PADRAO =
     "make,gmake,gcc,cc,c99,clang,tcc,g++,c++,clang++,python3,python,pytest,cargo,rustc,go,node,npm,meson,ninja,cmake,ctest,"
-    "zig,ghc,cabal,stack,dotnet,java,javac,mvn,gradle,valgrind";
+    "zig,ghc,cabal,stack,dotnet,java,javac,mvn,gradle,valgrind,php";
 
 /* interpretadores: código em linha equivale a um shell */
 static gboolean codigo_em_linha(const char *base, char **argv)
@@ -42,6 +45,9 @@ static gboolean codigo_em_linha(const char *base, char **argv)
         const char *a = argv[i];
         if (g_str_has_prefix(base, "python") && (!strcmp(a, "-c") || (a[0] == '-' && a[1] != '-' && strchr(a, 'c')))) return TRUE;
         if (!strcmp(base, "node") && (!strcmp(a, "-e") || !strcmp(a, "-p") || !strcmp(a, "--eval") || !strcmp(a, "--print"))) return TRUE;
+        if (g_str_has_prefix(base, "php") && (!strcmp(a, "-r") || !strcmp(a, "-a") || !strcmp(a, "-B") || !strcmp(a, "-R") ||
+                                               !strcmp(a, "-F") || !strcmp(a, "-E") || !strcmp(a, "--run") || !strcmp(a, "--process-code")))
+            return TRUE;
     }
     return FALSE;
 }
@@ -141,10 +147,12 @@ static GPtrArray *carregar(const char **origem, char **sha_config, char **erro)
             JsonNode *v = json_object_get_member(co, nome);
             JsonNode *argv_n = v;
             int timeout = VALIDACAO_TIMEOUT_PADRAO_S;
+            gboolean alvo = FALSE;
             if (JSON_NODE_TYPE(v) == JSON_NODE_OBJECT) {
                 JsonObject *o = json_node_get_object(v);
                 argv_n = json_object_has_member(o, "argv") ? json_object_get_member(o, "argv") : NULL;
                 if (json_object_has_member(o, "timeout_segundos")) timeout = (int)json_object_get_int_member(o, "timeout_segundos");
+                alvo = json_object_get_boolean_member_with_default(o, "alvo", FALSE);
             }
             char **argv = argv_n ? argv_de_json(argv_n, erro, nome) : NULL;
             if (!argv) { if (!*erro) *erro = g_strdup_printf("comando '%s' sem argv", nome); break; }
@@ -154,6 +162,7 @@ static GPtrArray *carregar(const char **origem, char **sha_config, char **erro)
             c->nome = g_strdup(nome);
             c->argv = argv;
             c->timeout_s = timeout;
+            c->aceita_alvo = alvo;
             g_ptr_array_add(cmds, c);
         }
         g_list_free(nomes);
@@ -190,11 +199,36 @@ static GPtrArray *carregar(const char **origem, char **sha_config, char **erro)
             g_free(re_txt);
         }
         g_free(mkdados);
-    } else {
-        *origem = "nenhum (crie .lia/validacao.json ou um Makefile)";
     }
     g_free(mk);
+    /* detecção: PHPUnit instalado pelo Composer */
+    char *pu = g_build_filename(raiz, "vendor", "bin", "phpunit", NULL);
+    if (g_file_test(pu, G_FILE_TEST_EXISTS) && !achar_nome(cmds, "teste")) {
+        *origem = cmds->len ? "detectado no Makefile e no PHPUnit do Composer (não há .lia/validacao.json)"
+                            : "detectado: PHPUnit do Composer (não há .lia/validacao.json)";
+        Comando *t = g_new0(Comando, 1);
+        t->nome = g_strdup("teste");
+        /* sem cache de resultado: a validação não deixa arquivo novo no projeto */
+        t->argv = g_strdupv((char *[]){ (char *)"php", (char *)"vendor/bin/phpunit", (char *)"--do-not-cache-result", NULL });
+        t->timeout_s = VALIDACAO_TIMEOUT_PADRAO_S;
+        t->aceita_alvo = TRUE;
+        g_ptr_array_add(cmds, t);
+        Comando *l = g_new0(Comando, 1);
+        l->nome = g_strdup("sintaxe-php");
+        l->argv = g_strdupv((char *[]){ (char *)"php", (char *)"-l", NULL });
+        l->timeout_s = 60;
+        l->aceita_alvo = TRUE;
+        g_ptr_array_add(cmds, l);
+    }
+    g_free(pu);
+    if (!cmds->len) *origem = "nenhum (crie .lia/validacao.json, um Makefile ou instale o PHPUnit pelo Composer)";
     return cmds;
+}
+
+static Comando *achar_nome(GPtrArray *cmds, const char *nome)
+{
+    for (guint i = 0; i < cmds->len; i++) if (!g_strcmp0(((Comando *)g_ptr_array_index(cmds, i))->nome, nome)) return g_ptr_array_index(cmds, i);
+    return NULL;
 }
 
 static Comando *achar(GPtrArray *cmds, const char *nome)
@@ -302,6 +336,7 @@ char *validacao_listar(char **erro)
         json_builder_set_member_name(b, "permitido"); json_builder_add_boolean_value(b, perm);
         json_builder_set_member_name(b, "motivo"); if (motivo) json_builder_add_string_value(b, motivo); else json_builder_add_null_value(b);
         json_builder_set_member_name(b, "timeout_segundos"); json_builder_add_int_value(b, c->timeout_s);
+        json_builder_set_member_name(b, "aceita_alvos"); json_builder_add_boolean_value(b, c->aceita_alvo);
         json_builder_end_object(b);
         g_free(motivo); g_free(e2); g_free(exe);
     }
@@ -320,6 +355,37 @@ char *validacao_listar(char **erro)
 }
 
 /* resolve o comando pedido: Comando (do array), executável absoluto */
+/* alvos: arquivos do projeto acrescentados ao argv (só para comandos que
+ * aceitam alvo); cada um precisa existir, ficar dentro do projeto, fora de
+ * .git/, não ser sensível nem começar com '-' (nunca vira opção) */
+static char **resolver_alvos(JsonObject *params, const Comando *c, char **erro)
+{
+    JsonArray *a = params && json_object_has_member(params, "alvos") && JSON_NODE_TYPE(json_object_get_member(params, "alvos")) == JSON_NODE_ARRAY
+                       ? json_object_get_array_member(params, "alvos") : NULL;
+    GPtrArray *v = g_ptr_array_new();
+    guint n = a ? json_array_get_length(a) : 0;
+    if (n && !c->aceita_alvo) { *erro = g_strdup_printf("o comando '%s' não aceita arquivos-alvo", c->nome); g_ptr_array_free(v, TRUE); return NULL; }
+    if (n > 20) { *erro = g_strdup("no máximo 20 arquivos-alvo"); g_ptr_array_free(v, TRUE); return NULL; }
+    for (guint i = 0; i < n; i++) {
+        const char *x = json_array_get_string_element(a, i);
+        char *abs = x ? proj_resolver(x, FALSE, TRUE, erro) : NULL;
+        if (!abs) { if (!*erro) *erro = g_strdup("alvo inválido"); g_ptr_array_set_free_func(v, g_free); g_ptr_array_free(v, TRUE); return NULL; }
+        char *rel = proj_relativo(abs);
+        gboolean pasta = g_file_test(abs, G_FILE_TEST_IS_DIR);
+        g_free(abs);
+        if (rel[0] == '-' || g_str_has_prefix(rel, ".git/") || proj_sensivel(rel) || pasta) {
+            *erro = g_strdup_printf("alvo recusado: %s", rel);
+            g_free(rel);
+            g_ptr_array_set_free_func(v, g_free);
+            g_ptr_array_free(v, TRUE);
+            return NULL;
+        }
+        g_ptr_array_add(v, rel);
+    }
+    g_ptr_array_add(v, NULL);
+    return (char **)g_ptr_array_free(v, FALSE);
+}
+
 static Comando *preparar(JsonObject *params, GPtrArray **cmds_out, char **exe_out, const char **origem, char **sha_cfg, char **erro)
 {
     const char *nome = params && json_object_has_member(params, "comando") ? json_object_get_string_member(params, "comando") : NULL;
@@ -368,7 +434,15 @@ char *validacao_previa(JsonObject *params, char **erro)
     const char *origem = NULL;
     Comando *c = preparar(params, &cmds, &exe, &origem, &sha_cfg, erro);
     if (!c) { g_free(sha_cfg); return NULL; }
-    char *av = argv_texto(c->argv);
+    char **alvos = resolver_alvos(params, c, erro);
+    if (!alvos) { g_free(sha_cfg); g_free(exe); g_ptr_array_unref(cmds); return NULL; }
+    GPtrArray *completo = g_ptr_array_new();
+    for (int i = 0; c->argv[i]; i++) g_ptr_array_add(completo, c->argv[i]);
+    for (int i = 0; alvos[i]; i++) g_ptr_array_add(completo, alvos[i]);
+    g_ptr_array_add(completo, NULL);
+    char *av = argv_texto((char **)completo->pdata);
+    g_ptr_array_free(completo, TRUE);
+    g_strfreev(alvos);
     char *amb = proc_descricao_ambiente(NULL);
     char *digital = validacao_impressao_digital(proj_raiz());
     char *base = g_path_get_basename(exe);
@@ -410,9 +484,12 @@ char *validacao_executar(JsonObject *params, volatile gint *cancelado, char **er
     const char *origem = NULL;
     Comando *c = preparar(params, &cmds, &exe, &origem, NULL, erro);
     if (!c) return NULL;
+    char **alvos = resolver_alvos(params, c, erro);
+    if (!alvos) { g_free(exe); g_ptr_array_unref(cmds); return NULL; }
     GPtrArray *a = g_ptr_array_new();
     g_ptr_array_add(a, exe);
     for (int i = 1; c->argv[i]; i++) g_ptr_array_add(a, c->argv[i]);
+    for (int i = 0; alvos[i]; i++) g_ptr_array_add(a, alvos[i]);
     g_ptr_array_add(a, NULL);
     ProcPedido p = { .argv = (char **)a->pdata, .raiz = proj_raiz(), .projeto_gravavel = TRUE, .timeout_ms = c->timeout_s * 1000,
                      .max_saida = PROC_SAIDA_PADRAO, .memoria_mb = PROC_MEMORIA_PADRAO_MB, .cancelado = cancelado };
@@ -422,6 +499,7 @@ char *validacao_executar(JsonObject *params, volatile gint *cancelado, char **er
         *erro = g_strdup(r.erro ? r.erro : "não executou");
         proc_resultado_liberar(&r);
         g_ptr_array_free(a, TRUE);
+        g_strfreev(alvos);
         g_ptr_array_unref(cmds);
         return NULL;
     }
@@ -431,6 +509,7 @@ char *validacao_executar(JsonObject *params, volatile gint *cancelado, char **er
     json_builder_set_member_name(b, "comando"); json_builder_add_string_value(b, c->nome);
     json_builder_set_member_name(b, "argv"); json_builder_begin_array(b);
     for (int i = 0; c->argv[i]; i++) json_builder_add_string_value(b, c->argv[i]);
+    for (int i = 0; alvos[i]; i++) json_builder_add_string_value(b, alvos[i]);
     json_builder_end_array(b);
     json_builder_set_member_name(b, "executavel"); json_builder_add_string_value(b, exe);
     json_builder_set_member_name(b, "passou"); json_builder_add_boolean_value(b, passou);
@@ -463,6 +542,7 @@ char *validacao_executar(JsonObject *params, volatile gint *cancelado, char **er
     g_object_unref(b);
     proc_resultado_liberar(&r);
     g_ptr_array_free(a, TRUE);
+    g_strfreev(alvos);
     g_free(exe);
     g_ptr_array_unref(cmds);
     return s;

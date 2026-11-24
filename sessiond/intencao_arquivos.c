@@ -302,6 +302,18 @@ static char *pasta_apos_preposicao(const char *pedido)
     return r;
 }
 
+/* "não rode git", "sem usar o git", "não use git status": o pedido PROÍBE
+ * o Git — nenhuma intenção de Git pode sair dele */
+gboolean intencao_proibe_git(const char *pedido)
+{
+    char *t = normalizar(pedido);
+    gboolean r = tem(t, L(" nao rode git", " nao rodar git", " nao use git", " nao usar git", " nao use o git", " nao usar o git",
+                          " nao execute git", " nao executar git", " nao rode o git", " sem git", " sem usar git", " sem usar o git",
+                          " sem rodar git", " sem rodar o git", " nao mexa no git", " nao toque no git", " nada de git", " nao quero git"));
+    g_free(t);
+    return r;
+}
+
 static const char *eol_pedida(const char *t)
 {
     if (tem(t, L(" crlf ", " windows ", " dos "))) return "CRLF";
@@ -346,7 +358,8 @@ AgentePlano *agente_planejar_arquivos(const char *pedido, char **texto_direto)
         goto fim;
     }
 
-    /* ---- Git: consultas e commit ---- */
+    /* ---- Git: consultas e commit (nunca quando o pedido proíbe o Git) ---- */
+    if (intencao_proibe_git(pedido)) goto sem_git;
     gboolean fala_git = tem(t, L(" git ", " commit", " commite", " ramo", " branch", " historico", " repositorio"));
     if (tem(t, L(" faca commit", " faca um commit", " fazer commit", " fazer um commit", " commite ", " commitar ", " de commit", " git commit"))) {
         const char *msg = NULL;
@@ -409,6 +422,7 @@ AgentePlano *agente_planejar_arquivos(const char *pedido, char **texto_direto)
         p = plano_um_passo("ver os últimos commits (git log)", "git_ler", "git.log", json_com(g_strdup("{}"), "limite", lim), "git_log");
         goto fim;
     }
+sem_git:
 
     /* ---- desfazer uma operação anterior ---- */
     if (tem(t, L(" desfaca ", " desfazer ", " desfaz ", " reverta a operacao", " reverter a operacao"))) {
@@ -433,7 +447,7 @@ AgentePlano *agente_planejar_arquivos(const char *pedido, char **texto_direto)
         const char *alvo = NULL;
         for (guint i = 0; i < ncam && !alvo; i++)
             if (strcmp(cam[i], cit[0]) && strcmp(cam[i], cit[1])) alvo = cam[i];
-        if (!alvo && ncit >= 3) alvo = cit[2];
+        if (!alvo && ncit >= 3 && parece_caminho(cit[2])) alvo = cit[2];
         if (!alvo) { falta = "Em qual arquivo devo fazer a substituição? Diga o caminho (por exemplo, src/main.c)."; goto fim; }
         char *pj = json_params("caminho", alvo, "procurar", cit[0], "substituir", cit[1]);
         if (tem(t, L(" todas ", " todos ", " em todo ", " toda ocorrencia", " todas as ocorrencias"))) pj = json_com(pj, "todas", "true");

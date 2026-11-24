@@ -7,6 +7,14 @@
 
 #define GIT "/usr/bin/git"
 #define GIT_SAIDA_MAX (512 * 1024)
+/* Memória do git isolado: limite de espaço de endereçamento (RLIMIT_AS).
+ * Repositórios grandes não precisam de mais memória — o git é configurado
+ * para mapear os packs em janelas pequenas (core.packedGitWindowSize/
+ * packedGitLimit), então o uso fica limitado qualquer que seja o tamanho do
+ * pack. LIA_SESSIOND_GIT_MEMORIA_MB ajusta, dentro de [256, 4096]. */
+#define GIT_MEMORIA_PADRAO_MB 1024
+#define GIT_MEMORIA_MIN_MB 128
+#define GIT_MEMORIA_MAX_MB 4096
 
 static char *g_autor_nome, *g_autor_email;
 
@@ -34,6 +42,15 @@ static gboolean repositorio(char **erro)
     return TRUE;
 }
 
+guint git_memoria_mb(void)
+{
+    const char *v = g_getenv("LIA_SESSIOND_GIT_MEMORIA_MB");
+    gint64 n = v && *v ? g_ascii_strtoll(v, NULL, 10) : GIT_MEMORIA_PADRAO_MB;
+    if (n < GIT_MEMORIA_MIN_MB) n = GIT_MEMORIA_MIN_MB;
+    if (n > GIT_MEMORIA_MAX_MB) n = GIT_MEMORIA_MAX_MB;
+    return (guint)n;
+}
+
 /* git com a configuração controlada; 'args' terminado em NULL */
 static gboolean rodar(const char *const *args, gboolean gravavel, char **env_extra, volatile gint *cancelado, ProcResultado *r)
 {
@@ -42,7 +59,14 @@ static gboolean rodar(const char *const *args, gboolean gravavel, char **env_ext
     const char *base[] = { GIT, "--no-pager", "-c", "core.hooksPath=/tmp/sem-ganchos", "-c", "core.fsmonitor=false",
                            "-c", "core.pager=cat", "-c", "diff.external=", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
                            "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "color.ui=false", "-c", "core.untrackedCache=false",
-                           "-c", "core.editor=false", "-c", "credential.helper=", "-c", safe, NULL };
+                           "-c", "core.editor=false", "-c", "credential.helper=",
+                           /* janelas de mmap pequenas: um pack de centenas de MiB não
+                            * é mapeado de uma vez (o padrão de 64 bits é 1 GiB por janela) */
+                           "-c", "core.packedGitWindowSize=32m", "-c", "core.packedGitLimit=192m",
+                           "-c", "core.deltaBaseCacheLimit=48m", "-c", "core.bigFileThreshold=32m",
+                           /* sem threads extras (cada uma reserva pilha e arena de memória) */
+                           "-c", "core.preloadIndex=false", "-c", "index.threads=1", "-c", "pack.threads=1", "-c", "grep.threads=1",
+                           "-c", safe, NULL };
     for (int i = 0; base[i]; i++) g_ptr_array_add(a, (gpointer)base[i]);
     for (int i = 0; args[i]; i++) g_ptr_array_add(a, (gpointer)args[i]);
     g_ptr_array_add(a, NULL);
@@ -53,7 +77,7 @@ static gboolean rodar(const char *const *args, gboolean gravavel, char **env_ext
     for (int i = 0; env_extra && env_extra[i]; i++) g_ptr_array_add(env, env_extra[i]);
     g_ptr_array_add(env, NULL);
     ProcPedido p = { .argv = (char **)a->pdata, .raiz = proj_raiz(), .projeto_gravavel = gravavel, .git_gravavel = gravavel,
-                     .env_extra = (char **)env->pdata, .timeout_ms = 60000, .max_saida = GIT_SAIDA_MAX, .memoria_mb = 1024,
+                     .env_extra = (char **)env->pdata, .timeout_ms = 60000, .max_saida = GIT_SAIDA_MAX, .memoria_mb = git_memoria_mb(),
                      .cancelado = cancelado };
     proc_executar(&p, r);
     g_ptr_array_free(a, TRUE);

@@ -74,10 +74,11 @@ OllamaConfig *ollama_config_novo(const char *host_ou_null, int porta, const char
     cfg->host = g_strdup(host_ou_null && *host_ou_null ? host_ou_null : "127.0.0.1");
     cfg->porta = porta > 0 ? porta : 11434;
     cfg->modelo = g_strdup(modelo && *modelo ? modelo : "llama3");
-    cfg->timeout_ms = 60000; /* CPU-only: medido ~34s (8,7s prompt-eval + 25s geração,
-                              * llama3.2:3b, prompt real da Lia) numa máquina com uso
-                              * normal — 15s (valor antigo) estourava rotineiramente
-                              * antes do primeiro token chegar. */
+    /* inatividade entre leituras: num CPU, um prompt de código (alguns mil
+     * tokens) leva minutos de avaliação antes do primeiro token — 60 s
+     * cortava a tarefa de código no meio (medido no POC: 1752 tokens de
+     * prompt em 56 s, e prompts maiores passavam de 60 s). Finito sempre. */
+    cfg->timeout_ms = 240000;
     cfg->limite_resposta_bytes = 1024 * 1024; /* 1 MiB — suficiente para uma resposta de chat */
     return cfg;
 }

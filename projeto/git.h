@@ -20,6 +20,8 @@
 
 /* autor dos commits: "Nome <email>" (LIA_SESSIOND_GIT_AUTOR); NULL = o do repositório */
 void git_definir_autor(const char *autor);
+/* limite de memória (MiB) do git isolado: LIA_SESSIOND_GIT_MEMORIA_MB, em [128, 4096] (padrão 1024) */
+guint git_memoria_mb(void);
 
 char *git_status(volatile gint *cancelado, char **erro);
 char *git_diff(JsonObject *params, volatile gint *cancelado, char **erro);

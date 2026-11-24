@@ -428,6 +428,11 @@ teste-arquivos-projeto: sessiond chat teste-arquivos teste-intencao-arquivos
 teste-coding: sessiond chat teste-processo teste-validacao-git teste-coding-unit
 	python3 -I testes/integration/teste_coding.py
 
+# fase 2b: projeto PHP de fixture (Git como pré-condição, pedido analítico,
+# manifests Docker, arquivos sensíveis), sem rede, sem banco, sem LLM
+teste-coding-php: sessiond
+	python3 -I testes/integration/teste_coding_php.py
+
 # ---------------------------------------------------------------------------
 # lia-chat (chat/): primeiro cliente de chat interativo de terminal para o
 # protocolo (docs/protocolo.md §9). Camada fina sobre gui/protocolo.c — não
@@ -458,4 +463,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
+.PHONY: teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-coding-php teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
