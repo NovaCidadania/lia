@@ -558,13 +558,20 @@ sem_git:
 
     /* conteúdo para criar/escrever/acrescentar */
     char *conteudo = bloco ? g_strdup(bloco) : conteudo_apos_marcador(pedido);
-    if (!conteudo)
+    /* trecho citado SOLTO ("crie tests/X.php com um teste para `Classe::m()`")
+     * não é conteúdo literal quando o pedido descreve código a GERAR: aí o
+     * trecho é o assunto (o que testar/implementar), e o pedido vai para o
+     * ciclo de coding. Conteúdo literal: bloco ```, ou "com o conteúdo: ..." */
+    gboolean descreve_geracao = tem(t, L(" teste", " test ", " tests ", " phpunit", " pytest", " unittest", " funcao", " metodo", " classe ",
+                                         " programa", " implement", " que verifique", " que confirme", " que prove", " que teste", " fake", " mock",
+                                         " stub", " cobrindo", " cobertura"));
+    if (!conteudo && !descreve_geracao)
         for (guint i = 0; i < ncit && !conteudo; i++)
             if (!ncam || strcmp(cit[i], cam[0])) conteudo = g_strdup(cit[i]);
 
     /* ---- acrescentar ao fim ---- */
     if (tem(t, L(" acrescente ", " acrescentar ", " anexe ", " anexar ", " adicione ", " adicionar ", " inclua ", " incluir ", " append ")) &&
-        ncam >= 1 && (tem(t, L(" final", " fim ")) || conteudo)) {
+        ncam >= 1 && (tem(t, L(" final", " fim ")) || conteudo) && (conteudo || !descreve_geracao)) {
         if (!conteudo) { falta = "O que devo acrescentar? Coloque o texto entre aspas ou num bloco ```."; g_free(conteudo); goto fim; }
         char *obj = g_strdup_printf("acrescentar texto ao fim de %s", cam[0]);
         p = plano_um_passo(obj, "arquivo_alterar", "arquivo.anexar", json_params("caminho", cam[0], "conteudo", conteudo, NULL, NULL), "arquivo_alterado");

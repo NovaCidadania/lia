@@ -91,6 +91,22 @@ int main(void)
     proj_definir_dir_desfazer(desf);
     char *erro = NULL;
     if (!proj_definir_raiz(raiz, &erro)) { printf("raiz: %s\n", erro); return 2; }
+
+    /* resumo de falha: a causa (antes do stack trace) não se perde */
+    {
+        GString *t = g_string_new("PHP Warning:  require_once(../application/models/M_x.php): Failed to open stream: No such file or directory in /p/tests/XTest.php on line 3\n"
+                                  "PHP Fatal error:  Uncaught Error: Failed opening required '../application/models/M_x.php' in /p/tests/XTest.php:3\n"
+                                  "Stack trace:\n");
+        for (int i = 0; i < 30; i++) g_string_append_printf(t, "#%d /p/vendor/phpunit/src/Arquivo%d.php(%d): Algo->metodo()\n", i, i, i * 10);
+        char *r = validacao_resumo_falha(t->str, 15, 2000);
+        checar(strstr(r, "Failed opening required '../application/models/M_x.php'") && strstr(r, "#29 /p/vendor") && strstr(r, "(…)"),
+               "resumo de falha: linha da causa + fim do trace");
+        g_free(r);
+        r = validacao_resumo_falha("linha 1\nlinha 2\n", 15, 2000);
+        checar(!strcmp(r, "linha 1\nlinha 2\n"), "resumo de falha: saída curta inalterada");
+        g_free(r);
+        g_string_free(t, TRUE);
+    }
     char *det = NULL;
     if (!proc_isolamento_disponivel(&det)) {
         printf("isolamento indisponível (%s): conferindo só a falha fechada\n", det);

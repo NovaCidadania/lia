@@ -65,6 +65,14 @@ void coding_arquivo_liberar(gpointer p);
  * 'shas': caminho -> sha256. Devolve os arquivos finais (só os que mudam)
  * e *hash: identidade da proposta (para detectar repetição). */
 GPtrArray *coding_aplicar_edicoes(const char *texto_modelo, GHashTable *lidos, GHashTable *shas, char **hash, char **explicacao, char **erro);
+/* idem, e 'reescreviveis': arquivos que a PRÓPRIA tarefa criou — "criar"
+ * de novo sobre eles vira regravação inteira (presa ao hash lido) */
+GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *lidos, GHashTable *shas, char **reescreviveis,
+                                         char **hash, char **explicacao, char **erro);
+
+/* arquivo de código novo trivial (só o nome do método, PHP sem <?php,
+ * teste sem caso de teste...): devolve o motivo, ou NULL se parece código */
+char *coding_conteudo_trivial(const char *caminho, const char *conteudo);
 
 /* Identificadores citados no pedido (Classe::metodo, nomes_com_sublinhado,
  * camelCase, `entre crases`) — o que vale procurar no código */
@@ -91,6 +99,36 @@ char *coding_achados_sql(const char *arquivo, const char *conteudo, gint64 linha
  * que passa pelo mesmo verificador, prévia e aprovação; NULL + *motivo
  * quando a receita não se aplica com segurança. */
 char *coding_receita_sql_bind(const char *arquivo, const char *conteudo, const char *metodo, gboolean criar_teste, char **motivo);
+
+/* o pedido proíbe alterar código de produção ("não altere o model", "só o teste") */
+gboolean coding_pedido_so_testes(const char *pedido);
+/* caminho de arquivo de teste (tests/, *Test.php, test_*.py, *.spec.ts...) */
+gboolean coding_caminho_de_teste(const char *caminho);
+/* a tarefa em termos concretos para o prompt de edição (arquivo novo a
+ * criar, proibições, o que um teste precisa ter) — orientação, não código */
+char *coding_dicas_tarefa(const char *pedido, GHashTable *lidos);
+
+/* pedido amplo de melhoria ("melhore os controllers e models") sem
+ * símbolo nem caminho: a Lia pede o escopo, nunca edita nem pesquisa na web */
+gboolean coding_pedido_generico(const char *pedido);
+
+/* Manifests Docker (compose*.y*ml, docker-compose*, Dockerfile*): fatos
+ * extraídos linha a linha, sem modelo — serviços, origem (build/imagem),
+ * portas, volumes, dependências, redes, deploy; "não declarado no
+ * manifest" quando a chave não existe. Riscos são inferências a partir de
+ * uma linha citada. Comentários nunca viram fato. Conteúdo já chega com os
+ * valores de ambiente ocultados; só NOMES de variáveis aparecem.
+ * Acrescenta a 'fatos', 'riscos' ("arquivo:linha — texto\n") e aos nomes
+ * de serviços em 'servicos' (separados por vírgula). */
+gboolean coding_e_manifest_docker(const char *caminho);
+void coding_fatos_docker(const char *arquivo, const char *conteudo, gint64 linha_inicial, GString *fatos, GString *riscos, GString *servicos);
+
+/* resumo determinístico (serviços, dependências, portas, volumes, nº de
+ * riscos) montado só a partir dos fatos acima */
+char *coding_resumo_docker(const char *fatos, const char *riscos);
+/* frases do texto do modelo que contradizem os fatos (dependência ou porta
+ * que não existe no manifest); "" se nenhuma */
+char *coding_contradicoes_docker(const char *fatos, const char *texto);
 
 char *coding_prompt_plano(const char *pedido, const char *lista_arquivos);
 /* 'simbolos': em arquivos grandes, só a região deles vai ao modelo */

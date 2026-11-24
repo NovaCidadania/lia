@@ -1113,6 +1113,16 @@ static void tratar_msg_progresso_ou_saida(LiaChat *c, const LiaMsg *m, gboolean 
         g_free(msg);
         return;
     }
+    JsonObject *ana = progresso ? campo_obj(m->dados, "analise") : NULL;
+    if (ana) {
+        /* o modelo analisa os arquivos lidos: uma linha a cada batida (no
+         * máximo a cada 15 s), com backend, tempo e tokens */
+        char *msg = sanear(campo_str(m->dados, "mensagem"));
+        if (c->term) saida_linha(c, "%s  ⋯ análise: %s%s", sgr(c, EST_FRACO), msg, sgr0(c));
+        else saida_linha(c, "[análise] %s", msg);
+        g_free(msg);
+        return;
+    }
     JsonObject *sint = progresso ? campo_obj(m->dados, "sintese") : NULL;
     if (sint) {
         /* o modelo está escrevendo a resposta: só a linha de status muda

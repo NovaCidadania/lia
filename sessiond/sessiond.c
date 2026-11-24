@@ -136,6 +136,7 @@ static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id);
 static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t);
 static void coding_cancelar(Cliente *c);
 static AgentePlano *plano_analise_docker(const char *pedido);
+static char *escopo_pedido_generico(void);
 
 struct Daemon {
     GSocketListener *listener;
@@ -1465,6 +1466,19 @@ static void tratar_perguntar(Cliente *c, const LiaMsg *m)
         if (g_regex_match(re, mensagem, 0, &mi)) retomar_id = g_match_info_fetch(mi, 1);
         g_match_info_free(mi);
         g_regex_unref(re);
+        if (!retomar_id && coding_pedido_generico(mensagem)) {
+            /* amplo demais para editar com segurança: nada é alterado nem
+             * pesquisado; a Lia mostra o escopo e uma auditoria só de leitura */
+            char *pid = lia_novo_id("perg");
+            char *txt = escopo_pedido_generico();
+            g_print("lia-sessiond: pergunta %s: pedido amplo de melhoria — esclarecimento com auditoria de escopo limitado (nada alterado)\n", pid);
+            enviar_proposta_tarefa(c, pid, NULL, COMPAT_ESCLARECER, txt, "roteador", "esclarecimento",
+                                   "pedido amplo sem arquivo, classe ou função: a Lia pede o escopo antes de qualquer alteração", 0, 0);
+            g_free(txt);
+            g_free(pid);
+            g_free(prompt_final);
+            return;
+        }
         gboolean codigo = FALSE;
         if (!retomar_id && coding_e_pedido(mensagem)) {
             /* operação de arquivo LITERAL (conteúdo em bloco ```, troca
@@ -2392,7 +2406,7 @@ static void ao_sintese_web(gpointer ctx, const ModeloResposta *r)
  * fixa (SQL montada com variável) vêm junto; hipótese fica separada de
  * evidência. Sem modelo, a resposta é só a da regra fixa. */
 
-#define LIA_MODELO_TOKENS_ANALISE 1000
+#define LIA_MODELO_TOKENS_ANALISE 700
 #define ANALISE_MAX_BYTES 14000
 
 static gboolean pedido_analitico(const char *pedido)
@@ -2417,17 +2431,48 @@ typedef struct {
     char *pergunta_id, *pedido, *modelo_id;
     GPtrArray *janelas; /* Janela* */
     char *achados;
-    gint64 inicio_us;
+    char *fatos, *riscos, *servicos; /* manifests Docker: regra fixa, com linha */
+    gboolean docker;
+    gint64 inicio_us, inicio_modelo_us;
+    char *modelo_desc;               /* "Ollama · llama3.2:3b" */
+    char *texto_modelo;              /* com fatos Docker: o texto livre do modelo vai numa seção à parte */
+    guint batida;                    /* timer de progresso enquanto o modelo trabalha */
+    gint64 tokens;
 } AnaliseCtx;
 
 static void janela_liberar(gpointer p) { Janela *j = p; g_free(j->arquivo); g_free(j); }
 
 static void analise_liberar(AnaliseCtx *a)
 {
+    if (a->batida) g_source_remove(a->batida);
     cliente_unref(a->c);
     g_free(a->pergunta_id); g_free(a->pedido); g_free(a->modelo_id); g_free(a->achados);
+    g_free(a->fatos); g_free(a->riscos); g_free(a->servicos); g_free(a->modelo_desc); g_free(a->texto_modelo);
     g_ptr_array_unref(a->janelas);
     g_free(a);
+}
+
+/* qual backend/modelo responde — mostrado em toda resposta que o usa */
+static char *modelo_descricao(void)
+{
+    if (!g_modelo) return g_strdup("nenhum modelo configurado");
+    const char *nb = g_modelo->nome_backend;
+    if (!strcmp(nb, "ollama")) {
+        const char *m = g_getenv("LIA_OLLAMA_MODELO");
+        return g_strdup_printf("Ollama · %s", m && *m ? m : "llama3");
+    }
+    if (!strcmp(nb, "llama_cpp")) {
+        const char *m = g_getenv("LIA_LLAMACPP_MODELO_NOME"), *f = g_getenv("LIA_LLAMACPP_FORMATO");
+        return g_strdup_printf("llama.cpp · %s · formato %s", m && *m ? m : "modelo carregado no llama-server", f && *f ? f : "cru");
+    }
+    return g_strdup(nb);
+}
+
+static guint intervalo_progresso_ms(void)
+{
+    const char *e = g_getenv("LIA_SESSIOND_INTERVALO_PROGRESSO_MS");
+    int v = e ? atoi(e) : 15000;
+    return (guint)CLAMP(v, 100, 30000);
 }
 
 static char *sem_controle(const char *t, gsize max)
@@ -2456,20 +2501,47 @@ static gboolean referencia_valida(AnaliseCtx *a, const char *arquivo, const char
     return FALSE;
 }
 
-static void analise_responder(AnaliseCtx *a, const char *resposta, const char *evid, const char *hip, const char *como, const char *aviso)
+static void analise_responder(AnaliseCtx *a, const char *resposta, const char *evid, const char *hip, const char *como, const char *aviso,
+                              gboolean do_modelo, const char *estado_modelo)
 {
     GString *o = g_string_new(NULL);
     g_string_append_printf(o, "Resposta: %s\n", resposta);
-    if (evid && *evid) g_string_append_printf(o, "\nEvidência (linhas lidas agora):\n%s", evid);
+    if (evid && *evid) g_string_append_printf(o, "\nEvidência citada pelo modelo (cada referência conferida contra as linhas lidas):\n%s", evid);
+    if (a->fatos && *a->fatos) {
+        g_string_append(o, "\nFatos dos manifests (regra fixa, sem modelo — cada um com a linha de origem; \"não declarado\" = a chave não existe no arquivo):\n");
+        char **l = g_strsplit(a->fatos, "\n", -1);
+        for (int i = 0; l[i]; i++) if (*l[i]) g_string_append_printf(o, "  %s%s\n", l[i][0] == ' ' ? "" : "• ", l[i]);
+        g_strfreev(l);
+    }
+    if (a->riscos && *a->riscos) {
+        g_string_append(o, "\nRiscos apontados por regra fixa (inferências a partir da linha citada, não comprovados em execução):\n");
+        char **l = g_strsplit(a->riscos, "\n", -1);
+        for (int i = 0; l[i]; i++) if (*l[i]) g_string_append_printf(o, "  • %s\n", l[i]);
+        g_strfreev(l);
+    }
     if (a->achados && *a->achados) {
         g_string_append(o, "\nAchados por regra fixa (indícios verificáveis, não prova):\n");
         char **l = g_strsplit(a->achados, "\n", -1);
         for (int i = 0; l[i]; i++) if (*l[i]) g_string_append_printf(o, "  • %s\n", l[i]);
         g_strfreev(l);
     }
+    if (a->texto_modelo && *a->texto_modelo) {
+        g_string_append_printf(o, "\nLeitura do modelo local (texto livre, NÃO verificado — os fatos acima prevalecem):\n  %s\n", a->texto_modelo);
+        char *ctr = coding_contradicoes_docker(a->fatos, a->texto_modelo);
+        if (*ctr) {
+            g_string_append(o, "  ⚠ afirmações do modelo que contradizem as linhas lidas:\n");
+            char **l = g_strsplit(ctr, "\n", -1);
+            for (int i = 0; l[i]; i++) if (*l[i]) g_string_append_printf(o, "    • %s\n", l[i]);
+            g_strfreev(l);
+        }
+        g_free(ctr);
+    }
     if (hip && *hip) g_string_append_printf(o, "\nHipóteses (não verificadas só com estas linhas):\n%s", hip);
     g_string_append_printf(o, "\nComo esta resposta foi montada: %s\n", como);
-    if (!a->c->fechado) enviar_resposta_final(a->c, a->pergunta_id, o->str, "modelo", TRUE, aviso, (g_get_monotonic_time() - a->inicio_us) / 1000);
+    g_string_append_printf(o, "Modelo: %s — %s\n", a->modelo_desc ? a->modelo_desc : "nenhum", estado_modelo ? estado_modelo : "não usado");
+    if (a->docker) g_string_append(o, "Nada foi executado: só a leitura dos manifests (nenhum contêiner iniciado, parado ou recriado; nenhum comando docker).\n");
+    gint64 ms_modelo = a->inicio_modelo_us ? (g_get_monotonic_time() - a->inicio_modelo_us) / 1000 : 0;
+    if (!a->c->fechado) enviar_resposta_final(a->c, a->pergunta_id, o->str, do_modelo ? "modelo" : "deterministica", TRUE, aviso, ms_modelo);
     g_string_free(o, TRUE);
 }
 
@@ -2479,8 +2551,12 @@ static void ao_analise(gpointer ctx, const ModeloResposta *r)
     Cliente *c = a->c;
     if (c->fechado || !c->resumo_pendente_id || strcmp(c->resumo_pendente_id, a->modelo_id) != 0) { analise_liberar(a); return; }
     g_clear_pointer(&c->resumo_pendente_id, g_free);
+    if (a->batida) { g_source_remove(a->batida); a->batida = 0; }
     if (g_strcmp0(g_getenv("LIA_SESSIOND_DEPURAR_CODIGO"), "1") == 0)
         g_print("lia-sessiond: [depuração] análise bruta do modelo: %.4000s\n", r->resposta_texto ? r->resposta_texto : "(nenhuma)");
+    double seg = (g_get_monotonic_time() - a->inicio_modelo_us) / (double)G_USEC_PER_SEC;
+    char *estado_ok = g_strdup_printf("respondeu em %.1f s", seg);
+    g_print("lia-sessiond: pergunta %s: análise do modelo terminou em %.1f s (%s)\n", a->pergunta_id, seg, r->sucesso ? "ok" : (r->erro_codigo ? r->erro_codigo : "erro"));
     gboolean ok = FALSE;
     if (r->sucesso && r->resposta_texto) {
         const char *ab = strchr(r->resposta_texto, '{'), *fe = strrchr(r->resposta_texto, '}');
@@ -2525,9 +2601,18 @@ static void ao_analise(gpointer ctx, const ModeloResposta *r)
                 }
                 char *rs = sem_controle(resp, 1200);
                 char *aviso = descartadas ? g_strdup_printf("%u referência(s) do modelo descartada(s): apontavam para linhas que não foram lidas", descartadas) : NULL;
-                analise_responder(a, rs, ev->str, hp->str,
-                                  "análise do modelo local sobre as linhas lidas acima; cada referência arquivo:linha foi conferida contra a leitura (as descartadas estão no aviso); "
-                                  "a resposta em texto livre é do modelo — confira nas linhas citadas", aviso);
+                if (a->fatos && *a->fatos) {
+                    /* manifests: a resposta principal são os fatos; o texto do modelo vai à parte, conferido */
+                    a->texto_modelo = rs;
+                    rs = coding_resumo_docker(a->fatos, a->riscos);
+                    analise_responder(a, rs, ev->str, hp->str,
+                                      "a \"Resposta\", os fatos e os riscos vêm da regra fixa sobre as linhas lidas (sem modelo). A leitura do modelo, as referências dele "
+                                      "(conferidas só quanto a terem sido lidas) e as hipóteses são texto livre — as contradições com os fatos são apontadas", aviso, TRUE, estado_ok);
+                } else {
+                    analise_responder(a, rs, ev->str, hp->str,
+                                      "a \"Resposta\" e as hipóteses são texto do modelo local; cada referência arquivo:linha dele foi conferida contra a leitura (as descartadas estão no aviso), "
+                                      "mas não o que ele afirma sobre ela — confira nas linhas citadas. Achados marcados como regra fixa não vêm do modelo", aviso, TRUE, estado_ok);
+                }
                 g_free(rs); g_free(aviso);
                 g_string_free(ev, TRUE); g_string_free(hp, TRUE);
                 ok = TRUE;
@@ -2547,8 +2632,8 @@ static void ao_analise(gpointer ctx, const ModeloResposta *r)
             if (json_parser_load_from_data(jp2, json, -1, NULL)) {
                 char *rs = sem_controle(json_node_get_string(json_parser_get_root(jp2)), 1200);
                 if (*rs) {
-                    analise_responder(a, rs, NULL, NULL, "análise do modelo local sobre as linhas lidas acima (a resposta veio cortada no limite: só o texto da conclusão foi aproveitado, sem referências) — confira nas linhas",
-                                      "a resposta do modelo veio incompleta: sem evidências conferidas");
+                    analise_responder(a, rs, NULL, NULL, "a \"Resposta\" é texto do modelo local, que veio cortado no limite: só a conclusão foi aproveitada, sem referências — confira nas linhas",
+                                      "a resposta do modelo veio incompleta: sem evidências conferidas", TRUE, estado_ok);
                     ok = TRUE;
                 }
                 g_free(rs);
@@ -2561,14 +2646,68 @@ static void ao_analise(gpointer ctx, const ModeloResposta *r)
         g_regex_unref(re);
     }
     if (!ok) {
-        char *mot = g_strdup_printf("o modelo local não devolveu uma análise utilizável (%s)", r->sucesso ? "formato inválido" : (r->erro_codigo ? r->erro_codigo : "erro"));
-        analise_responder(a, a->achados && *a->achados ? "não consegui a análise do modelo; os achados da regra fixa abaixo apontam onde olhar — o trecho lido está acima"
-                                                       : "não consegui a análise do modelo e a regra fixa não encontrou nada; o trecho lido está acima",
-                          NULL, NULL, "só a regra fixa (sem modelo)", mot);
-        g_free(mot);
+        const char *por = r->sucesso ? "a saída não era o JSON pedido (formato inválido)" : (r->erro_codigo ? r->erro_codigo : "erro");
+        char *mot = g_strdup_printf("o modelo local não devolveu uma análise utilizável: %s", por);
+        char *estado = g_strdup_printf("falhou em %.1f s: %s; a resposta acima é só da regra fixa", seg, por);
+        char *resp;
+        if (a->fatos && *a->fatos) {
+            char *res = coding_resumo_docker(a->fatos, a->riscos);
+            resp = g_strdup_printf("pelos manifests lidos (regra fixa, sem o modelo): %s", res);
+            g_free(res);
+        }
+        else if (a->achados && *a->achados)
+            resp = g_strdup("pela regra fixa há indício nas linhas abaixo; sem o modelo não dá para dizer mais do que isso — o trecho lido está acima");
+        else
+            resp = g_strdup("não foi possível inferir uma resposta: o modelo falhou e nenhuma regra fixa se aplica a estas linhas. O trecho lido está acima; "
+                            "tente uma pergunta mais específica (um arquivo e uma função) ou um modelo maior");
+        analise_responder(a, resp, NULL, NULL, "só regra fixa (sem texto do modelo)", mot, FALSE, estado);
+        g_free(resp); g_free(estado); g_free(mot);
     }
+    g_free(estado_ok);
     analise_liberar(a);
 }
+
+/* andamento enquanto o modelo analisa: nunca mais que o intervalo
+ * (padrão 15 s) sem notícia; 'cancelar' interrompe a geração */
+static void analise_progresso(AnaliseCtx *a, gboolean inicio)
+{
+    if (a->c->fechado) return;
+    gint64 seg = (g_get_monotonic_time() - a->inicio_modelo_us) / G_USEC_PER_SEC;
+    char *msg = inicio
+        ? g_strdup_printf("analisando %u arquivo(s) com o modelo local (%s); limite de %d tokens — \"cancelar\" interrompe", a->janelas->len, a->modelo_desc, LIA_MODELO_TOKENS_ANALISE)
+        : g_strdup_printf("aguardando o modelo local (%s): %" G_GINT64_FORMAT " s, %" G_GINT64_FORMAT " token(s) recebido(s) — \"cancelar\" interrompe%s",
+                          a->modelo_desc, seg, a->tokens, a->fatos && *a->fatos ? "; os fatos por regra fixa já estão prontos" : "");
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "pergunta_id");
+    json_builder_add_string_value(b, a->pergunta_id);
+    json_builder_set_member_name(b, "mensagem");
+    json_builder_add_string_value(b, msg);
+    json_builder_set_member_name(b, "analise");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "segundos"); json_builder_add_int_value(b, seg);
+    json_builder_set_member_name(b, "tokens"); json_builder_add_int_value(b, a->tokens);
+    json_builder_set_member_name(b, "modelo"); json_builder_add_string_value(b, a->modelo_desc);
+    json_builder_end_object(b);
+    json_builder_end_object(b);
+    g_free(msg);
+    char *id = lia_novo_id("msg");
+    char *linha = lia_msg_montar(LIA_MSG_PROGRESSO, id, NULL, b);
+    g_free(id);
+    g_object_unref(b);
+    escrever_linha(a->c, linha);
+}
+
+static gboolean ao_analise_batida(gpointer p)
+{
+    AnaliseCtx *a = p;
+    Cliente *c = a->c;
+    if (c->fechado || !c->resumo_pendente_id || strcmp(c->resumo_pendente_id, a->modelo_id) != 0) { a->batida = 0; return G_SOURCE_REMOVE; }
+    analise_progresso(a, FALSE);
+    return G_SOURCE_CONTINUE;
+}
+
+static void ao_analise_tokens(gpointer ctx, gint64 tokens) { ((AnaliseCtx *)ctx)->tokens = tokens; }
 
 static gboolean tarefa_resposta_analise(Tarefa *t, Cliente *c, const char *pergunta_id, const char *pedido)
 {
@@ -2577,6 +2716,7 @@ static gboolean tarefa_resposta_analise(Tarefa *t, Cliente *c, const char *pergu
     AnaliseCtx *a = g_new0(AnaliseCtx, 1);
     a->janelas = g_ptr_array_new_with_free_func(janela_liberar);
     GString *dados = g_string_new(NULL), *achados = g_string_new(NULL);
+    GString *fatos = g_string_new(NULL), *riscos = g_string_new(NULL), *servicos = g_string_new(NULL);
     for (guint i = 0; i < t->plano->passos->len; i++) {
         AgentePasso *s = g_ptr_array_index(t->plano->passos, i);
         if (s->estado != PASSO_SUCESSO || !s->dados_json || strcmp(s->ferramenta, "arquivo.ler")) continue;
@@ -2601,6 +2741,10 @@ static gboolean tarefa_resposta_analise(Tarefa *t, Cliente *c, const char *pergu
                 char *ach = coding_achados_sql(arq, cont, ini);
                 g_string_append(achados, ach);
                 g_free(ach);
+                if (coding_e_manifest_docker(arq)) {
+                    a->docker = TRUE;
+                    coding_fatos_docker(arq, cont, ini, fatos, riscos, servicos);
+                }
             }
         }
         g_object_unref(jp);
@@ -2609,12 +2753,20 @@ static gboolean tarefa_resposta_analise(Tarefa *t, Cliente *c, const char *pergu
     a->pergunta_id = g_strdup(pergunta_id);
     a->pedido = g_strdup(pedido);
     a->achados = g_string_free(achados, FALSE);
+    a->fatos = g_string_free(fatos, FALSE);
+    a->riscos = g_string_free(riscos, FALSE);
+    a->servicos = g_string_free(servicos, FALSE);
+    a->modelo_desc = modelo_descricao();
     a->inicio_us = g_get_monotonic_time();
     if (!a->janelas->len) { g_string_free(dados, TRUE); analise_liberar(a); return FALSE; }
     if (!g_modelo) {
-        analise_responder(a, a->achados && *a->achados ? "pela regra fixa há indício do problema nas linhas abaixo (sem modelo para uma análise completa)"
-                                                       : "sem modelo local não faço a análise; a regra fixa não encontrou SQL montada com variável",
-                          NULL, NULL, "só a regra fixa (nenhum modelo configurado)", NULL);
+        char *res = a->fatos && *a->fatos ? coding_resumo_docker(a->fatos, a->riscos) : NULL;
+        char *resp = res
+            ? g_strdup_printf("pelos manifests lidos (regra fixa): %s", res)
+            : g_strdup(a->achados && *a->achados ? "pela regra fixa há indício do problema nas linhas abaixo (sem modelo para uma análise completa)"
+                                                 : "sem modelo local não faço a análise; nenhuma regra fixa se aplica a estas linhas");
+        analise_responder(a, resp, NULL, NULL, "só regra fixa (nenhum modelo configurado)", NULL, FALSE, NULL);
+        g_free(resp); g_free(res);
         g_string_free(dados, TRUE);
         analise_liberar(a);
         return TRUE;
@@ -2625,6 +2777,11 @@ static gboolean tarefa_resposta_analise(Tarefa *t, Cliente *c, const char *pergu
     g_string_append(pr, ped);
     g_free(ped);
     if (*a->achados) { g_string_append(pr, "\n----- achados por regra fixa (indícios) -----\n"); g_string_append(pr, a->achados); }
+    if (*a->fatos) {
+        g_string_append(pr, "\n----- fatos já extraídos dos manifests por regra fixa (corretos; use-os, não os repita inteiros) -----\n");
+        g_string_append(pr, a->fatos);
+        if (*a->riscos) { g_string_append(pr, "riscos por regra fixa:\n"); g_string_append(pr, a->riscos); }
+    }
     g_string_append(pr, "\n----- linhas lidas -----\n");
     g_string_append(pr, dados->str);
     g_string_append(pr, "----- fim dos dados -----\n\nResponda SÓ com JSON:\n"
@@ -2637,9 +2794,27 @@ static gboolean tarefa_resposta_analise(Tarefa *t, Cliente *c, const char *pergu
     a->modelo_id = g_strdup_printf("%s-analise", pergunta_id);
     g_free(c->resumo_pendente_id);
     c->resumo_pendente_id = g_strdup(a->modelo_id);
-    g_print("lia-sessiond: pergunta %s: análise do modelo sobre %u arquivo(s) lido(s)\n", pergunta_id, a->janelas->len);
-    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = LIA_MODELO_TOKENS_ANALISE, .resumo = TRUE };
-    g_modelo->perguntar(g_modelo, a->modelo_id, pr->str, &op, ao_analise, a);
+    g_print("lia-sessiond: pergunta %s: análise do modelo (%s) sobre %u arquivo(s) lido(s)\n", pergunta_id, a->modelo_desc, a->janelas->len);
+    /* saída estruturada (Ollama "format" / llama-server "json_schema"), com
+     * limites que cabem em ~1 min num modelo pequeno em CPU; desligável com
+     * LIA_SESSIOND_ANALISE_ESQUEMA=0. O JSON é validado de novo aqui. */
+    static const char *ESQUEMA =
+        "{\"type\":\"object\",\"properties\":{"
+        "\"resposta\":{\"type\":\"string\",\"maxLength\":900},"
+        "\"evidencias\":{\"type\":\"array\",\"maxItems\":6,\"items\":{\"type\":\"object\",\"properties\":{"
+        "\"arquivo\":{\"type\":\"string\"},\"linhas\":{\"type\":\"string\"},\"explicacao\":{\"type\":\"string\",\"maxLength\":240}},"
+        "\"required\":[\"arquivo\",\"linhas\",\"explicacao\"]}},"
+        "\"hipoteses\":{\"type\":\"array\",\"maxItems\":3,\"items\":{\"type\":\"string\",\"maxLength\":240}}},"
+        "\"required\":[\"resposta\",\"evidencias\",\"hipoteses\"]}";
+    gboolean esquema = g_strcmp0(g_getenv("LIA_SESSIOND_ANALISE_ESQUEMA"), "0") != 0;
+    ModeloOpcoes op = { .esquema_json = esquema ? ESQUEMA : NULL, .max_tokens = LIA_MODELO_TOKENS_ANALISE, .resumo = TRUE,
+                        .progresso_cb = ao_analise_tokens, .progresso_ctx = a };
+    a->inicio_modelo_us = g_get_monotonic_time();
+    analise_progresso(a, TRUE);
+    a->batida = g_timeout_add(intervalo_progresso_ms(), ao_analise_batida, a);
+    char *mid = g_strdup(a->modelo_id);
+    g_modelo->perguntar(g_modelo, mid, pr->str, &op, ao_analise, a);
+    g_free(mid);
     g_string_free(pr, TRUE);
     return TRUE;
 }
@@ -2671,30 +2846,172 @@ static void manifests_docker(const char *raiz, const char *abs, int prof, GPtrAr
     g_ptr_array_unref(nomes);
 }
 
+static char *json_params_caminho_linhas(const char *caminho, int linhas)
+{
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "caminho"); json_builder_add_string_value(b, caminho);
+    json_builder_set_member_name(b, "linhas"); json_builder_add_int_value(b, linhas);
+    json_builder_end_object(b);
+    JsonGenerator *g = json_generator_new();
+    JsonNode *r = json_builder_get_root(b);
+    json_generator_set_root(g, r);
+    char *txt = json_generator_to_data(g, NULL);
+    json_node_unref(r); g_object_unref(g); g_object_unref(b);
+    return txt;
+}
+
+/* ---- pedido amplo ("melhore os controllers e models") ---- */
+typedef struct { char *caminho; guint achados; gint64 primeira; } AchadoArquivo;
+
+static void escopo_varrer(const char *raiz, const char *abs, int prof, const char *pasta_tipo, GHashTable *contagem, GPtrArray *achados, guint *lidos)
+{
+    if (prof > 6) return;
+    GDir *d = g_dir_open(abs, 0, NULL);
+    if (!d) return;
+    const char *n;
+    while ((n = g_dir_read_name(d))) {
+        if (n[0] == '.' || !strcmp(n, "vendor") || !strcmp(n, "node_modules") || !strcmp(n, "system") || !strcmp(n, "cache") || !strcmp(n, "logs")) continue;
+        char *f = g_build_filename(abs, n, NULL);
+        if (g_file_test(f, G_FILE_TEST_IS_SYMLINK)) { g_free(f); continue; }
+        if (g_file_test(f, G_FILE_TEST_IS_DIR)) {
+            char *low = g_ascii_strdown(n, -1);
+            const char *tipo = pasta_tipo;
+            if (!strcmp(low, "controllers") || !strcmp(low, "controller")) tipo = "controllers";
+            else if (!strcmp(low, "models") || !strcmp(low, "model")) tipo = "models";
+            else if (!strcmp(low, "views") || !strcmp(low, "view")) tipo = "views";
+            escopo_varrer(raiz, f, prof + 1, tipo, contagem, achados, lidos);
+            g_free(low);
+        } else if (pasta_tipo) {
+            const char *rel = f + strlen(raiz) + 1;
+            g_hash_table_replace(contagem, g_strdup(pasta_tipo), GUINT_TO_POINTER(GPOINTER_TO_UINT(g_hash_table_lookup(contagem, pasta_tipo)) + 1));
+            if (strcmp(pasta_tipo, "views") && g_str_has_suffix(n, ".php") && *lidos < 400 && !proj_sensivel(rel)) {
+                char *sha = NULL, *erro = NULL;
+                char *cont = proj_ler_texto(rel, 256 * 1024, &sha, &erro);
+                (*lidos)++;
+                if (cont) {
+                    char *ach = coding_achados_sql(rel, cont, 1);
+                    if (*ach) {
+                        AchadoArquivo *x = g_new0(AchadoArquivo, 1);
+                        x->caminho = g_strdup(rel);
+                        for (const char *q = ach; *q; q++) if (*q == '\n') x->achados++;
+                        const char *dp = strstr(ach, ":");
+                        x->primeira = dp ? g_ascii_strtoll(dp + 1, NULL, 10) : 0;
+                        g_ptr_array_add(achados, x);
+                    }
+                    g_free(ach);
+                }
+                g_free(cont); g_free(sha); g_free(erro);
+            }
+        }
+        g_free(f);
+    }
+    g_dir_close(d);
+}
+
+static gint achado_cmp(gconstpointer pa, gconstpointer pb)
+{
+    const AchadoArquivo *a = *(AchadoArquivo *const *)pa, *b = *(AchadoArquivo *const *)pb;
+    if (a->achados != b->achados) return a->achados < b->achados ? 1 : -1;
+    return strcmp(a->caminho, b->caminho);
+}
+
+static void achado_liberar(gpointer p) { AchadoArquivo *x = p; g_free(x->caminho); g_free(x); }
+
+static char *escopo_pedido_generico(void)
+{
+    GHashTable *cont = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    GPtrArray *ach = g_ptr_array_new_with_free_func(achado_liberar);
+    guint lidos = 0;
+    escopo_varrer(proj_raiz(), proj_raiz(), 0, NULL, cont, ach, &lidos);
+    g_ptr_array_sort(ach, achado_cmp);
+    GString *o = g_string_new("Esse pedido é amplo: não diz qual arquivo, classe ou função mudar. Para não alterar arquivos arbitrários, "
+                              "não vou editar nada nem pesquisar na web — escolha um escopo primeiro.\n");
+    guint nc = GPOINTER_TO_UINT(g_hash_table_lookup(cont, "controllers")), nm = GPOINTER_TO_UINT(g_hash_table_lookup(cont, "models")),
+          nv = GPOINTER_TO_UINT(g_hash_table_lookup(cont, "views"));
+    if (nc || nm || nv)
+        g_string_append_printf(o, "\nNo projeto: %u arquivo(s) em pastas controllers, %u em models e %u em views.\n", nc, nm, nv);
+    g_string_append_printf(o, "\nAuditoria de escopo limitado, já feita (só leitura, regra fixa, sem modelo; %u arquivo(s) PHP de controllers/models lido(s)) — SQL montada com variável:\n", lidos);
+    if (!ach->len) g_string_append(o, "  • nenhum indício encontrado pela regra fixa (isso não prova que o código é seguro)\n");
+    for (guint i = 0; i < ach->len && i < 8; i++) {
+        AchadoArquivo *x = g_ptr_array_index(ach, i);
+        g_string_append_printf(o, "  • %s: %u indício(s), o primeiro na linha %" G_GINT64_FORMAT "\n", x->caminho, x->achados, x->primeira);
+    }
+    if (ach->len > 8) g_string_append_printf(o, "  • … e mais %u arquivo(s)\n", ach->len - 8);
+    const char *ex = ach->len ? ((AchadoArquivo *)g_ptr_array_index(ach, 0))->caminho : "application/models/<arquivo>.php";
+    g_string_append_printf(o, "\nPróximo passo — peça algo específico, por exemplo:\n"
+                              "  • \"analise %s: há SQL injection?\" — leitura com evidência por linha\n"
+                              "  • \"corrija a SQL injection em `Classe::metodo` com bind de parâmetro e crie um teste PHPUnit sem banco\" — uma mudança, com prévia, aprovação e teste\n"
+                              "  • \"crie um teste PHPUnit para `Classe::metodo` com um fake do Query Builder\" — só teste, sem mexer no código de produção\n", ex);
+    g_hash_table_unref(cont);
+    g_ptr_array_unref(ach);
+    return g_string_free(o, FALSE);
+}
+
+/* manifests citados no pedido: caminhos ("compose.yaml", "face_service/Dockerfile")
+ * e nomes soltos sem extensão ("Dockerfile", "Containerfile") — na ordem em
+ * que aparecem, sem repetição. Nome solto que não existe na raiz é
+ * procurado entre os manifests descobertos (ex.: só face_service/Dockerfile). */
+static GPtrArray *manifests_citados(const char *pedido, GPtrArray *descobertos)
+{
+    GPtrArray *out = g_ptr_array_new_with_free_func(g_free);
+    GRegex *re = g_regex_new("(?<![\\w./-])((?:[\\w.-]+/)*(?:(?:docker-)?compose[\\w.-]*\\.ya?ml|[\\w.-]*Dockerfile[\\w.-]*|Containerfile[\\w.-]*))(?![\\w/-])",
+                             G_REGEX_CASELESS, 0, NULL);
+    GMatchInfo *mi = NULL;
+    g_regex_match(re, pedido, 0, &mi);
+    while (g_match_info_matches(mi)) {
+        char *c = g_match_info_fetch(mi, 1);
+        while (g_str_has_suffix(c, ".")) c[strlen(c) - 1] = '\0';
+        char *abs = g_build_filename(proj_raiz(), c, NULL);
+        char *escolhido = NULL;
+        if (g_file_test(abs, G_FILE_TEST_IS_REGULAR)) escolhido = g_strdup(c);
+        else if (!strchr(c, '/'))
+            for (guint i = 0; i < descobertos->len && !escolhido; i++) {
+                char *base = g_path_get_basename(g_ptr_array_index(descobertos, i));
+                if (!g_ascii_strcasecmp(base, c)) escolhido = g_strdup(g_ptr_array_index(descobertos, i));
+                g_free(base);
+            }
+        if (!escolhido) escolhido = g_strdup(c); /* não existe: a leitura dirá, sem inventar */
+        gboolean repetido = FALSE;
+        for (guint i = 0; i < out->len; i++) if (!strcmp(g_ptr_array_index(out, i), escolhido)) repetido = TRUE;
+        if (!repetido && out->len < 6) g_ptr_array_add(out, escolhido); else g_free(escolhido);
+        g_free(abs); g_free(c);
+        g_match_info_next(mi, NULL);
+    }
+    g_match_info_free(mi);
+    g_regex_unref(re);
+    return out;
+}
+
 static AgentePlano *plano_analise_docker(const char *pedido)
 {
     char *ascii = g_str_to_ascii(pedido, "C");
     char *t = g_ascii_strdown(ascii, -1);
     g_free(ascii);
-    gboolean docker = strstr(t, "docker") || strstr(t, "compose") || strstr(t, "container") || strstr(t, "manifest");
+    gboolean docker = strstr(t, "docker") || strstr(t, "compose") || strstr(t, "container") || strstr(t, "conteiner") || strstr(t, "manifest");
     g_free(t);
     if (!docker || !pedido_analitico(pedido)) return NULL;
+    GPtrArray *descobertos = g_ptr_array_new_with_free_func(g_free);
+    manifests_docker(proj_raiz(), proj_raiz(), 0, descobertos);
+    GPtrArray *citados = manifests_citados(pedido, descobertos);
+    /* outro arquivo citado (não manifest): o planejador comum cuida */
     char **cam = intencao_caminhos(pedido);
-    gboolean tem_caminho = cam[0] != NULL;
+    gboolean outro = FALSE;
+    for (int i = 0; cam[i]; i++) if (!coding_e_manifest_docker(cam[i])) outro = TRUE;
     g_strfreev(cam);
-    if (tem_caminho) return NULL; /* com caminho, o planejador comum lê o que foi citado */
-    GPtrArray *arqs = g_ptr_array_new_with_free_func(g_free);
-    manifests_docker(proj_raiz(), proj_raiz(), 0, arqs);
-    if (!arqs->len) { g_ptr_array_unref(arqs); return NULL; }
-    AgentePlano *p = agente_plano_novo("ler os manifests Docker do projeto (valores de segredo ocultados) e responder à pergunta", "arquivo_analisar");
+    GPtrArray *arqs = citados->len ? citados : descobertos;
+    if (outro || !arqs->len) { g_ptr_array_unref(citados); g_ptr_array_unref(descobertos); return NULL; }
+    AgentePlano *p = agente_plano_novo(citados->len ? "ler os manifests Docker citados (valores de ambiente ocultados) e responder à pergunta"
+                                                    : "ler os manifests Docker do projeto (valores de ambiente ocultados) e responder à pergunta", "arquivo_analisar");
     for (guint i = 0; i < arqs->len; i++) {
-        char *pj = g_strdup_printf("{\"caminho\":\"%s\",\"linhas\":800}", (char *)g_ptr_array_index(arqs, i));
+        char *pj = json_params_caminho_linhas(g_ptr_array_index(arqs, i), 800);
         char *obj = g_strdup_printf("ler %s", (char *)g_ptr_array_index(arqs, i));
         agente_plano_acrescentar(p, NULL, "arquivo.ler", pj, NULL, obj, (const char *const[]){ "conteudo_arquivo", NULL }, 0, FALSE);
         g_free(pj); g_free(obj);
     }
     p->criterios_sucesso = g_strdupv((char *[]){ (char *)"conteudo_arquivo", NULL });
-    g_ptr_array_unref(arqs);
+    g_ptr_array_unref(citados);
+    g_ptr_array_unref(descobertos);
     return p;
 }
 
@@ -3824,8 +4141,10 @@ struct Coding {
     char *git_antes;        /* estado do Git antes de começar (pré-condição), ou o motivo de não ter */
     char **definem;         /* arquivos que definem os símbolos citados no pedido */
     GPtrArray *tocados;     /* arquivos gravados nesta tarefa (relativos) */
+    GPtrArray *criados;     /* arquivos que esta tarefa CRIOU (podem ser regravados por inteiro) */
     gboolean receita_tentada;
     char *origem_proposta;  /* "modelo local" ou "receita determinística ..." (para o relatório) */
+    guint lint_seq;         /* checagem de sintaxe em andamento (resultado só vale se ainda for a mesma) */
 };
 
 static void coding_liberar(Coding *k)
@@ -3834,6 +4153,7 @@ static void coding_liberar(Coding *k)
     g_free(k->git_antes);
     g_strfreev(k->definem);
     if (k->tocados) g_ptr_array_unref(k->tocados);
+    if (k->criados) g_ptr_array_unref(k->criados);
     g_free(k->origem_proposta);
     g_free(k->id); g_free(k->pedido); g_free(k->pergunta_id);
     coding_plano_liberar(k->plano);
@@ -3917,6 +4237,11 @@ static void coding_checkpoint(Coding *k, const char *estado)
     JsonArray *pp = json_array_new();
     for (guint i = 0; i < k->propostas->len; i++) json_array_add_string_element(pp, g_ptr_array_index(k->propostas, i));
     json_object_set_array_member(o, "propostas_sha256", pp);
+    JsonArray *tc = json_array_new(), *cr2 = json_array_new();
+    for (guint i = 0; i < k->tocados->len; i++) json_array_add_string_element(tc, g_ptr_array_index(k->tocados, i));
+    for (guint i = 0; i < k->criados->len; i++) json_array_add_string_element(cr2, g_ptr_array_index(k->criados, i));
+    json_object_set_array_member(o, "arquivos_gravados", tc);
+    json_object_set_array_member(o, "arquivos_criados", cr2);
     GDateTime *agora = g_date_time_new_now_local();
     char *quando = g_date_time_format_iso8601(agora);
     json_object_set_string_member(o, "atualizado_em", quando);
@@ -4007,25 +4332,43 @@ static void coding_encerrar(Cliente *c, const char *motivo)
     g_string_free(o, TRUE);
 }
 
-typedef struct { Cliente *c; char *modelo_id; } CodCtx;
-
-static CodCtx *codctx_novo(Cliente *c, const char *modelo_id)
-{
-    CodCtx *x = g_new0(CodCtx, 1);
-    x->c = cliente_ref(c);
-    x->modelo_id = g_strdup(modelo_id);
-    return x;
-}
+typedef struct { Cliente *c; char *modelo_id; char *desc; guint batida; gint64 inicio_us, tokens; } CodCtx;
 
 static gboolean codctx_valido(CodCtx *x)
 {
     return !x->c->fechado && x->c->coding && x->c->coding->modelo_id && !strcmp(x->c->coding->modelo_id, x->modelo_id);
 }
 
+/* nunca mais que o intervalo (padrão 15 s) sem notícia enquanto o modelo
+ * trabalha — inclusive na avaliação do prompt, quando ainda não há tokens */
+static gboolean ao_codctx_batida(gpointer p)
+{
+    CodCtx *x = p;
+    if (!codctx_valido(x)) { x->batida = 0; return G_SOURCE_REMOVE; }
+    char *m = g_strdup_printf("aguardando o modelo local (%s): %" G_GINT64_FORMAT " s, %" G_GINT64_FORMAT " token(s) — \"cancelar\" interrompe",
+                              x->desc, (g_get_monotonic_time() - x->inicio_us) / G_USEC_PER_SEC, x->tokens);
+    coding_progresso(x->c, coding_etapa_texto(x->c->coding->estado), m);
+    g_free(m);
+    return G_SOURCE_CONTINUE;
+}
+
+static CodCtx *codctx_novo(Cliente *c, const char *modelo_id)
+{
+    CodCtx *x = g_new0(CodCtx, 1);
+    x->c = cliente_ref(c);
+    x->modelo_id = g_strdup(modelo_id);
+    x->desc = modelo_descricao();
+    x->inicio_us = g_get_monotonic_time();
+    x->batida = g_timeout_add(intervalo_progresso_ms(), ao_codctx_batida, x);
+    return x;
+}
+
 static void codctx_liberar(CodCtx *x)
 {
+    if (x->batida) g_source_remove(x->batida);
     cliente_unref(x->c);
     g_free(x->modelo_id);
+    g_free(x->desc);
     g_free(x);
 }
 
@@ -4033,6 +4376,7 @@ static void ao_coding_tokens(gpointer ctx, gint64 tokens)
 {
     CodCtx *x = ctx;
     if (!codctx_valido(x)) return;
+    x->tokens = tokens;
     char *m = g_strdup_printf("o modelo está escrevendo a proposta: %" G_GINT64_FORMAT " tokens", tokens);
     coding_progresso(x->c, coding_etapa_texto(x->c->coding->estado), m);
     g_free(m);
@@ -4116,6 +4460,9 @@ static void ao_coding_plano(gpointer ctx, const ModeloResposta *r)
 }
 
 static void coding_processar_proposta(Cliente *c, const ModeloResposta *r);
+static void coding_recusar_proposta(Cliente *c, const char *erro);
+static gboolean coding_checar_sintaxe(Cliente *c, GPtrArray *arqs, char *hash, char *expl);
+static void coding_seguir_proposta(Cliente *c, GPtrArray *arqs, char *hash, char *expl);
 
 static void ao_coding_edicoes(gpointer ctx, const ModeloResposta *r)
 {
@@ -4123,9 +4470,10 @@ static void ao_coding_edicoes(gpointer ctx, const ModeloResposta *r)
     if (!codctx_valido(x)) { codctx_liberar(x); return; }
     Cliente *c = x->c;
     g_clear_pointer(&c->coding->modelo_id, g_free);
-    codctx_liberar(x);
     g_free(c->coding->origem_proposta);
-    c->coding->origem_proposta = g_strdup("modelo local");
+    c->coding->origem_proposta = g_strdup_printf("modelo local (%s), respondeu em %.1f s", x->desc,
+                                                 (g_get_monotonic_time() - x->inicio_us) / (double)G_USEC_PER_SEC);
+    codctx_liberar(x);
     coding_processar_proposta(c, r);
 }
 
@@ -4141,25 +4489,178 @@ static void coding_processar_proposta(Cliente *c, const ModeloResposta *r)
     if (g_strcmp0(g_getenv("LIA_SESSIOND_DEPURAR_CODIGO"), "1") == 0)
         g_print("lia-sessiond: [depuração] proposta bruta do modelo: %.4000s\n", r->resposta_texto ? r->resposta_texto : "(nenhuma)");
     char *erro = NULL, *hash = NULL, *expl = NULL;
-    GPtrArray *arqs = coding_aplicar_edicoes(r->resposta_texto, k->lidos, k->shas, &hash, &expl, &erro);
-    if (!arqs) {
-        k->recusas_proposta++;
-        char *m = g_strdup_printf("proposta recusada pelo verificador: %s", erro);
-        coding_progresso(c, "proposta", m);
-        g_free(m);
-        if (k->recusas_proposta >= 2) {
-            char *mot = g_strdup_printf("o modelo não produziu uma proposta válida em duas tentativas (última: %s)", erro);
-            coding_encerrar(c, mot);
-            g_free(mot);
-        } else {
-            g_free(k->erro_proposta);
-            k->erro_proposta = erro;
-            erro = NULL;
-            coding_propor(c);
+    g_ptr_array_add(k->criados, NULL);
+    GPtrArray *arqs = coding_aplicar_edicoes_tarefa(r->resposta_texto, k->lidos, k->shas, (char **)k->criados->pdata, &hash, &expl, &erro);
+    g_ptr_array_remove_index(k->criados, k->criados->len - 1);
+    if (arqs && coding_pedido_so_testes(k->pedido)) {
+        /* o pedido proíbe mexer em produção: só arquivos de teste */
+        for (guint i = 0; i < arqs->len && !erro; i++) {
+            CodingArquivo *a = g_ptr_array_index(arqs, i);
+            if (!coding_caminho_de_teste(a->caminho))
+                erro = g_strdup_printf("o pedido proíbe alterar o código de produção, e a proposta muda %s — só arquivos de teste podem ser criados ou alterados", a->caminho);
         }
+        if (erro) { g_ptr_array_unref(arqs); arqs = NULL; g_clear_pointer(&hash, g_free); g_clear_pointer(&expl, g_free); }
+    }
+    if (!arqs) {
+        coding_recusar_proposta(c, erro);
         g_free(erro);
         return;
     }
+    if (coding_checar_sintaxe(c, arqs, hash, expl)) return; /* continua em ao_lint */
+    coding_seguir_proposta(c, arqs, hash, expl);
+}
+
+static void coding_recusar_proposta(Cliente *c, const char *erro)
+{
+    Coding *k = c->coding;
+    k->recusas_proposta++;
+    char *m = g_strdup_printf("proposta recusada pelo verificador: %s", erro);
+    coding_progresso(c, "proposta", m);
+    g_free(m);
+    if (k->recusas_proposta >= 2) {
+        char *mot = g_strdup_printf("o modelo não produziu uma proposta válida em duas tentativas (última: %s)", erro);
+        coding_encerrar(c, mot);
+        g_free(mot);
+    } else {
+        g_free(k->erro_proposta);
+        k->erro_proposta = g_strdup(erro);
+        coding_propor(c);
+    }
+}
+
+/* ---- sintaxe PHP antes da aprovação: php -l (só analisa, não executa)
+ * numa cópia da proposta FORA do projeto, no mesmo isolamento do resto
+ * (sem rede, sem /home, ambiente limpo). Erro de sintaxe volta ao modelo
+ * com a mensagem real, sem gastar a sua aprovação. */
+typedef struct {
+    Cliente *c;
+    guint seq;
+    GPtrArray *arqs;   /* CodingArquivo* (dono) */
+    char *hash, *expl;
+    char *erro;        /* resultado: NULL = sintaxe ok (ou checagem indisponível) */
+    char *aviso;       /* checagem não feita: por quê */
+} LintCtx;
+
+static void lint_thread(GTask *task, gpointer src, gpointer data, GCancellable *canc)
+{
+    (void)src; (void)canc;
+    LintCtx *l = data;
+    char *det = NULL;
+    char *e = NULL;
+    char *php = proc_resolver_executavel("php", "/", &e);
+    g_free(e);
+    if (!php || !proc_isolamento_disponivel(&det)) {
+        l->aviso = g_strdup(php ? "isolamento indisponível" : "php não instalado");
+        g_free(php); g_free(det);
+        g_task_return_boolean(task, TRUE);
+        return;
+    }
+    g_free(det);
+    char *base = g_build_filename(g_get_home_dir(), ".lia", "projeto", NULL);
+    g_mkdir_with_parents(base, 0700);
+    char *modelo = g_build_filename(base, "lint-XXXXXX", NULL);
+    char *dir = g_mkdtemp(modelo);
+    GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
+    g_ptr_array_add(argv, g_strdup(php));
+    g_ptr_array_add(argv, g_strdup("-l"));
+    GPtrArray *nomes = g_ptr_array_new_with_free_func(g_free);
+    for (guint i = 0; dir && i < l->arqs->len; i++) {
+        CodingArquivo *a = g_ptr_array_index(l->arqs, i);
+        if (!g_str_has_suffix(a->caminho, ".php")) continue;
+        char *f = g_strdup_printf("%s/f%u.php", dir, i);
+        g_file_set_contents(f, a->conteudo, -1, NULL);
+        g_ptr_array_add(argv, f);
+        g_ptr_array_add(nomes, g_strdup_printf("f%u.php", i));
+    }
+    g_ptr_array_add(argv, NULL);
+    if (dir && nomes->len) {
+        ProcPedido pp = { .argv = (char **)argv->pdata, .raiz = dir, .projeto_gravavel = FALSE, .timeout_ms = 20000,
+                          .max_saida = 16 * 1024, .memoria_mb = 512 };
+        ProcResultado r = { 0 };
+        proc_executar(&pp, &r);
+        if (!r.executou) l->aviso = g_strdup_printf("php -l não rodou: %s", r.erro ? r.erro : "?");
+        else if (r.codigo_saida != 0) {
+            GString *o = g_string_new(NULL);
+            char *tudo = g_strdup_printf("%s\n%s", r.saida ? r.saida : "", r.erros ? r.erros : "");
+            char **ls = g_strsplit(tudo, "\n", -1);
+            for (int i = 0; ls[i]; i++) {
+                if (!strstr(ls[i], "rror")) continue;
+                char *linha = g_strdup(ls[i]);
+                /* troca o caminho temporário pelo caminho real do projeto */
+                for (guint k = 0; k < l->arqs->len; k++) {
+                    CodingArquivo *a = g_ptr_array_index(l->arqs, k);
+                    if (!g_str_has_suffix(a->caminho, ".php")) continue;
+                    char *tmp = g_strdup_printf("%s/f%u.php", dir, k);
+                    char **pd = g_strsplit(linha, tmp, -1);
+                    g_free(linha);
+                    linha = g_strjoinv(a->caminho, pd);
+                    g_strfreev(pd);
+                    g_free(tmp);
+                }
+                if (o->len) g_string_append(o, "; ");
+                g_string_append(o, g_strstrip(linha));
+                g_free(linha);
+            }
+            g_strfreev(ls);
+            g_free(tudo);
+            l->erro = g_strdup_printf("php -l recusou a sintaxe: %s", o->len ? o->str : "erro de sintaxe");
+            g_string_free(o, TRUE);
+        }
+        proc_resultado_liberar(&r);
+    }
+    for (guint i = 2; i < argv->len - 1; i++) g_unlink(g_ptr_array_index(argv, i));
+    if (dir) g_rmdir(dir);
+    g_ptr_array_unref(argv);
+    g_ptr_array_unref(nomes);
+    g_free(modelo); /* g_mkdtemp altera no lugar: dir == modelo */
+    g_free(base); g_free(php);
+    g_task_return_boolean(task, TRUE);
+}
+
+static void ao_lint(GObject *src, GAsyncResult *res, gpointer data)
+{
+    (void)src; (void)res;
+    LintCtx *l = data;
+    Cliente *c = l->c;
+    gboolean valido = !c->fechado && c->coding && c->coding->lint_seq == l->seq && c->coding->estado == COD_PROPONDO;
+    if (valido) {
+        if (l->erro) {
+            g_ptr_array_unref(l->arqs);
+            g_free(l->hash); g_free(l->expl);
+            coding_recusar_proposta(c, l->erro);
+        } else {
+            coding_progresso(c, "proposta", l->aviso ? l->aviso : "sintaxe PHP conferida com php -l (isolado, numa cópia fora do projeto)");
+            coding_seguir_proposta(c, l->arqs, l->hash, l->expl);
+        }
+    } else {
+        g_ptr_array_unref(l->arqs);
+        g_free(l->hash); g_free(l->expl);
+    }
+    g_free(l->erro); g_free(l->aviso);
+    cliente_unref(l->c);
+    g_free(l);
+}
+
+static gboolean coding_checar_sintaxe(Cliente *c, GPtrArray *arqs, char *hash, char *expl)
+{
+    gboolean tem_php = FALSE;
+    for (guint i = 0; i < arqs->len; i++) if (g_str_has_suffix(((CodingArquivo *)g_ptr_array_index(arqs, i))->caminho, ".php")) tem_php = TRUE;
+    if (!tem_php || g_strcmp0(g_getenv("LIA_SESSIOND_LINT_PHP"), "0") == 0) return FALSE;
+    LintCtx *l = g_new0(LintCtx, 1);
+    l->c = cliente_ref(c);
+    l->seq = ++c->coding->lint_seq;
+    l->arqs = arqs; l->hash = hash; l->expl = expl;
+    coding_progresso(c, "proposta", "conferindo a sintaxe PHP da proposta (php -l isolado) antes de pedir sua aprovação");
+    GTask *t = g_task_new(NULL, NULL, ao_lint, l);
+    g_task_set_task_data(t, l, NULL);
+    g_task_run_in_thread(t, lint_thread);
+    g_object_unref(t);
+    return TRUE;
+}
+
+static void coding_seguir_proposta(Cliente *c, GPtrArray *arqs, char *hash, char *expl)
+{
+    Coding *k = c->coding;
     /* repetição sem progresso: a mesma proposta já foi aplicada e não resolveu */
     for (guint i = 0; i < k->propostas->len; i++)
         if (!strcmp(g_ptr_array_index(k->propostas, i), hash)) {
@@ -4267,15 +4768,34 @@ static void coding_propor(Cliente *c)
         g_ptr_array_unref(sel);
     }
     char **simbolos = coding_simbolos(k->pedido);
-    char *prompt = coding_prompt_edicoes(k->pedido, k->plano->criterios, praticas, k->lidos, k->falha, k->erro_proposta, k->ciclo, simbolos);
+    char *prompt0 = coding_prompt_edicoes(k->pedido, k->plano->criterios, praticas, k->lidos, k->falha, k->erro_proposta, k->ciclo, simbolos);
     g_strfreev(simbolos);
+    char *dicas0 = coding_dicas_tarefa(k->pedido, k->lidos);
+    GString *dg = g_string_new(dicas0);
+    g_free(dicas0);
+    for (guint i = 0; i < k->criados->len; i++)
+        g_string_append_printf(dg, "- %s foi criado nesta tarefa (está em \"arquivos lidos\"): para corrigi-lo, mande o arquivo COMPLETO de novo com "
+                                   "{\"acao\":\"criar\",\"caminho\":\"%s\",\"conteudo\":\"...\"} ou use \"editar\"\n",
+                               (char *)g_ptr_array_index(k->criados, i), (char *)g_ptr_array_index(k->criados, i));
+    char *dicas = g_string_free(dg, FALSE);
+    char *prompt = *dicas ? g_strdup_printf("%s\n----- a tarefa em termos concretos -----\n%s", prompt0, dicas) : g_strdup(prompt0);
+    g_free(dicas); g_free(prompt0);
     g_free(praticas);
     k->modelo_id = g_strdup_printf("%s-edicao-%d-%d", k->id, k->ciclo + 1, k->recusas_proposta);
     char *m = g_strdup_printf("pedindo ao modelo a %s (ciclo %d de %d)", k->ciclo ? "correção" : "alteração", k->ciclo + 1, CODING_MAX_CICLOS);
     coding_progresso(c, "proposta", m);
     g_free(m);
     CodCtx *x = codctx_novo(c, k->modelo_id);
-    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = LIA_MODELO_TOKENS_CODIGO, .resumo = TRUE,
+    /* saída estruturada: o JSON da proposta sai válido por construção
+     * (medido no POC: llama3.2:3b errou a sintaxe nas duas tentativas sem
+     * esquema). Desligável com LIA_SESSIOND_CODIGO_ESQUEMA=0. */
+    static const char *ESQUEMA_EDICOES =
+        "{\"type\":\"object\",\"properties\":{\"edicoes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":6,\"items\":{\"type\":\"object\",\"properties\":{"
+        "\"acao\":{\"type\":\"string\",\"enum\":[\"criar\",\"editar\",\"substituir_funcao\"]},\"caminho\":{\"type\":\"string\"},"
+        "\"conteudo\":{\"type\":\"string\"},\"procurar\":{\"type\":\"string\"},\"substituir\":{\"type\":\"string\"},\"funcao\":{\"type\":\"string\"}},"
+        "\"required\":[\"acao\",\"caminho\"]}},\"explicacao\":{\"type\":\"string\",\"maxLength\":300}},\"required\":[\"edicoes\",\"explicacao\"]}";
+    gboolean esquema = g_strcmp0(g_getenv("LIA_SESSIOND_CODIGO_ESQUEMA"), "0") != 0;
+    ModeloOpcoes op = { .esquema_json = esquema ? ESQUEMA_EDICOES : NULL, .max_tokens = LIA_MODELO_TOKENS_CODIGO, .resumo = TRUE,
                         .progresso_cb = ao_coding_tokens, .progresso_ctx = x };
     g_modelo->perguntar(g_modelo, k->modelo_id, prompt, &op, ao_coding_edicoes, x);
     g_free(prompt);
@@ -4394,6 +4914,11 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
             JsonParser *jp = json_parser_new();
             if (s->estado == PASSO_SUCESSO && json_parser_load_from_data(jp, s->parametros_json, -1, NULL)) {
                 const char *cam = json_object_get_string_member_with_default(json_node_get_object(json_parser_get_root(jp)), "caminho", NULL);
+                if (cam && !strcmp(s->ferramenta, "arquivo.criar")) {
+                    gboolean ja_criado = FALSE;
+                    for (guint q = 0; q < k->criados->len; q++) if (!strcmp(g_ptr_array_index(k->criados, q), cam)) ja_criado = TRUE;
+                    if (!ja_criado) g_ptr_array_add(k->criados, g_strdup(cam));
+                }
                 char *sha = NULL, *e = NULL;
                 char *txt = cam ? proj_ler_texto(cam, CODING_MAX_BYTES_ARQUIVO, &sha, &e) : NULL;
                 if (txt) { g_hash_table_insert(k->lidos, g_strdup(cam), txt); g_hash_table_insert(k->shas, g_strdup(cam), sha); }
@@ -4504,6 +5029,7 @@ static Coding *coding_novo(const char *id, const char *pergunta_id, const char *
     k->propostas = g_ptr_array_new_with_free_func(g_free);
     k->diffs = g_string_new(NULL);
     k->tocados = g_ptr_array_new_with_free_func(g_free);
+    k->criados = g_ptr_array_new_with_free_func(g_free);
     k->inicio_us = g_get_monotonic_time();
     return k;
 }
@@ -4700,6 +5226,18 @@ static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id)
     for (guint i = 0; ops && i < json_array_get_length(ops); i++) g_ptr_array_add(k->operacoes, g_strdup(json_array_get_string_element(ops, i)));
     JsonArray *pp = json_object_get_array_member(o, "propostas_sha256");
     for (guint i = 0; pp && i < json_array_get_length(pp); i++) g_ptr_array_add(k->propostas, g_strdup(json_array_get_string_element(pp, i)));
+    /* arquivos gravados/criados pela tarefa: só caminhos que continuam válidos dentro do projeto */
+    const char *const LISTAS[] = { "arquivos_gravados", "arquivos_criados" };
+    for (int li = 0; li < 2; li++) {
+        JsonArray *la = json_object_has_member(o, LISTAS[li]) ? json_object_get_array_member(o, LISTAS[li]) : NULL;
+        for (guint i = 0; la && i < json_array_get_length(la) && i < 64; i++) {
+            const char *rel = json_array_get_string_element(la, i);
+            char *er = NULL;
+            char *abs = rel ? proj_resolver(rel, TRUE, TRUE, &er) : NULL;
+            if (abs && !proj_sensivel(rel)) g_ptr_array_add(li ? k->criados : k->tocados, g_strdup(rel));
+            g_free(abs); g_free(er);
+        }
+    }
     g_string_append(k->diffs, k->editou ? "(alterações gravadas antes da retomada; veja-as com \"mostre o diff\")\n" : "");
     /* com edição gravada, a retomada sempre valida de novo: o projeto pode
      * ter mudado desde o checkpoint, e a prova precisa ser de agora */

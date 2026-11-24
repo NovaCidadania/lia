@@ -477,6 +477,38 @@ static char *ultimas_linhas(const char *t, int n, gsize max)
     return g_strdup(p);
 }
 
+/* Últimas linhas + as linhas-CHAVE de erro que ficaram antes delas (a causa
+ * costuma vir antes do stack trace: "PHP Fatal error: ... Failed opening
+ * required", "Traceback", "error:" do compilador). Sem isso o resumo
+ * mostrava só o trace, e o modelo não via a causa. */
+char *validacao_resumo_falha(const char *t, int n, gsize max)
+{
+    char *fim = ultimas_linhas(t, n, max);
+    if (!t || !*t) return fim;
+    GRegex *re = g_regex_new("(fatal error|parse error|uncaught|failed opening|no such file|not found|undefined|"
+                             "^error|\\berror:|exception|assert|traceback|^fail|failures?:|errors?:|cannot|syntax error)",
+                             G_REGEX_CASELESS | G_REGEX_MULTILINE, 0, NULL);
+    GString *chave = g_string_new(NULL);
+    gsize limite = (gsize)(strlen(t) - strlen(fim));   /* só o que está ANTES do trecho final */
+    char **ls = g_strsplit(t, "\n", -1);
+    gsize pos = 0;
+    int nchave = 0;
+    for (int i = 0; ls[i] && pos < limite && nchave < 6; i++) {
+        if (g_regex_match(re, ls[i], 0, NULL) && strlen(ls[i]) < 600) {
+            g_string_append_printf(chave, "%s\n", ls[i]);
+            nchave++;
+        }
+        pos += strlen(ls[i]) + 1;
+    }
+    g_strfreev(ls);
+    g_regex_unref(re);
+    if (!chave->len) { g_string_free(chave, TRUE); return fim; }
+    char *r = g_strdup_printf("%s(…)\n%s", chave->str, fim);
+    g_string_free(chave, TRUE);
+    g_free(fim);
+    return r;
+}
+
 char *validacao_executar(JsonObject *params, volatile gint *cancelado, char **erro)
 {
     GPtrArray *cmds = NULL;
@@ -522,7 +554,7 @@ char *validacao_executar(JsonObject *params, volatile gint *cancelado, char **er
     json_builder_set_member_name(b, "stderr"); json_builder_add_string_value(b, r.erros ? r.erros : "");
     json_builder_set_member_name(b, "saida_truncada"); json_builder_add_boolean_value(b, r.stdout_truncado);
     json_builder_set_member_name(b, "erros_truncados"); json_builder_add_boolean_value(b, r.stderr_truncado);
-    char *fim_o = ultimas_linhas(r.saida, 15, 2000), *fim_e = ultimas_linhas(r.erros, 15, 2000);
+    char *fim_o = validacao_resumo_falha(r.saida, 15, 2000), *fim_e = validacao_resumo_falha(r.erros, 15, 2000);
     json_builder_set_member_name(b, "final_saida"); json_builder_add_string_value(b, fim_o);
     json_builder_set_member_name(b, "final_erros"); json_builder_add_string_value(b, fim_e);
     char *sha_saida = g_compute_checksum_for_string(G_CHECKSUM_SHA256, r.saida ? r.saida : "", -1);

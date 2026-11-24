@@ -283,6 +283,39 @@ static gboolean chaves_balanceadas(const char *t)
     return *f == '\0';
 }
 
+/* Arquivo de código novo que não é código: só o nome do método, uma linha
+ * copiada do pedido, PHP sem "<?php", teste sem nenhum caso de teste.
+ * Devolve o motivo (para o modelo corrigir) ou NULL. */
+char *coding_conteudo_trivial(const char *caminho, const char *conteudo)
+{
+    char *base = g_path_get_basename(caminho);
+    char *b = g_ascii_strdown(base, -1);
+    g_free(base);
+    static const char *const CODIGO[] = { ".php", ".py", ".js", ".ts", ".c", ".h", ".java", ".rb", ".go", ".rs", ".cs", ".kt", NULL };
+    gboolean e_codigo = FALSE;
+    for (int i = 0; CODIGO[i]; i++) if (g_str_has_suffix(b, CODIGO[i])) e_codigo = TRUE;
+    gboolean e_teste = strstr(b, "test") != NULL || strstr(b, "spec") != NULL;
+    char *r = NULL;
+    if (e_codigo) {
+        int linhas = 0;
+        char **ls = g_strsplit(conteudo, "\n", -1);
+        for (int i = 0; ls[i]; i++) { char *x = g_strstrip(g_strdup(ls[i])); if (*x) linhas++; g_free(x); }
+        g_strfreev(ls);
+        char *low = g_ascii_strdown(conteudo, -1);
+        if (linhas < 3)
+            r = g_strdup_printf("o conteúdo tem só %d linha(s) — escreva o arquivo de código completo, não o nome do método nem o texto do pedido", linhas);
+        else if (g_str_has_suffix(b, ".php") && !strstr(conteudo, "<?php"))
+            r = g_strdup("arquivo PHP sem \"<?php\" no início");
+        else if (e_teste && g_str_has_suffix(b, ".php") && !strstr(low, "function test") && !strstr(low, "@test"))
+            r = g_strdup("teste PHPUnit sem nenhum método de teste (public function testAlgo(): void { ... })");
+        else if (e_teste && g_str_has_suffix(b, ".py") && !strstr(low, "def test"))
+            r = g_strdup("teste Python sem nenhuma função def test_...");
+        g_free(low);
+    }
+    g_free(b);
+    return r;
+}
+
 void coding_arquivo_liberar(gpointer p)
 {
     CodingArquivo *a = p;
@@ -348,6 +381,12 @@ static int ocorrencias(const char *h, const char *n)
 
 GPtrArray *coding_aplicar_edicoes(const char *texto_modelo, GHashTable *lidos, GHashTable *shas, char **hash, char **explicacao, char **erro)
 {
+    return coding_aplicar_edicoes_tarefa(texto_modelo, lidos, shas, NULL, hash, explicacao, erro);
+}
+
+GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *lidos, GHashTable *shas, char **reescreviveis,
+                                         char **hash, char **explicacao, char **erro)
+{
     JsonParser *jp = NULL;
     JsonObject *o = objeto_do_modelo(texto_modelo, &jp, erro);
     if (!o) return NULL;
@@ -375,6 +414,24 @@ GPtrArray *coding_aplicar_edicoes(const char *texto_modelo, GHashTable *lidos, G
             const char *conteudo = jstr(e, "conteudo");
             if (!conteudo || strlen(conteudo) > CODING_MAX_BYTES_ARQUIVO || !g_utf8_validate(conteudo, -1, NULL)) {
                 *erro = g_strdup_printf("edição %u (criar %s): conteúdo ausente, grande demais ou inválido", i + 1, rel); g_free(rel); goto falha;
+            }
+            gboolean regravar = existe && !a && reescreviveis && g_strv_contains((const char *const *)reescreviveis, rel) && g_hash_table_lookup(lidos, rel);
+            if ((existe || a) && !regravar) { *erro = g_strdup_printf("edição %u: '%s' já existe — para alterar, use \"editar\" (depois de ler o arquivo)", i + 1, rel); g_free(rel); goto falha; }
+            {
+                char *motivo = coding_conteudo_trivial(rel, conteudo);
+                if (motivo) { *erro = g_strdup_printf("edição %u (criar %s): %s", i + 1, rel, motivo); g_free(motivo); g_free(rel); goto falha; }
+            }
+            /* "criar" de novo um arquivo que a PRÓPRIA tarefa criou (ciclo de
+             * correção): vira regravação inteira, presa ao hash lido depois da
+             * gravação — a prévia mostra o diff e pede nova aprovação */
+            if (regravar) {
+                const char *lido = g_hash_table_lookup(lidos, rel);
+                a = g_new0(CodingArquivo, 1);
+                a->caminho = rel; a->antes = g_strdup(lido); a->existia = TRUE;
+                a->sha_lido = g_strdup(g_hash_table_lookup(shas, rel));
+                a->conteudo = g_strdup(conteudo);
+                g_ptr_array_add(arqs, a);
+                continue;
             }
             if (existe || a) { *erro = g_strdup_printf("edição %u: '%s' já existe — para alterar, use \"editar\" (depois de ler o arquivo)", i + 1, rel); g_free(rel); goto falha; }
             a = g_new0(CodingArquivo, 1);
@@ -584,10 +641,29 @@ void coding_explorar_projeto(const char *raiz, const char *pedido, guint max_lis
     GString *l = g_string_new(NULL);
     for (guint i = 0; i < todos->len && i < max_lista; i++) g_string_append_printf(l, "%s\n", g_array_index(todos, ArqPont, i).rel);
     if (todos->len > max_lista) g_string_append_printf(l, "(… e mais %u arquivos)\n", todos->len - max_lista);
-    /* quem DEFINE os símbolos: class/function/def/fn/func <nome> */
+    /* quem DEFINE os símbolos: class/function/def/fn/func <nome>. Com
+     * "Classe::metodo" no pedido, só esses contam: nomes soltos citados ao
+     * lado (order_by, result, where) são do framework e trariam arquivos
+     * enormes e irrelevantes (medido no POC: DB_query_builder.php, 2808 linhas) */
+    GPtrArray *alvo = g_ptr_array_new_with_free_func(g_free);
+    {
+        GRegex *rq = g_regex_new("([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)", 0, 0, NULL);
+        GMatchInfo *mq = NULL;
+        g_regex_match(rq, pedido ? pedido : "", 0, &mq);
+        while (g_match_info_matches(mq)) {
+            g_ptr_array_add(alvo, g_match_info_fetch(mq, 1));
+            g_ptr_array_add(alvo, g_match_info_fetch(mq, 2));
+            g_match_info_next(mq, NULL);
+        }
+        g_match_info_free(mq);
+        g_regex_unref(rq);
+    }
+    if (!alvo->len) for (int s = 0; simbolos[s]; s++) g_ptr_array_add(alvo, g_strdup(simbolos[s]));
+    g_ptr_array_add(alvo, NULL);
+    char **busca = (char **)alvo->pdata;
     GPtrArray *def = g_ptr_array_new();
-    for (int s = 0; simbolos[s] && def->len < 4; s++) {
-        char *esc = g_regex_escape_string(simbolos[s], -1);
+    for (int s = 0; busca[s] && def->len < 4; s++) {
+        char *esc = g_regex_escape_string(busca[s], -1);
         char *pad = g_strdup_printf("\\b(class|interface|trait|function|def|fn|func|struct|enum)\\s+%s\\b", esc);
         GRegex *re = g_regex_new(pad, G_REGEX_CASELESS, 0, NULL);
         for (guint i = 0; re && i < todos->len && def->len < 4; i++) {
@@ -609,6 +685,7 @@ void coding_explorar_projeto(const char *raiz, const char *pedido, guint max_lis
         g_free(pad);
         g_free(esc);
     }
+    g_ptr_array_unref(alvo);
     g_ptr_array_add(def, NULL);
     *definem = (char **)g_ptr_array_free(def, FALSE);
     *lista = g_string_free(l, FALSE);
@@ -1079,4 +1156,600 @@ JsonObject *coding_carregar_checkpoint(const char *id, char **erro)
     g_free(arq);
     g_free(dir);
     return o;
+}
+
+/* ===================== manifests Docker: fatos por regra fixa ===================== */
+
+typedef struct {
+    char *nome;
+    gint64 linha;
+    GString *origem, *portas, *volumes, *deps, *redes, *deploy, *outros;
+    guint n_env;
+    GString *env_sensiveis;
+    gint64 linha_env;
+} ServicoDocker;
+
+static void servico_liberar(gpointer p)
+{
+    ServicoDocker *s = p;
+    g_free(s->nome);
+    g_string_free(s->origem, TRUE); g_string_free(s->portas, TRUE); g_string_free(s->volumes, TRUE);
+    g_string_free(s->deps, TRUE); g_string_free(s->redes, TRUE); g_string_free(s->deploy, TRUE);
+    g_string_free(s->outros, TRUE); g_string_free(s->env_sensiveis, TRUE);
+    g_free(s);
+}
+
+/* valor YAML simples: sem aspas em volta e sem comentário no fim */
+static char *yaml_valor(const char *v)
+{
+    char *r = g_strdup(v ? v : "");
+    char *h = strstr(r, " #");
+    if (h) *h = '\0';
+    g_strstrip(r);
+    gsize n = strlen(r);
+    if (n >= 2 && ((r[0] == '"' && r[n - 1] == '"') || (r[0] == '\'' && r[n - 1] == '\''))) {
+        memmove(r, r + 1, n - 2);
+        r[n - 2] = '\0';
+    }
+    return r;
+}
+
+static void lista_add(GString *g, const char *valor, gint64 linha)
+{
+    if (g->len) g_string_append(g, ", ");
+    g_string_append_printf(g, "%s (l. %" G_GINT64_FORMAT ")", valor, linha);
+}
+
+static gboolean nome_sensivel(const char *nome)
+{
+    char *u = g_ascii_strup(nome, -1);
+    gboolean r = strstr(u, "PASS") || strstr(u, "SENHA") || strstr(u, "SECRET") || strstr(u, "TOKEN") || strstr(u, "KEY") ||
+                 strstr(u, "CREDENTIAL") || strstr(u, "DSN");
+    g_free(u);
+    return r;
+}
+
+static void docker_risco(GString *riscos, const char *arquivo, gint64 linha, const char *texto)
+{
+    g_string_append_printf(riscos, "%s:%" G_GINT64_FORMAT " — %s\n", arquivo, linha, texto);
+}
+
+/* item de lista ou par "k: v" dentro de uma chave do serviço */
+static void servico_item(ServicoDocker *s, const char *chave, const char *item, gint64 ln, const char *arquivo, GString *riscos)
+{
+    char *v = yaml_valor(item);
+    if (!*v) { g_free(v); return; }
+    if (!strcmp(chave, "ports") || !strcmp(chave, "expose")) {
+        lista_add(s->portas, v, ln);
+        if (!strcmp(chave, "ports")) {
+            /* "8080:80" sem IP do host publica em todas as interfaces */
+            int dois_pontos = 0;
+            for (const char *q = v; *q; q++) if (*q == ':') dois_pontos++;
+            if (dois_pontos == 1 || (dois_pontos == 0 && g_ascii_isdigit(v[0]))) {
+                char *t = g_strdup_printf("serviço %s publica a porta %s em todas as interfaces do host (sem IP de bind) — inferência a partir desta linha", s->nome, v);
+                docker_risco(riscos, arquivo, ln, t);
+                g_free(t);
+            }
+        }
+    } else if (!strcmp(chave, "volumes")) {
+        lista_add(s->volumes, v, ln);
+        if (strstr(v, "docker.sock")) {
+            char *t = g_strdup_printf("serviço %s monta o socket do Docker: quem controla o contêiner controla o host", s->nome);
+            docker_risco(riscos, arquivo, ln, t); g_free(t);
+        } else if (v[0] == '/' || v[0] == '.' || v[0] == '~') {
+            gboolean ro = g_str_has_suffix(v, ":ro") || strstr(v, ":ro,");
+            if (!ro) {
+                char *t = g_strdup_printf("serviço %s monta um caminho do host com escrita (%s)", s->nome, v);
+                docker_risco(riscos, arquivo, ln, t); g_free(t);
+            }
+        }
+    } else if (!strcmp(chave, "depends_on")) {
+        char *n = g_strdup(v);
+        char *dp = strchr(n, ':');
+        if (dp) *dp = '\0';
+        g_strstrip(n);
+        if (*n) lista_add(s->deps, n, ln);
+        g_free(n);
+    } else if (!strcmp(chave, "networks")) {
+        char *n = g_strdup(v);
+        char *dp = strchr(n, ':');
+        if (dp) *dp = '\0';
+        g_strstrip(n);
+        if (*n) lista_add(s->redes, n, ln);
+        g_free(n);
+    } else if (!strcmp(chave, "environment") || !strcmp(chave, "env_file")) {
+        if (!strcmp(chave, "env_file")) { lista_add(s->outros, "env_file (arquivo de ambiente — não lido)", ln); g_free(v); return; }
+        char *n = g_strdup(v);
+        char *sep = strpbrk(n, "=:");
+        if (sep) *sep = '\0';
+        g_strstrip(n);
+        if (*n) {
+            s->n_env++;
+            if (!s->linha_env) s->linha_env = ln;
+            if (nome_sensivel(n)) lista_add(s->env_sensiveis, n, ln);
+        }
+        g_free(n);
+    } else if (!strcmp(chave, "cap_add")) {
+        char *t = g_strdup_printf("serviço %s ganha a capacidade %s", s->nome, v);
+        docker_risco(riscos, arquivo, ln, t); g_free(t);
+    }
+    g_free(v);
+}
+
+static void servico_escalar(ServicoDocker *s, const char *k, const char *v_bruto, gint64 ln, const char *arquivo, GString *riscos)
+{
+    char *v = yaml_valor(v_bruto);
+    if (!strcmp(k, "build") && *v) { char *x = g_strdup_printf("build a partir de %s", v); lista_add(s->origem, x, ln); g_free(x); }
+    else if (!strcmp(k, "image") && *v) {
+        char *x = g_strdup_printf("imagem %s", v); lista_add(s->origem, x, ln); g_free(x);
+        const char *barra = strrchr(v, '/');
+        const char *nome = barra ? barra + 1 : v;
+        if (!strchr(nome, ':') || g_str_has_suffix(v, ":latest")) {
+            char *t = g_strdup_printf("serviço %s usa a imagem %s sem versão fixa", s->nome, v);
+            docker_risco(riscos, arquivo, ln, t); g_free(t);
+        }
+    }
+    else if (!strcmp(k, "restart") && *v) { char *x = g_strdup_printf("restart %s", v); lista_add(s->outros, x, ln); g_free(x); }
+    else if (!strcmp(k, "privileged") && !g_ascii_strcasecmp(v, "true")) {
+        char *t = g_strdup_printf("serviço %s roda privilegiado (privileged: true)", s->nome); docker_risco(riscos, arquivo, ln, t); g_free(t);
+    }
+    else if (!strcmp(k, "network_mode") && !strcmp(v, "host")) {
+        char *t = g_strdup_printf("serviço %s usa a rede do host (network_mode: host)", s->nome); docker_risco(riscos, arquivo, ln, t); g_free(t);
+    }
+    else if (!strcmp(k, "user") && *v) { char *x = g_strdup_printf("usuário %s", v); lista_add(s->outros, x, ln); g_free(x); }
+    else if ((!strcmp(k, "ports") || !strcmp(k, "volumes") || !strcmp(k, "depends_on") || !strcmp(k, "networks")) && v[0] == '[') {
+        char *in = g_strndup(v + 1, strlen(v) > 2 ? strlen(v) - 2 : 0);
+        char **it = g_strsplit(in, ",", -1);
+        for (int i = 0; it[i]; i++) servico_item(s, k, it[i], ln, arquivo, riscos);
+        g_strfreev(it);
+        g_free(in);
+    }
+    g_free(v);
+}
+
+static void fatos_compose(const char *arquivo, char **l, gint64 ini, GString *fatos, GString *riscos, GString *nomes)
+{
+    GPtrArray *svcs = g_ptr_array_new_with_free_func(servico_liberar);
+    char *top = NULL, *chave = NULL, *rede_atual = NULL;
+    int ind_svc = -1, ind_chave = -1, ind_topo_filho = -1, ind_item = -1;
+    ServicoDocker *s = NULL;
+    GString *vols_topo = g_string_new(NULL), *redes_topo = g_string_new(NULL);
+    gboolean deploy_mode = FALSE;
+    gint64 linha_mode = 0;
+    for (gint64 i = 0; l[i]; i++) {
+        gint64 ln = ini + i;
+        const char *x = l[i];
+        int ind = 0;
+        while (x[ind] == ' ') ind++;
+        const char *corpo = x + ind;
+        if (!*corpo || *corpo == '#' || *corpo == '\r') continue;   /* comentário nunca vira fato */
+        char *linha = g_strdup(corpo);
+        g_strchomp(linha);
+        gboolean item = linha[0] == '-' && (linha[1] == ' ' || !linha[1]);
+        char *k = NULL, *v = NULL;
+        if (!item) {
+            char *dp = strchr(linha, ':');
+            if (dp) { k = g_strndup(linha, dp - linha); g_strstrip(k); v = g_strdup(dp + 1); }
+        }
+        if (ind == 0) {
+            g_free(top); top = k ? g_strdup(k) : NULL;
+            s = NULL; ind_svc = -1; ind_topo_filho = -1; g_clear_pointer(&chave, g_free);
+        } else if (top && !strcmp(top, "services")) {
+            if (ind_svc < 0) ind_svc = ind;
+            if (ind == ind_svc && k) {
+                s = g_new0(ServicoDocker, 1);
+                s->nome = yaml_valor(k); s->linha = ln;
+                s->origem = g_string_new(NULL); s->portas = g_string_new(NULL); s->volumes = g_string_new(NULL);
+                s->deps = g_string_new(NULL); s->redes = g_string_new(NULL); s->deploy = g_string_new(NULL);
+                s->outros = g_string_new(NULL); s->env_sensiveis = g_string_new(NULL);
+                g_ptr_array_add(svcs, s);
+                ind_chave = -1; g_clear_pointer(&chave, g_free);
+            } else if (s && ind > ind_svc) {
+                if (ind_chave < 0) ind_chave = ind;
+                if (ind == ind_chave && k) {
+                    g_free(chave); chave = g_strdup(k);
+                    ind_item = -1;
+                    servico_escalar(s, k, v, ln, arquivo, riscos);
+                } else if (ind > ind_chave && chave) {
+                    if (item) servico_item(s, chave, linha + 1, ln, arquivo, riscos);
+                    else if (k && !strcmp(chave, "deploy")) {
+                        char *vv = yaml_valor(v);
+                        if (!strcmp(k, "replicas") && *vv) { char *t = g_strdup_printf("réplicas %s", vv); lista_add(s->deploy, t, ln); g_free(t); }
+                        else if (!strcmp(k, "mode") && *vv) { char *t = g_strdup_printf("mode %s", vv); lista_add(s->deploy, t, ln); g_free(t); deploy_mode = TRUE; if (!linha_mode) linha_mode = ln; }
+                        else if ((!strcmp(k, "memory") || !strcmp(k, "cpus")) && *vv) { char *t = g_strdup_printf("limite %s %s", k, vv); lista_add(s->deploy, t, ln); g_free(t); }
+                        g_free(vv);
+                    } else if (k && !strcmp(chave, "build")) {
+                        char *vv = yaml_valor(v);
+                        if ((!strcmp(k, "context") || !strcmp(k, "dockerfile")) && *vv) { char *t = g_strdup_printf("build %s %s", k, vv); lista_add(s->origem, t, ln); g_free(t); }
+                        g_free(vv);
+                    } else if (k && (!strcmp(chave, "depends_on") || !strcmp(chave, "networks") || !strcmp(chave, "environment"))) {
+                        /* forma de mapa: "pocprd:" / "rede:" / "KEY: valor" — só o primeiro nível */
+                        if (ind_item < 0) ind_item = ind;
+                        if (ind != ind_item) goto proxima;
+                        char *par = g_strdup_printf("%s:%s", k, v ? v : "");
+                        if (!strcmp(chave, "environment") || !v || !*g_strstrip(v)) servico_item(s, chave, !strcmp(chave, "environment") ? par : k, ln, arquivo, riscos);
+                        g_free(par);
+                    }
+                }
+            }
+        } else if (top && (!strcmp(top, "volumes") || !strcmp(top, "networks"))) {
+            if (ind_topo_filho < 0) ind_topo_filho = ind;
+            if (ind == ind_topo_filho && k) {
+                char *n = yaml_valor(k);
+                if (!strcmp(top, "volumes")) lista_add(vols_topo, n, ln);
+                else { lista_add(redes_topo, n, ln); g_free(rede_atual); rede_atual = g_strdup(n); }
+                g_free(n);
+            } else if (ind > ind_topo_filho && k && !strcmp(top, "networks") && !strcmp(k, "external")) {
+                char *vv = yaml_valor(v);
+                if (!g_ascii_strcasecmp(vv, "true")) {
+                    char *t = g_strdup_printf("a rede %s é externa: precisa existir antes (criada fora deste manifest); o que mais está nela não aparece aqui", rede_atual ? rede_atual : "?");
+                    docker_risco(riscos, arquivo, ln, t); g_free(t);
+                }
+                g_free(vv);
+            }
+        }
+    proxima:
+        g_free(k); g_free(v); g_free(linha);
+    }
+    for (guint i = 0; i < svcs->len; i++) {
+        s = g_ptr_array_index(svcs, i);
+        if (nomes->len) g_string_append(nomes, ", ");
+        g_string_append(nomes, s->nome);
+        g_string_append_printf(fatos, "%s:%" G_GINT64_FORMAT " — serviço %s\n", arquivo, s->linha, s->nome);
+        g_string_append_printf(fatos, "    origem: %s\n", s->origem->len ? s->origem->str : "não declarada no manifest");
+        g_string_append_printf(fatos, "    portas: %s\n", s->portas->len ? s->portas->str : "nenhuma publicada (sem ports/expose no manifest)");
+        g_string_append_printf(fatos, "    volumes: %s\n", s->volumes->len ? s->volumes->str : "não declarados no manifest");
+        g_string_append_printf(fatos, "    depende de: %s\n", s->deps->len ? s->deps->str : "não declarado no manifest");
+        g_string_append_printf(fatos, "    redes: %s\n", s->redes->len ? s->redes->str : "não declaradas (rede padrão do projeto)");
+        if (s->deploy->len) g_string_append_printf(fatos, "    deploy: %s\n", s->deploy->str);
+        if (s->outros->len) g_string_append_printf(fatos, "    outros: %s\n", s->outros->str);
+        if (s->n_env) g_string_append_printf(fatos, "    ambiente: %u variável(is) a partir da l. %" G_GINT64_FORMAT " (valores omitidos)\n", s->n_env, s->linha_env);
+        if (s->env_sensiveis->len) {
+            char *t = g_strdup_printf("serviço %s recebe por variável de ambiente nomes que parecem segredo: %s — confira se o valor real está versionado (valor omitido aqui)", s->nome, s->env_sensiveis->str);
+            docker_risco(riscos, arquivo, s->linha_env, t); g_free(t);
+        }
+    }
+    if (vols_topo->len) g_string_append_printf(fatos, "%s — volumes nomeados: %s\n", arquivo, vols_topo->str);
+    if (redes_topo->len) g_string_append_printf(fatos, "%s — redes: %s\n", arquivo, redes_topo->str);
+    if (deploy_mode)
+        docker_risco(riscos, arquivo, linha_mode, "deploy.mode só vale em Docker Swarm; com docker compose comum é ignorado (as réplicas e limites dependem da versão do compose)");
+    /* volume nomeado compartilhado por serviços diferentes */
+    for (guint i = 0; i < svcs->len; i++) {
+        ServicoDocker *a = g_ptr_array_index(svcs, i);
+        for (guint j = i + 1; j < svcs->len; j++) {
+            ServicoDocker *b = g_ptr_array_index(svcs, j);
+            char **va = g_strsplit(a->volumes->str, ", ", -1);
+            for (int p = 0; va[p]; p++) {
+                char *nm = g_strdup(va[p]);
+                char *dp = strchr(nm, ':');
+                if (dp && nm[0] != '/' && nm[0] != '.') {
+                    *dp = '\0';
+                    char *chave_vol = g_strdup_printf("%s:", nm);
+                    if (strstr(b->volumes->str, chave_vol)) {
+                        char *t = g_strdup_printf("o volume %s é montado por %s e por %s: os dois escrevem/leem os mesmos dados (inferência: confira concorrência e permissões)", nm, a->nome, b->nome);
+                        docker_risco(riscos, arquivo, a->linha, t); g_free(t);
+                    }
+                    g_free(chave_vol);
+                }
+                g_free(nm);
+            }
+            g_strfreev(va);
+        }
+    }
+    g_string_free(vols_topo, TRUE); g_string_free(redes_topo, TRUE);
+    g_free(top); g_free(chave); g_free(rede_atual);
+    g_ptr_array_unref(svcs);
+}
+
+static void fatos_dockerfile(const char *arquivo, char **l, gint64 ini, GString *fatos, GString *riscos)
+{
+    gboolean continua = FALSE, tem_user = FALSE, tem_health = FALSE;
+    GString *from = g_string_new(NULL), *expose = g_string_new(NULL), *exec = g_string_new(NULL);
+    guint n_env = 0;
+    gint64 ultima = ini;
+    for (gint64 i = 0; l[i]; i++) {
+        gint64 ln = ini + i;
+        char *t = g_strstrip(g_strdup(l[i]));
+        if (!*t || *t == '#') { g_free(t); continue; }
+        ultima = ln;
+        gboolean era_continuacao = continua;
+        continua = g_str_has_suffix(t, "\\");
+        if (era_continuacao) {
+            char *low = g_ascii_strdown(t, -1);
+            if ((strstr(low, "curl") || strstr(low, "wget")) && (strstr(low, "| sh") || strstr(low, "| bash") || strstr(low, "|sh") || strstr(low, "|bash")))
+                docker_risco(riscos, arquivo, ln, "baixa um script da rede e o executa direto no build (curl/wget | sh)");
+            g_free(low); g_free(t); continue;
+        }
+        char *sp = t;
+        while (*sp && !g_ascii_isspace(*sp)) sp++;
+        char *instr = g_ascii_strup(t, sp - t);
+        char *arg = g_strstrip(g_strdup(sp));
+        if (!strcmp(instr, "FROM")) {
+            lista_add(from, arg, ln);
+            char *img = g_strdup(arg);
+            char *esp = strchr(img, ' ');
+            if (esp) *esp = '\0';
+            const char *barra = strrchr(img, '/');
+            const char *nome = barra ? barra + 1 : img;
+            if (strcmp(img, "scratch") && (!strchr(nome, ':') || g_str_has_suffix(img, ":latest")) && !strchr(img, '$')) {
+                char *r = g_strdup_printf("imagem base %s sem versão fixa", img); docker_risco(riscos, arquivo, ln, r); g_free(r);
+            }
+            g_free(img);
+        } else if (!strcmp(instr, "EXPOSE")) lista_add(expose, arg, ln);
+        else if (!strcmp(instr, "USER")) { tem_user = TRUE; char *x = g_strdup_printf("USER %s", arg); g_string_append_printf(fatos, "%s:%" G_GINT64_FORMAT " — %s\n", arquivo, ln, x); g_free(x); }
+        else if (!strcmp(instr, "HEALTHCHECK")) tem_health = TRUE;
+        else if (!strcmp(instr, "CMD") || !strcmp(instr, "ENTRYPOINT")) { char *x = g_strdup_printf("%s %.120s", instr, arg); lista_add(exec, x, ln); g_free(x); }
+        else if (!strcmp(instr, "ENV") || !strcmp(instr, "ARG")) n_env++;
+        else if (!strcmp(instr, "ADD") && (strstr(arg, "http://") || strstr(arg, "https://")))
+            docker_risco(riscos, arquivo, ln, "ADD de uma URL: baixa conteúdo da rede no build sem verificação de integridade");
+        if (!strcmp(instr, "RUN")) {
+            char *low = g_ascii_strdown(arg, -1);
+            if ((strstr(low, "curl") || strstr(low, "wget")) && (strstr(low, "| sh") || strstr(low, "| bash") || strstr(low, "|sh") || strstr(low, "|bash")))
+                docker_risco(riscos, arquivo, ln, "baixa um script da rede e o executa direto no build (curl/wget | sh)");
+            if (strstr(low, "chmod 777") || strstr(low, "chmod -r 777"))
+                docker_risco(riscos, arquivo, ln, "chmod 777: qualquer processo do contêiner pode alterar esses arquivos");
+            g_free(low);
+        }
+        g_free(instr); g_free(arg); g_free(t);
+    }
+    g_string_append_printf(fatos, "%s — imagem base: %s\n", arquivo, from->len ? from->str : "não declarada");
+    g_string_append_printf(fatos, "%s — portas (EXPOSE): %s\n", arquivo, expose->len ? expose->str : "nenhuma declarada no Dockerfile");
+    if (exec->len) g_string_append_printf(fatos, "%s — execução: %s\n", arquivo, exec->str);
+    if (n_env) g_string_append_printf(fatos, "%s — %u instrução(ões) ENV/ARG (valores omitidos)\n", arquivo, n_env);
+    if (!tem_user)
+        docker_risco(riscos, arquivo, ultima, "não há USER no Dockerfile: o processo do contêiner roda como root, salvo se a imagem base definir outro usuário (inferência)");
+    if (!tem_health)
+        g_string_append_printf(fatos, "%s — HEALTHCHECK: não declarado no Dockerfile\n", arquivo);
+    g_string_free(from, TRUE); g_string_free(expose, TRUE); g_string_free(exec, TRUE);
+}
+
+gboolean coding_e_manifest_docker(const char *caminho)
+{
+    char *base = g_path_get_basename(caminho ? caminho : "");
+    char *b = g_ascii_strdown(base, -1);
+    g_free(base);
+    gboolean r = ((g_str_has_prefix(b, "compose") || g_str_has_prefix(b, "docker-compose")) && (g_str_has_suffix(b, ".yml") || g_str_has_suffix(b, ".yaml"))) ||
+                 g_str_has_prefix(b, "dockerfile") || g_str_has_suffix(b, ".dockerfile") || g_str_has_prefix(b, "containerfile");
+    g_free(b);
+    return r;
+}
+
+void coding_fatos_docker(const char *arquivo, const char *conteudo, gint64 linha_inicial, GString *fatos, GString *riscos, GString *servicos)
+{
+    if (!coding_e_manifest_docker(arquivo) || !conteudo) return;
+    char *base = g_path_get_basename(arquivo);
+    char *b = g_ascii_strdown(base, -1);
+    g_free(base);
+    char **l = g_strsplit(conteudo, "\n", -1);
+    if (strstr(b, "compose")) fatos_compose(arquivo, l, linha_inicial, fatos, riscos, servicos);
+    else fatos_dockerfile(arquivo, l, linha_inicial, fatos, riscos);
+    g_strfreev(l);
+    g_free(b);
+}
+
+/* "melhore os controllers e models", "refatore o projeto", "sugira melhorias
+ * de segurança no código": mudança ampla, sem símbolo nem caminho — nunca
+ * vira edição arbitrária nem pesquisa na web; a Lia pede o escopo. */
+gboolean coding_pedido_generico(const char *pedido)
+{
+    if (!pedido) return FALSE;
+    char *ascii = g_str_to_ascii(pedido, "C");
+    char *low = g_ascii_strdown(ascii, -1);
+    g_free(ascii);
+    char *t = g_strdup_printf(" %s ", low);
+    g_free(low);
+    for (char *q = t; *q; q++) if (!g_ascii_isalnum(*q) && *q != '_' && *q != '/' && *q != '.') *q = ' ';
+    static const char *const VERBO[] = { " melhore ", " melhorar ", " melhoria", " melhorias ", " refatore ", " refatorar ", " refatoracao ",
+                                         " otimize ", " otimizar ", " modernize ", " modernizar ", " arrume ", " organize ", " limpe ",
+                                         " deixe mais seguro", " deixar mais seguro", " corrija tudo", " corrija todos", " revise todo", " revise os ",
+                                         " audite ", " auditar ", " boas praticas em", NULL };
+    static const char *const AMPLO[] = { " controllers", " controladores", " models ", " modelos", " views ", " codigo ", " projeto ", " sistema ",
+                                         " repositorio", " classes ", " modulos ", " arquivos ", " todo o ", " todos os ", " toda a ", " backend ",
+                                         " frontend ", " aplicacao ", " codebase ", NULL };
+    gboolean verbo = FALSE, amplo = FALSE;
+    for (int i = 0; VERBO[i] && !verbo; i++) if (strstr(t, VERBO[i])) verbo = TRUE;
+    for (int i = 0; AMPLO[i] && !amplo; i++) if (strstr(t, AMPLO[i])) amplo = TRUE;
+    g_free(t);
+    if (!verbo || !amplo) return FALSE;
+    char **sim = coding_simbolos(pedido);
+    gboolean tem_simbolo = sim && sim[0];
+    g_strfreev(sim);
+    if (tem_simbolo) return FALSE;
+    /* caminho de arquivo (com barra ou extensão) também dá escopo */
+    GRegex *re = g_regex_new("[\\w.-]+/[\\w./-]+|\\b[\\w-]+\\.(php|py|js|ts|c|h|go|rs|java|rb|yml|yaml|json)\\b", G_REGEX_CASELESS, 0, NULL);
+    gboolean caminho = g_regex_match(re, pedido, 0, NULL);
+    g_regex_unref(re);
+    return !caminho;
+}
+
+/* "não altere o model", "sem mexer no código de produção", "só o teste" */
+gboolean coding_pedido_so_testes(const char *pedido)
+{
+    if (!pedido) return FALSE;
+    char *ascii = g_str_to_ascii(pedido, "C");
+    char *t = g_ascii_strdown(ascii, -1);
+    g_free(ascii);
+    GRegex *re = g_regex_new("\\b(nao|sem|nunca)\\s+(altere|alterar|alterando|mexa|mexer|mexendo|modifique|modificar|toque|tocar|edite|editar)\\s+"
+                             "(?:(?:em|no|na|nos|nas|o|a|os|as|de)\\s+)*(model|models|modelo|codigo|controller|controllers|producao|classe|metodo|funcao|arquivo de producao)"
+                             "|\\b(so|apenas|somente)\\s+(?:o|um|os)\\s+(arquivo\\s+de\\s+)?testes?\\b",
+                             0, 0, NULL);
+    gboolean r = g_regex_match(re, t, 0, NULL);
+    g_regex_unref(re);
+    g_free(t);
+    return r;
+}
+
+gboolean coding_caminho_de_teste(const char *caminho)
+{
+    char *low = g_ascii_strdown(caminho ? caminho : "", -1);
+    char *base = g_path_get_basename(low);
+    gboolean r = g_str_has_prefix(low, "tests/") || g_str_has_prefix(low, "test/") || strstr(low, "/tests/") || strstr(low, "/test/") ||
+                 strstr(base, "test") || strstr(base, "spec");
+    g_free(base);
+    g_free(low);
+    return r;
+}
+
+/* a tarefa em termos concretos, para modelos pequenos: qual arquivo é NOVO
+ * (criar), o que NÃO pode ser alterado, e o que um teste precisa ter.
+ * Orientação, não código: a proposta continua sendo do modelo. */
+char *coding_dicas_tarefa(const char *pedido, GHashTable *lidos)
+{
+    GString *o = g_string_new(NULL);
+    char **cam = intencao_caminhos(pedido);
+    for (int i = 0; cam[i]; i++) {
+        if (lidos && g_hash_table_contains(lidos, cam[i])) continue;
+        char *e = NULL;
+        char *abs = proj_resolver(cam[i], FALSE, TRUE, &e);
+        if (!abs)
+            g_string_append_printf(o, "- %s NÃO existe: crie-o com {\"acao\":\"criar\",\"caminho\":\"%s\",\"conteudo\":\"<o arquivo completo>\"}\n", cam[i], cam[i]);
+        g_free(abs); g_free(e);
+    }
+    g_strfreev(cam);
+    gboolean so_testes = coding_pedido_so_testes(pedido);
+    if (so_testes)
+        g_string_append(o, "- o pedido PROÍBE alterar o código de produção: os arquivos lidos servem só de referência; não use \"editar\" nem \"substituir_funcao\" neles\n");
+    char *ascii = g_str_to_ascii(pedido, "C");
+    char *t = g_ascii_strdown(ascii, -1);
+    g_free(ascii);
+    if (strstr(t, "phpunit") || (strstr(t, "teste") && strstr(t, ".php")))
+        g_string_append(o, "- um teste PHPUnit começa com <?php, carrega a classe testada (require_once), declara uma classe que estende "
+                           "PHPUnit\\Framework\\TestCase e tem métodos public function testAlgo(): void com asserts (assertSame, assertEquals...)\n");
+    if (strstr(t, "fake") || strstr(t, "falso") || strstr(t, "sem banco") || strstr(t, "sem conexao"))
+        g_string_append(o, "- sem banco: crie no próprio arquivo de teste uma classe falsa que só REGISTRA as chamadas (where, order_by, get, query...) "
+                           "e devolve valores fixos; atribua-a a $modelo->db e confira o que foi registrado\n");
+    g_free(t);
+    return g_string_free(o, FALSE);
+}
+
+/* ---- resumo e conferência das afirmações do modelo contra os fatos Docker ---- */
+
+typedef struct { char *nome; char *deps; char *portas; char *origem; } SvcResumo;
+
+static void svcresumo_liberar(gpointer p) { SvcResumo *s = p; g_free(s->nome); g_free(s->deps); g_free(s->portas); g_free(s->origem); g_free(s); }
+
+static GPtrArray *ler_servicos_dos_fatos(const char *fatos, GString *expose, guint *vols)
+{
+    GPtrArray *v = g_ptr_array_new_with_free_func(svcresumo_liberar);
+    char **l = g_strsplit(fatos ? fatos : "", "\n", -1);
+    SvcResumo *at = NULL;
+    for (int i = 0; l[i]; i++) {
+        const char *x = l[i];
+        const char *sv = strstr(x, " — serviço ");
+        if (sv && x[0] != ' ') {
+            at = g_new0(SvcResumo, 1);
+            at->nome = g_strdup(sv + strlen(" — serviço "));
+            g_ptr_array_add(v, at);
+            continue;
+        }
+        if (at && g_str_has_prefix(x, "    depende de: ")) at->deps = g_strdup(x + 16);
+        else if (at && g_str_has_prefix(x, "    portas: ")) at->portas = g_strdup(x + 12);
+        else if (at && g_str_has_prefix(x, "    origem: ")) at->origem = g_strdup(x + 12);
+        else if (x[0] != ' ') at = NULL;
+        const char *ex = strstr(x, " — portas (EXPOSE): ");
+        if (ex && expose && !strstr(ex, "nenhuma")) { if (expose->len) g_string_append(expose, ", "); g_string_append(expose, ex + strlen(" — portas (EXPOSE): ")); }
+        const char *vn = strstr(x, " — volumes nomeados: ");
+        if (vn && vols) { (*vols)++; for (const char *q = vn; *q; q++) if (*q == ',') (*vols)++; }
+    }
+    g_strfreev(l);
+    return v;
+}
+
+static char *sem_linhas(const char *t)
+{
+    /* "pocprd (l. 69), x (l. 3)" -> "pocprd, x" */
+    GRegex *re = g_regex_new(" \\(l\\. \\d+\\)", 0, 0, NULL);
+    char *r = g_regex_replace(re, t ? t : "", -1, 0, "", 0, NULL);
+    g_regex_unref(re);
+    return r;
+}
+
+char *coding_resumo_docker(const char *fatos, const char *riscos)
+{
+    GString *expose = g_string_new(NULL);
+    guint vols = 0;
+    GPtrArray *sv = ler_servicos_dos_fatos(fatos, expose, &vols);
+    GString *o = g_string_new(NULL);
+    if (!sv->len) g_string_append(o, "nenhum serviço declarado nos arquivos lidos");
+    else {
+        g_string_append(o, "serviços declarados: ");
+        for (guint i = 0; i < sv->len; i++) {
+            SvcResumo *s = g_ptr_array_index(sv, i);
+            char *orig = sem_linhas(s->origem ? s->origem : "origem não declarada");
+            g_string_append_printf(o, "%s%s (%s)", i ? "; " : "", s->nome, orig);
+            g_free(orig);
+        }
+        GString *d = g_string_new(NULL), *p = g_string_new(NULL);
+        for (guint i = 0; i < sv->len; i++) {
+            SvcResumo *s = g_ptr_array_index(sv, i);
+            if (s->deps && !g_str_has_prefix(s->deps, "não declarado")) { char *x = sem_linhas(s->deps); g_string_append_printf(d, "%s%s depende de %s", d->len ? "; " : "", s->nome, x); g_free(x); }
+            if (s->portas && !g_str_has_prefix(s->portas, "nenhuma")) { char *x = sem_linhas(s->portas); g_string_append_printf(p, "%s%s: %s", p->len ? "; " : "", s->nome, x); g_free(x); }
+        }
+        g_string_append_printf(o, ". Dependências declaradas: %s", d->len ? d->str : "nenhuma (depends_on não aparece)");
+        g_string_append_printf(o, ". Portas publicadas no host: %s", p->len ? p->str : "nenhuma declarada no compose");
+        if (expose->len) { char *x = sem_linhas(expose->str); g_string_append_printf(o, " (o Dockerfile declara EXPOSE %s: só documenta a porta interna do contêiner)", x); g_free(x); }
+        g_string_free(d, TRUE); g_string_free(p, TRUE);
+    }
+    if (vols) g_string_append_printf(o, ". Volumes nomeados: %u", vols);
+    guint nr = 0;
+    for (const char *q = riscos ? riscos : ""; *q; q++) if (*q == '\n') nr++;
+    g_string_append_printf(o, ". Riscos apontados por regra fixa: %u. Tudo isso vem das linhas lidas (detalhe abaixo, com a linha de cada item)", nr);
+    g_ptr_array_unref(sv);
+    g_string_free(expose, TRUE);
+    return g_string_free(o, FALSE);
+}
+
+/* frases do modelo que contradizem os fatos: dependência que não existe
+ * no manifest ("A depende de B") e porta citada que não aparece */
+char *coding_contradicoes_docker(const char *fatos, const char *texto)
+{
+    GString *expose = g_string_new(NULL);
+    GPtrArray *sv = ler_servicos_dos_fatos(fatos, expose, NULL);
+    GString *o = g_string_new(NULL);
+    GRegex *frase = g_regex_new("[^.;!?\\n]+", 0, 0, NULL);
+    GMatchInfo *mi = NULL;
+    g_regex_match(frase, texto ? texto : "", 0, &mi);
+    while (g_match_info_matches(mi)) {
+        char *f = g_match_info_fetch(mi, 0);
+        char *low = g_utf8_strdown(f, -1);
+        const char *dep = strstr(low, "depend");
+        if (dep && sv->len >= 2) {
+            /* sujeito: o primeiro serviço citado antes de "depend"; objeto: os citados depois */
+            SvcResumo *suj = NULL;
+            const char *pos_suj = NULL;
+            for (guint i = 0; i < sv->len; i++) {
+                SvcResumo *s = g_ptr_array_index(sv, i);
+                const char *p = strstr(low, s->nome);
+                if (p && p < dep && (!pos_suj || p < pos_suj)) { pos_suj = p; suj = s; }
+            }
+            for (guint i = 0; suj && i < sv->len; i++) {
+                SvcResumo *b = g_ptr_array_index(sv, i);
+                if (b == suj) continue;
+                if (strstr(dep, b->nome) && !(suj->deps && strstr(suj->deps, b->nome))) {
+                    char *t = g_strstrip(g_strdup(f));
+                    g_string_append_printf(o, "«%s» — no manifest, %s %s\n", t, suj->nome,
+                                           suj->deps && !g_str_has_prefix(suj->deps, "não declarado") ? "depende de outro(s) serviço(s), não deste" : "não declara depends_on");
+                    g_free(t);
+                }
+            }
+        }
+        GRegex *rp = g_regex_new("porta[s]?\\D{0,12}(\\d{2,5})", 0, 0, NULL);
+        GMatchInfo *mp = NULL;
+        if (g_regex_match(rp, low, 0, &mp)) {
+            char *n = g_match_info_fetch(mp, 1);
+            gboolean existe = expose->len && strstr(expose->str, n);
+            for (guint i = 0; i < sv->len && !existe; i++) { SvcResumo *s = g_ptr_array_index(sv, i); if (s->portas && strstr(s->portas, n)) existe = TRUE; }
+            if (!existe) { char *t = g_strstrip(g_strdup(f)); g_string_append_printf(o, "«%s» — a porta %s não aparece nos manifests lidos\n", t, n); g_free(t); }
+            g_free(n);
+        }
+        g_match_info_free(mp);
+        g_regex_unref(rp);
+        g_free(low); g_free(f);
+        g_match_info_next(mi, NULL);
+    }
+    g_match_info_free(mi);
+    g_regex_unref(frase);
+    g_ptr_array_unref(sv);
+    g_string_free(expose, TRUE);
+    return g_string_free(o, FALSE);
 }

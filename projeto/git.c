@@ -11,7 +11,7 @@
  * Repositórios grandes não precisam de mais memória — o git é configurado
  * para mapear os packs em janelas pequenas (core.packedGitWindowSize/
  * packedGitLimit), então o uso fica limitado qualquer que seja o tamanho do
- * pack. LIA_SESSIOND_GIT_MEMORIA_MB ajusta, dentro de [256, 4096]. */
+ * pack. LIA_SESSIOND_GIT_MEMORIA_MB ajusta, dentro de [128, 4096]. */
 #define GIT_MEMORIA_PADRAO_MB 1024
 #define GIT_MEMORIA_MIN_MB 128
 #define GIT_MEMORIA_MAX_MB 4096

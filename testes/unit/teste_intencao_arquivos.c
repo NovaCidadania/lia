@@ -149,6 +149,16 @@ int main(void)
     nada("procure na internet o site oficial do python.org");
     nada("por que o sistema está lento?");
     nada("crie um programa em C que soma dois números"); /* sem caminho: geração de código, não deste planejador */
+    /* pedido de TESTE/código com trecho citado: o trecho é o assunto, não o conteúdo (vai para o ciclo de coding) */
+    nada("Crie tests/M_educquestoes_getcategoriasTest.php com um teste PHPUnit para `M_educquestoes::getcategorias($iddisciplina)` usando um fake do Query Builder.");
+    nada("crie um teste PHPUnit em tests/M_educquestoesTest.php que verifique `M_educquestoes::getcategorias($iddisciplina)`");
+    nada("crie tests/CategoriasTest.php com um teste phpunit que confirme 'status' = 't' em M_educquestoes::getcategorias");
+    nada("Crie o teste tests/X_test.py para a funcao `soma(a, b)`");
+    nada("crie tests/fooTest.php com um teste para \"getcategorias\" sem acentuacao e com fake do banco");
+    nada("adicione ao fim de tests/a_test.py um teste para `soma(1, 2)`");
+    /* literal explícito continua direto */
+    espera("crie tests/leia-me.txt com o conteúdo: testes ficam aqui", "arquivo.criar", P("caminho", "tests/leia-me.txt", "conteudo", "testes ficam aqui"));
+    espera("crie tests/aTest.php com\n```php\n<?php\n// teste\n```", "arquivo.criar", P("caminho", "tests/aTest.php", "conteudo", "<?php\n// teste\n"));
     nada("oi, tudo bem?");
     nada("quanto é 2+2?");
     nada("o que mudou na versão 3 do python?");

@@ -30,6 +30,8 @@ char *validacao_comando_padrao(void);
 char *validacao_previa(JsonObject *params, char **erro);
 /* executa (bloqueia; chame numa thread). JSON do resultado, ou NULL + erro */
 char *validacao_executar(JsonObject *params, volatile gint *cancelado, char **erro);
+/* últimas n linhas + até 6 linhas-chave de erro anteriores (Fatal error, Traceback, error:...) */
+char *validacao_resumo_falha(const char *t, int n, gsize max);
 
 /* exposto para testes */
 gboolean validacao_argv_permitido(char **argv, char **motivo);

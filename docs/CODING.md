@@ -300,12 +300,68 @@ configuração, valores de chaves como senha/token/secret viram «omitido»;
 em compose e Dockerfile, **todo** valor de `environment:` (inclusive
 entradas comentadas) e de `ENV`/`ARG` é omitido — os nomes ficam.
 
+### Manifests Docker
+
+"Leia compose.yaml e Dockerfile e explique serviços, portas, volumes e
+riscos": os manifests **citados** são lidos todos, na ordem, sem repetição
+(nome solto como `Dockerfile` vale; caminho que não existe é lido e falha
+de verdade, sem inventar). Sem caminho no pedido, a Lia descobre os
+manifests (compose*.y*ml, docker-compose*, Dockerfile*, até 3 níveis, 6
+arquivos). Nada é executado: nenhum `docker`, nenhum contêiner.
+
+Fatos por regra fixa (`coding_fatos_docker`), cada um com a linha:
+serviços, origem (build/imagem), portas, volumes, `depends_on`, redes,
+deploy, quantidade de variáveis de ambiente (só nomes; valores omitidos);
+chave ausente = "não declarado no manifest". Riscos são inferências a
+partir de uma linha (bind gravável do host, `docker.sock`, porta sem IP,
+imagem sem versão, rede externa, `deploy.mode` fora do Swarm, volume
+compartilhado, nome de variável que parece segredo, ausência de `USER`,
+`curl | sh`...). Comentários nunca viram fato (prompt injection em
+comentário não muda nada). A **Resposta** é o resumo desses fatos; o texto
+do modelo aparece à parte como "não verificado", com as frases que
+contradizem os fatos (dependência ou porta inexistente) apontadas.
+
+### Pedidos amplos e pedidos de teste
+
+- "melhore os controllers e models" (sem arquivo, classe ou função): a Lia
+  não edita nem pesquisa na web — responde pedindo o escopo e mostra uma
+  auditoria de escopo limitado já feita (só leitura, regra fixa: SQL
+  montada com variável em controllers/models, arquivo e linha).
+- "crie tests/XTest.php com um teste PHPUnit para `Classe::metodo`": é
+  ciclo de coding. Trecho citado solto não vira conteúdo do arquivo quando
+  o pedido descreve código a gerar (conteúdo literal: bloco ``` ou "com o
+  conteúdo: ..."). O verificador recusa arquivo de código trivial (só o
+  nome do método, PHP sem `<?php`, teste sem método de teste).
+- "não altere o model" / "só o teste": proposta que muda arquivo fora de
+  testes é recusada pelo verificador.
+- Com `Classe::metodo` no pedido, só os arquivos que definem a classe/método
+  são lidos (nomes soltos como `order_by` não puxam o framework).
+- Antes de pedir aprovação, PHP proposto passa por `php -l` numa cópia
+  fora do projeto, no mesmo isolamento (só analisa, não executa); erro de
+  sintaxe volta ao modelo com a mensagem real (`LIA_SESSIOND_LINT_PHP=0`
+  desliga).
+- No ciclo de correção, "criar" de novo um arquivo que a própria tarefa
+  criou vira regravação inteira com diff e nova aprovação.
+
+### Modelo: o que aparece e quanto espera
+
+Toda resposta que usa o modelo diz qual (`Modelo: Ollama · llama3.2:3b —
+respondeu em 130 s` ou `falhou em …: motivo`); resultado de regra fixa sai
+com origem `deterministica`. Análise e proposta de edição pedem saída
+estruturada (esquema JSON; `LIA_SESSIOND_ANALISE_ESQUEMA=0` /
+`LIA_SESSIOND_CODIGO_ESQUEMA=0` desligam). Enquanto o modelo trabalha, uma
+linha de progresso a cada 15 s (`LIA_SESSIOND_INTERVALO_PROGRESSO_MS`), com
+tempo e tokens; "cancelar" interrompe a geração. Se o modelo falhar, a
+resposta usa o que a regra fixa conseguiu; sem dados suficientes, diz o que
+não foi possível inferir.
+
 ### Modelo local via llama.cpp
 
 `LIA_SESSIOND_MODELO=llama_cpp` usa um `llama-server` em loopback
 (`LIA_LLAMACPP_PORTA`, `LIA_LLAMACPP_TIMEOUT_MS` até o máximo validado).
 Modelos instruct precisam do formato de conversa deles:
-`LIA_LLAMACPP_FORMATO=chatml` (Qwen) ou `llama3`; sem isso (`cru`, padrão)
+`LIA_LLAMACPP_FORMATO=chatml` (Qwen) ou `llama3` (e, para o relatório,
+`LIA_LLAMACPP_MODELO_NOME`); sem isso (`cru`, padrão)
 o `/completion` só continua o texto. Em máquina sem GPU suportada, suba o
 servidor com `--device none -ngl 0`.
 
@@ -316,5 +372,5 @@ make teste-processo        # isolamento real: argv literal, ambiente, rede, limi
 make teste-validacao-git   # validação e Git num projeto C temporário (38)
 make teste-coding-unit     # partes puras do ciclo (42)
 make teste-coding          # ciclo completo com modelo mock roteirizado, rejeições, retomada, Git, chat (43)
-make teste-coding-php      # PHP: receita, modelo, Git quebrado/erro/proibido, análise, phpunit sem banco, Docker, .env (30)
+make teste-coding-php      # PHP: receita, modelo, Git, análise, Docker (fatos, citados, injection), pedidos de teste/amplos, php -l, correção, lento/cancelar, .env (71)
 ```

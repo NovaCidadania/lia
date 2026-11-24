@@ -34,6 +34,33 @@ static gboolean contem_ci(const char *texto, const char *alvo)
     return achou;
 }
 
+/* análise LENTA (MOCK_ANALISE_LENTA no pedido): conclui depois de
+ * LIA_MOCK_ATRASO_MS (padrão 3000) por um timer do laço principal — nunca
+ * bloqueia — e pode ser cancelada de verdade (mock_cancelar). */
+typedef struct {
+    char *id, *texto;
+    ModeloConcluidoCb cb;
+    gpointer ctx;
+    guint fonte;
+} MockLento;
+static GHashTable *g_lentos; /* id -> MockLento* */
+
+static gboolean mock_lento_fim(gpointer p)
+{
+    MockLento *m = p;
+    m->fonte = 0;
+    g_hash_table_steal(g_lentos, m->id);
+    ModeloResposta rr = { 0 };
+    rr.sucesso = TRUE;
+    rr.resposta_texto = m->texto;
+    m->texto = NULL;
+    m->cb(m->ctx, &rr);
+    modelo_resposta_liberar(&rr);
+    g_free(m->id);
+    g_free(m);
+    return G_SOURCE_REMOVE;
+}
+
 static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
                             const char *prompt_montado_completo, const ModeloOpcoes *opcoes,
                             ModeloConcluidoCb concluido_cb, gpointer ctx)
@@ -51,6 +78,17 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
              * e uma linha que não foi lida (o daemon precisa descartá-la);
              * MOCK_ANALISE_INVALIDA na pergunta devolve texto que não é JSON */
             const char *pp = prompt_montado_completo;
+            if (strstr(pp, "MOCK_ANALISE_LENTA")) {
+                if (!g_lentos) g_lentos = g_hash_table_new(g_str_hash, g_str_equal);
+                MockLento *m = g_new0(MockLento, 1);
+                m->id = g_strdup(pergunta_id);
+                m->texto = g_strdup("{\"resposta\":\"(mock lento) resposta depois da espera.\",\"evidencias\":[],\"hipoteses\":[]}");
+                m->cb = concluido_cb; m->ctx = ctx;
+                const char *at = g_getenv("LIA_MOCK_ATRASO_MS");
+                m->fonte = g_timeout_add(at ? (guint)atoi(at) : 3000, mock_lento_fim, m);
+                g_hash_table_insert(g_lentos, m->id, m);
+                return;
+            }
             if (strstr(pp, "MOCK_ANALISE_INVALIDA")) {
                 rr.sucesso = TRUE;
                 rr.resposta_texto = g_strdup("não sei responder em JSON");
@@ -246,9 +284,19 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
 
 static void mock_cancelar(const ModeloBackend *self, const char *pergunta_id)
 {
-    (void)self; (void)pergunta_id;
-    /* mock_perguntar é síncrona (já terminou antes de cancelar poder
-     * chegar) — nada a fazer. */
+    (void)self;
+    /* só a análise lenta fica pendente; o resto é síncrono */
+    MockLento *m = g_lentos ? g_hash_table_lookup(g_lentos, pergunta_id) : NULL;
+    if (!m) return;
+    g_hash_table_steal(g_lentos, m->id);
+    if (m->fonte) g_source_remove(m->fonte);
+    ModeloResposta rr = { 0 };
+    rr.sucesso = FALSE;
+    rr.erro_codigo = g_strdup("cancelado");
+    rr.erro_mensagem = g_strdup("cancelado");
+    m->cb(m->ctx, &rr);
+    modelo_resposta_liberar(&rr);
+    g_free(m->texto); g_free(m->id); g_free(m);
 }
 
 static gboolean mock_disponivel(const ModeloBackend *self, char **detalhe_alocado)
