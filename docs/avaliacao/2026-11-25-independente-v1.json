@@ -1,0 +1,88 @@
+{
+ "formato": "lia-avaliacao-tarefas/1",
+ "congelado_em": "2026-11-25",
+ "regra": "conjunto 'independente-v1': enunciados com critérios de aceitação VISÍVEIS; oráculos ocultos fora do repositório; nunca usado para ajustar prompt, regra ou modelo; resultados valem como medida, não como promoção",
+ "autoria": "escrito pelo mesmo desenvolvimento que mantém o runtime (NÃO é cego): por isso NÃO serve para promoção, só como medida reprodutível; para valer como independente, substitua/estenda por tarefas de outra pessoa (ver docs/avaliacao/2026-11-25-avaliacao-independente.md)",
+ "fixtures": "ferramentas/avaliacao/criar-fixtures.sh cria os repositórios-base (docs/avaliacao/fixtures/)",
+ "validacao_do_oraculo": "cada oráculo foi executado antes de qualquer execução: reprova no código original e aprova numa solução de referência (não versionada)",
+ "tarefas": [
+  {
+   "id": "ind-py-1",
+   "conjunto": "independente-v1",
+   "projeto": "/home/zad/.lia/avaliacao-fixtures/inventario-py",
+   "subdir": "",
+   "categoria": "facil",
+   "prompt": "Em inventario/precos.py, faça aplicar_desconto validar a entrada e arredondar o resultado.\nCritérios de aceitação:\n1. percentual fora do intervalo de 0 a 100 (inclusive) levanta ValueError;\n2. valor negativo levanta ValueError;\n3. o resultado é arredondado para 2 casas decimais: aplicar_desconto(10.0, 33.333) == 6.67;\n4. aplicar_desconto(100.0, 10) continua 90.0, percentual 0 e 100 são válidos, e total_itens não muda.\nAcrescente testes unittest em tests/test_precos.py para os itens 1 a 3.",
+   "verificacao_oculta": {
+    "tipo": "python",
+    "sha256": "1f8f42907d321a840c67fa8d083c383c9205314e42dd09767e4db520a221afaf",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-25-independente-v1.json (0600); nunca em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ind-py-2",
+   "conjunto": "independente-v1",
+   "projeto": "/home/zad/.lia/avaliacao-fixtures/inventario-py",
+   "subdir": "",
+   "categoria": "medio",
+   "prompt": "Em inventario/estoque.py, faça Estoque.remover recusar retiradas inválidas.\nCritérios de aceitação:\n1. crie a exceção EstoqueInsuficiente (subclasse de Exception) no mesmo módulo;\n2. remover levanta EstoqueInsuficiente quando qtd é maior que a quantidade disponível (inclusive para sku que não existe), e o estoque NÃO muda;\n3. qtd <= 0 levanta ValueError e o estoque NÃO muda;\n4. retirar exatamente o que há é permitido: a quantidade vira 0 e o sku continua listado em skus().\nAcrescente testes unittest em tests/test_estoque.py.",
+   "verificacao_oculta": {
+    "tipo": "python",
+    "sha256": "77efb92b82f94832c146a969c684d27b01a67d4b28d12d09d0d4465e1efc1efe",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-25-independente-v1.json (0600); nunca em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ind-py-3",
+   "conjunto": "independente-v1",
+   "projeto": "/home/zad/.lia/avaliacao-fixtures/inventario-py",
+   "subdir": "",
+   "categoria": "dificil",
+   "prompt": "Acrescente a Estoque o método abaixo_do_minimo e use-o em relatorio.gerar_relatorio (em inventario/estoque.py e inventario/relatorio.py).\nCritérios de aceitação:\n1. Estoque.abaixo_do_minimo(minimos) recebe um dict sku -> mínimo e devolve a lista de tuplas (sku, quantidade, minimo), ordenada por sku, só com os skus cuja quantidade é MENOR que o mínimo; um sku do dict que não existe no estoque tem quantidade 0;\n2. gerar_relatorio(estoque, minimos=None): sem minimos (ou com dict vazio) devolve exatamente o mesmo texto de hoje;\n3. com minimos e pelo menos um item abaixo do mínimo, o texto de hoje é seguido de uma linha em branco, da linha ABAIXO DO MINIMO e de uma linha por item no formato sku: quantidade/minimo (exemplo: A1: 2/5), sem quebra de linha no fim;\n4. se nenhum item estiver abaixo do mínimo, o texto não muda.\nAcrescente testes unittest em tests/test_estoque.py e tests/test_relatorio.py.",
+   "verificacao_oculta": {
+    "tipo": "python",
+    "sha256": "e885612e9ed159cda03117c363a964d38bac86bae69cd09a7c170bca4fa63229",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-25-independente-v1.json (0600); nunca em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ind-js-1",
+   "conjunto": "independente-v1",
+   "projeto": "/home/zad/.lia/avaliacao-fixtures/agenda-js",
+   "subdir": "",
+   "categoria": "facil",
+   "prompt": "Em src/datas.js, faça parseDataBR rejeitar datas inexistentes ou mal formadas.\nCritérios de aceitação:\n1. devolve null (nunca lança) para dia ou mês inexistente: 31/02/2026, 00/01/2026, 15/13/2026, 31/04/2026;\n2. devolve null para texto que não seja exatamente dd/mm/aaaa (2+2+4 dígitos): '1/2/2026', 'abc', '', '25-11-2026', '25/11/26';\n3. 29/02/2024 é válida (ano bissexto) e 29/02/2025 devolve null; 29/02/1900 devolve null e 29/02/2000 é válida;\n4. para datas válidas continua devolvendo um Date em UTC à meia-noite (formatarDataBR(parseDataBR('25/11/2026')) === '25/11/2026').\nAcrescente testes node:test em tests/datas.test.js.",
+   "verificacao_oculta": {
+    "tipo": "node",
+    "sha256": "aad1275cf6034f7c32491fd4a3abdf9d913aeb197162b5fc1032cab16c5f1635",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-25-independente-v1.json (0600); nunca em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ind-js-2",
+   "conjunto": "independente-v1",
+   "projeto": "/home/zad/.lia/avaliacao-fixtures/agenda-js",
+   "subdir": "",
+   "categoria": "medio",
+   "prompt": "Em src/fila.js, faça Fila.proximo() respeitar a prioridade.\nCritérios de aceitação:\n1. proximo() devolve primeiro o item de MAIOR prioridade (prioridades negativas valem; adicionar(valor) sem prioridade usa 0);\n2. entre prioridades iguais vale a ordem de chegada (o primeiro adicionado sai primeiro);\n3. fila vazia devolve undefined;\n4. tamanho reflete sempre os itens que restam, inclusive quando adicionar e proximo se alternam.\nAcrescente testes node:test em tests/fila.test.js.",
+   "verificacao_oculta": {
+    "tipo": "node",
+    "sha256": "d4e1c3ae85167bb7b733c85c9b6aafddb2d797a1dd15573af4126eb1e7846b09",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-25-independente-v1.json (0600); nunca em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ind-js-3",
+   "conjunto": "independente-v1",
+   "projeto": "/home/zad/.lia/avaliacao-fixtures/agenda-js",
+   "subdir": "",
+   "categoria": "dificil",
+   "prompt": "Em src/csv.js, faça parseCsv aceitar campos entre aspas duplas.\nCritérios de aceitação:\n1. um campo entre aspas pode conter ';' e quebra de linha sem ser separado em campos ou linhas;\n2. dentro das aspas, duas aspas seguidas valem uma aspa literal;\n3. as aspas só delimitam o campo: não aparecem no resultado, e \"\" entre aspas é o campo vazio;\n4. linhas terminadas em \\r\\n funcionam como \\n;\n5. linhas vazias continuam ignoradas e o comportamento sem aspas não muda: 'a;b\\n1;2\\n' -> [['a','b'],['1','2']] e 'a;;b' -> [['a','','b']].\nAcrescente testes node:test em tests/csv.test.js.",
+   "verificacao_oculta": {
+    "tipo": "node",
+    "sha256": "65e928064f997120f70bcd364617b937ae843bbb26c745cd477b04ad74dd2be3",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-25-independente-v1.json (0600); nunca em resultados, prompts ou commits"
+   }
+  }
+ ]
+}

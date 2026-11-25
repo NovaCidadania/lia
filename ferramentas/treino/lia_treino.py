@@ -10,8 +10,11 @@ versionado com manifesto). Python puro, sem dependências.
 
 Regras (testadas em testes/treino/teste_pipeline.py):
 - trajetória só entra com versão conhecida, licença aceita e proveniência;
-- POSITIVO só de proposta aplicada (diff aprovado pela pessoa) numa tarefa
-  concluída, com a validação passando DEPOIS do último patch (pela árvore);
+- POSITIVO (requisito resolvido) exige, além da proposta aplicada numa tarefa
+  concluída com validação depois do último patch, uma VERIFICAÇÃO que não é
+  a suíte visível: "independente" (oráculo fora do agente) ou "revisao_humana".
+  Sem esse atestado a proposta vira "formato" (serve só para aprender o
+  formato/reparo; o requisito não foi confirmado) e vai para formato.jsonl;
 - proposta recusada/cortada/rejeitada vira NEGATIVO (reparo), nunca positivo;
 - segredos, e-mails, telefones, CPFs e caminhos de home são anonimizados;
 - partição treino/dev/teste por REPOSITÓRIO (sem vazamento entre variantes);
@@ -25,11 +28,15 @@ VERSAO_TRAJETORIA = "lia-trajetoria/1"
 VERSAO_ARVORE = "lia-arvore-tarefas/1"
 VERSAO_PIPELINE = "lia-treino/1"
 # código do próprio usuário ("proprio") ou licenças que permitem uso para treino
+TIPOS_VERIFICACAO = ("validacao_visivel", "revisao_humana", "independente")
+# limiares fixados no código (não ajustáveis por quem treina): abaixo deles o manifesto não declara aptidão
+MIN_POSITIVOS_TREINO = 200      # positivos CONFIRMADOS na partição de treino
+MIN_REPOS_TREINO = 5            # repositórios distintos no treino
 LICENCAS_ACEITAS = {"proprio", "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Unlicense", "CC0-1.0", "0BSD"}
 
 
 # ------------------------------------------------------------------ validação
-def validar(t):
+def validar(t, congelados=None):
     """lista de motivos de recusa (vazia = trajetória aceitável)"""
     e = []
     if not isinstance(t, dict):
@@ -46,6 +53,9 @@ def validar(t):
     r = t.get("resultado")
     if not isinstance(r, dict) or not isinstance(r.get("concluido"), bool):
         e.append("resultado ausente ou sem 'concluido'")
+    e.extend(validar_verificacao(t.get("verificacao")))
+    if congelados is not None and isinstance(t.get("repositorio"), str) and t["repositorio"] in congelados.repos:
+        e.append("repositório de uma tarefa do conjunto congelado de avaliação: nunca entra em treino")
     a = t.get("arvore")
     if not isinstance(a, dict) or a.get("versao") != VERSAO_ARVORE or not isinstance(a.get("nos"), list):
         e.append("árvore ausente ou de versão desconhecida")
@@ -59,6 +69,30 @@ def validar(t):
                 if x.get(ref) and x[ref] not in arts:
                     e.append("tentativa %s referencia artefato ausente (%s)" % (x.get("id"), ref))
     return e
+
+
+def validar_verificacao(v):
+    """atestado de como o requisito foi confirmado. Ausente = só a validação visível (o único que o runtime atesta)."""
+    if v is None:
+        return []
+    if not isinstance(v, dict) or v.get("tipo") not in TIPOS_VERIFICACAO:
+        return ["verificação: tipo desconhecido (esperado um de %s)" % ", ".join(TIPOS_VERIFICACAO)]
+    e = []
+    if v["tipo"] == "independente":
+        if not (isinstance(v.get("oraculo_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", v["oraculo_sha256"])):
+            e.append("verificação independente sem oraculo_sha256 (hash do oráculo executado fora do agente)")
+        if not (isinstance(v.get("referencia"), str) and v["referencia"].strip()):
+            e.append("verificação independente sem referencia (execução/avaliação que a produziu)")
+        if not isinstance(v.get("passou"), bool):
+            e.append("verificação independente sem 'passou' (booleano)")
+    elif v["tipo"] == "revisao_humana":
+        if not (isinstance(v.get("revisor"), str) and v["revisor"].strip()):
+            e.append("revisão humana sem revisor (papel, não nome)")
+        if not (isinstance(v.get("data"), str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v["data"])):
+            e.append("revisão humana sem data AAAA-MM-DD")
+        if not isinstance(v.get("aprovado"), bool):
+            e.append("revisão humana sem 'aprovado' (booleano)")
+    return ["verificação: " + x for x in e] if e else []
 
 
 def _nos(t):
@@ -77,19 +111,37 @@ def validacao_depois_do_ultimo_patch(t):
 
 
 # ------------------------------------------------------------------ rótulos
+def _confirmacao(t):
+    """(tipo, resultado) da verificação do REQUISITO: resultado True/False, ou None se só a suíte visível o atesta"""
+    v = t.get("verificacao") or {}
+    if v.get("tipo") == "independente":
+        return "independente", v.get("passou")
+    if v.get("tipo") == "revisao_humana":
+        return "revisão humana", v.get("aprovado")
+    return "validacao_visivel", None
+
+
 def rotular(t):
-    """exemplos (prompt, resposta) com rótulo 'positivo' ou 'negativo' e o porquê"""
+    """exemplos (prompt, resposta) rotulados:
+    positivo  — aplicada, tarefa concluída E requisito confirmado por oráculo independente/revisão humana;
+    formato   — aplicada e concluída só pela validação visível (requisito NÃO confirmado: só formato/reparo);
+    negativo  — o resto (recusada, cortada, não concluída, ou reprovada pela verificação do requisito)."""
     r = t["resultado"]
     tarefa_ok = (r.get("concluido") is True and r.get("validou_depois_da_ultima_edicao") is True and r.get("validacao_passou") is True
                  and (r.get("gravacoes_aprovadas") or 0) > 0 and validacao_depois_do_ultimo_patch(t))
+    como, confirmado = _confirmacao(t)
     out = []
     for n in t["arvore"]["nos"]:
         for x in n.get("tentativas", []):
             if not x.get("prompt") or not x.get("artefato"):
                 continue  # receita determinística (sem prompt): não é exemplo de modelo
             res = x.get("resultado") or ""
-            if res.startswith("aplicada") and tarefa_ok:
-                rot, porque = "positivo", "aplicada (diff aprovado) e a validação passou depois do último patch"
+            if res.startswith("aplicada") and confirmado is False:
+                rot, porque = "negativo", "falso 'concluído': aplicada, mas a verificação (%s) reprovou o requisito" % como
+            elif res.startswith("aplicada") and tarefa_ok and confirmado is True:
+                rot, porque = "positivo", "aplicada, validação depois do último patch e requisito confirmado (%s)" % como
+            elif res.startswith("aplicada") and tarefa_ok:
+                rot, porque = "formato", "aplicada e a suíte visível passou, mas o requisito não confirmado: serve só para formato/reparo"
             elif res.startswith("aplicada"):
                 rot, porque = "negativo", "aplicada, mas a tarefa não foi concluída com validação depois do último patch"
             else:
@@ -132,17 +184,45 @@ def _jaccard(a, b):
     return len(A & B) / max(1, len(A | B))
 
 
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9]+|[a-z][A-Z])[A-Za-z0-9_]*|[\w./-]+\.(?:py|ts|tsx|js|jsx|mjs|php|c|h|cs|go|rs|java|rb|sh)\b")
+
+
+def _identificadores(texto):
+    """nomes de código (snake_case, camelCase, arquivos) com >= 6 caracteres, em minúsculas"""
+    return {m.group(0).lower() for m in _IDENT.finditer(texto or "") if len(m.group(0)) >= 6}
+
+
+class Congelados:
+    def __init__(self):
+        self.prompts, self.idents, self.repos = [], [], set()
+
+
 def carregar_congelados(caminhos):
-    p = []
-    for c in caminhos or []:
-        for t in json.load(open(c)).get("tarefas", []):
-            p.append(_norm(t["prompt"]))
-    return p
+    c = Congelados()
+    for cam in caminhos or []:
+        for t in json.load(open(cam)).get("tarefas", []):
+            c.prompts.append(_norm(t["prompt"]))
+            c.idents.append(_identificadores(t["prompt"]))
+            proj = t.get("projeto")
+            if proj:  # o runtime identifica o repositório por sha256 da raiz (com ou sem subdiretório)
+                for raiz in {proj, os.path.join(proj, t.get("subdir") or "") if t.get("subdir") else proj}:
+                    c.repos.add(hashlib.sha256(raiz.encode()).hexdigest())
+    return c
 
 
 def vaza_congelado(pedido, congelados, limiar=0.6):
+    """igual, parecido (Jaccard) ou com >= 2 identificadores de código em comum com um enunciado congelado"""
     n = _norm(pedido)
-    return any(n == c or _jaccard(n, c) >= limiar for c in congelados)
+    ids = _identificadores(pedido)
+    return any(n == c or _jaccard(n, c) >= limiar for c in congelados.prompts) or \
+        any(len(ids & i) >= 2 for i in congelados.idents)
+
+
+def limites_do_detector():
+    return ["detecta enunciado igual, parecido (Jaccard >= 0.6), >= 2 identificadores de código em comum e o repositório inteiro",
+            "NÃO detecta paráfrase semântica sem palavras/identificadores em comum, nem tradução, nem a mesma ideia em outro projeto",
+            "só vê o texto do pedido: o código dos artefatos e o conteúdo das verificações ocultas não são comparados",
+            "limiares fixados à mão; nunca foram calibrados com exemplos reais"]
 
 
 def particao(repositorio, semente):
@@ -159,7 +239,8 @@ def construir(arquivos, saida, base, tokenizer, template, semente, hiper, congel
     congelados = carregar_congelados(congelados_caminhos)
     os.makedirs(saida, exist_ok=True)
     conj = {"treino": [], "dev": [], "teste": []}
-    negativos, rejeitadas = [], []
+    negativos, rejeitadas, formato = [], [], []
+    repos_aceitos = {"treino": set(), "dev": set(), "teste": set()}
     licencas, proven = {}, set()
     anonimizados = 0
     for arq in sorted(arquivos):
@@ -168,7 +249,7 @@ def construir(arquivos, saida, base, tokenizer, template, semente, hiper, congel
         except Exception as ex:  # noqa: BLE001
             rejeitadas.append({"arquivo": os.path.basename(arq), "motivos": ["JSON inválido: %s" % ex]})
             continue
-        mot = validar(t)
+        mot = validar(t, congelados)
         if not mot and vaza_congelado(t["pedido"], congelados):
             mot = ["enunciado igual ou muito parecido com um do conjunto congelado de avaliação"]
         if mot:
@@ -177,6 +258,7 @@ def construir(arquivos, saida, base, tokenizer, template, semente, hiper, congel
         licencas[t["licenca"]] = licencas.get(t["licenca"], 0) + 1
         proven.add(t["proveniencia"])
         parte = particao(t["repositorio"], semente)
+        repos_aceitos[parte].add(t["repositorio"])
         for ex in rotular(t):
             p, k1 = anonimizar(ex["prompt"])
             r, k2 = anonimizar(ex["resposta"])
@@ -184,23 +266,40 @@ def construir(arquivos, saida, base, tokenizer, template, semente, hiper, congel
             reg = {"messages": [{"role": "user", "content": p}, {"role": "assistant", "content": r}],
                    "meta": {"trajetoria": t["id"], "tentativa": ex["tentativa"], "rotulo": ex["rotulo"], "porque": ex["porque"],
                             "repositorio": t["repositorio"], "licenca": t["licenca"], "particao": parte}}
-            (conj[parte] if ex["rotulo"] == "positivo" else negativos).append(reg)
+            (conj[parte] if ex["rotulo"] == "positivo" else formato if ex["rotulo"] == "formato" else negativos).append(reg)
     arquivos_saida = {}
     for nome, regs in (("treino.jsonl", conj["treino"]), ("dev.jsonl", conj["dev"]), ("teste.jsonl", conj["teste"]),
-                       ("negativos.jsonl", negativos), ("rejeitadas.jsonl", rejeitadas)):
+                       ("formato.jsonl", formato), ("negativos.jsonl", negativos), ("rejeitadas.jsonl", rejeitadas)):
         regs = sorted(regs, key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False))
         dados = "".join(json.dumps(x, sort_keys=True, ensure_ascii=False) + "\n" for x in regs).encode()
         open(os.path.join(saida, nome), "wb").write(dados)
         arquivos_saida[nome] = {"sha256": _sha(dados), "registros": len(regs)}
+    particoes = {n: {"repositorios": len(repos_aceitos[n]), "positivos": len(conj[n])} for n in ("treino", "dev", "teste")}
+    avisos = []
+    for n in ("dev", "teste"):
+        if particoes[n]["repositorios"] == 0:
+            avisos.append("partição %s vazia: nenhum repositório caiu nela; sem ela não há como avaliar generalização" % n)
+        elif particoes[n]["positivos"] == 0:
+            avisos.append("partição %s sem positivos confirmados" % n)
+    if particoes["treino"]["repositorios"] < MIN_REPOS_TREINO:
+        avisos.append("treino com só %d repositório(s) (mínimo %d): sem diversidade" % (particoes["treino"]["repositorios"], MIN_REPOS_TREINO))
+    if particoes["treino"]["positivos"] < MIN_POSITIVOS_TREINO:
+        avisos.append("treino com só %d positivos confirmados (mínimo %d)" % (particoes["treino"]["positivos"], MIN_POSITIVOS_TREINO))
     conjunto_sha = _sha("".join(sorted(v["sha256"] for k, v in arquivos_saida.items() if k != "rejeitadas.jsonl")).encode())
     manifesto = {
         "formato": VERSAO_PIPELINE, "base": base, "tokenizer": tokenizer, "template": template, "semente": semente,
         "hiperparametros": dict(sorted(hiper.items())), "conjunto_sha256": conjunto_sha, "arquivos": arquivos_saida,
         "licencas": dict(sorted(licencas.items())), "proveniencias": sorted(proven), "substituicoes_anonimizacao": anonimizados,
         "congelados_excluidos": [os.path.basename(c) for c in (congelados_caminhos or [])],
+        "limites_do_detector_de_congelados": limites_do_detector(),
+        "particoes": particoes, "avisos": avisos,
+        "avaliacao_de_generalizacao": "possivel" if not avisos else "nao_demonstravel",
+        "apto_para_adaptador": not avisos,
+        "limiares": {"min_positivos_treino": MIN_POSITIVOS_TREINO, "min_repos_treino": MIN_REPOS_TREINO},
         "particao": "por repositório: sha256(semente|repositorio) % 10 -> 0 teste, 1 dev, resto treino",
-        "observacao": "positivos só de propostas aplicadas em tarefas concluídas com validação depois do último patch; "
-                      "negativos (recusadas/cortadas/não concluídas) nunca entram em treino.jsonl",
+        "observacao": "positivos = proposta aplicada em tarefa concluída com validação depois do último patch E requisito confirmado "
+                      "por verificação independente ou revisão humana; só validação visível vai para formato.jsonl (não é prova de que "
+                      "o requisito foi resolvido); negativos (recusadas/cortadas/não concluídas/reprovadas) nunca entram em treino.jsonl",
     }
     open(os.path.join(saida, "manifesto.json"), "w").write(json.dumps(manifesto, sort_keys=True, ensure_ascii=False, indent=1) + "\n")
     return manifesto
@@ -276,6 +375,12 @@ def main(argv=None):
     c.add_argument("--base", required=True); c.add_argument("--tokenizer", required=True); c.add_argument("--template", required=True)
     c.add_argument("--semente", type=int, required=True); c.add_argument("--congelados", nargs="*", default=[])
     c.add_argument("--hiper", nargs="*", default=[])
+    c.add_argument("--exigir-aptidao", action="store_true", help="sai com 4 se o manifesto tiver avisos (não apto para adaptador)")
+    at = sub.add_parser("atestar", help="grava o atestado de verificação numa CÓPIA da trajetória")
+    at.add_argument("arquivo"); at.add_argument("--saida", required=True)
+    at.add_argument("--tipo", required=True, choices=("independente", "revisao_humana"))
+    at.add_argument("--oraculo-sha256"); at.add_argument("--referencia"); at.add_argument("--passou", choices=("sim", "nao"))
+    at.add_argument("--revisor"); at.add_argument("--data"); at.add_argument("--aprovado", choices=("sim", "nao"))
     e = sub.add_parser("verificar-ambiente"); e.add_argument("--base-params", type=float, default=1.5e9)
     vm = sub.add_parser("validar-modelo"); vm.add_argument("arquivos", nargs="+")
     a = ap.parse_args(argv)
@@ -286,6 +391,24 @@ def main(argv=None):
             print("%s: %s" % (f, "ok" if not m else "; ".join(m)))
             ruim += bool(m)
         return 1 if ruim else 0
+    if a.cmd == "atestar":
+        if os.path.abspath(a.arquivo) == os.path.abspath(a.saida):
+            print("a saída precisa ser outro arquivo (a trajetória original não é alterada)")
+            return 2
+        t = json.load(open(a.arquivo))
+        if a.tipo == "independente":
+            v = {"tipo": "independente", "oraculo_sha256": a.oraculo_sha256, "referencia": a.referencia,
+                 "passou": None if a.passou is None else a.passou == "sim"}
+        else:
+            v = {"tipo": "revisao_humana", "revisor": a.revisor, "data": a.data, "aprovado": None if a.aprovado is None else a.aprovado == "sim"}
+        mot = validar_verificacao(v)
+        if mot:
+            print("; ".join(mot))
+            return 2
+        t["verificacao"] = v
+        open(a.saida, "w").write(json.dumps(t, ensure_ascii=False, indent=1) + "\n")
+        print("atestado gravado em %s" % a.saida)
+        return 0
     if a.cmd == "validar-modelo":
         ruim = 0
         for f in a.arquivos:
@@ -297,8 +420,10 @@ def main(argv=None):
         arqs = [os.path.join(a.entrada, f) for f in os.listdir(a.entrada) if f.endswith(".json")]
         hiper = dict(x.split("=", 1) for x in a.hiper)
         m = construir(arqs, a.saida, a.base, a.tokenizer, a.template, a.semente, hiper, a.congelados)
-        print(json.dumps({k: m[k] for k in ("conjunto_sha256", "arquivos")}, ensure_ascii=False, indent=1))
-        return 0
+        print(json.dumps({k: m[k] for k in ("conjunto_sha256", "arquivos", "particoes", "avisos", "apto_para_adaptador")}, ensure_ascii=False, indent=1))
+        for av in m["avisos"]:
+            print("AVISO: " + av, file=sys.stderr)
+        return 4 if (a.exigir_aptidao and not m["apto_para_adaptador"]) else 0
     rel = verificar_ambiente(a.base_params)
     print(json.dumps(rel, ensure_ascii=False, indent=1))
     return 0 if rel["suficiente"] else 3

@@ -29,6 +29,9 @@ BASE = "/tmp/lia-aval"  # caminho curto: o socket AF_UNIX tem limite de 108 byte
 HARNESS = {
     "sf": {"comandos": {"teste": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]}},
     "le": {"comandos": {"teste": ["node", "node_modules/vitest/vitest.mjs", "run", "--config", ".lia/vitest.unidade.config.mjs"]}},
+    # fixtures da avaliação independente (docs/avaliacao/fixtures/): só biblioteca padrão, nada a instalar
+    "inventario-py": {"comandos": {"teste": ["python3", "-m", "unittest", "discover", "-s", "tests"]}},
+    "agenda-js": {"comandos": {"teste": ["node", "--test", "tests/*.test.js"]}},
 }
 VITEST_UNIDADE = """// harness da avaliação (fora do repositório, em .lia/ — oculto para a Lia): só testes
 // unitários, sem o globalSetup que roda 'prisma migrate deploy' (nunca rodar migrations)
@@ -235,6 +238,9 @@ def main():
         if oc["tipo"] == "python":
             open(os.path.join(proj, ".lia", "oculta.py"), "w").write(oc["codigo"])
             rc, out = bwrap(proj, ["python3", ".lia/oculta.py"], {"PYTHONPATH": proj})
+        elif oc["tipo"] == "node":
+            open(os.path.join(proj, ".lia", "oculta.test.mjs"), "w").write(oc["codigo"])
+            rc, out = bwrap(proj, ["node", "--test", ".lia/oculta.test.mjs"])
         else:
             open(os.path.join(proj, ".lia", "oculta.test.ts"), "w").write(oc["codigo"])
             open(os.path.join(proj, ".lia", "vitest.oculta.config.mjs"), "w").write(VITEST_OCULTA)

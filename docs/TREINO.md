@@ -19,6 +19,43 @@ não existem trajetórias verificadas suficientes (zero positivas reais).
   ensina o **formato e o processo** da Lia (contrato da proposta, edições
   pequenas, uso do contexto lido).
 
+## O que conta como exemplo positivo (auditoria de 2026-11-25)
+
+"Concluído" pela Lia = suíte **visível** passou depois da última edição. Isso
+**não** prova que o requisito foi resolvido (a avaliação mostrou implementações
+que passaram na suíte e reprovaram na verificação oculta). Por isso o
+`lia_treino.py` separa:
+
+| rótulo | condição | destino |
+|---|---|---|
+| `positivo` | aplicada, tarefa concluída com validação depois do último patch **e** requisito confirmado por `verificacao` do tipo `independente` (oráculo executado fora do agente, com `oraculo_sha256` e `referencia`) ou `revisao_humana` (revisor como papel, data, aprovado) | `treino/dev/teste.jsonl` |
+| `formato` | o mesmo, mas só com a suíte visível (sem atestado) | `formato.jsonl` — serve para aprender formato/reparo; **não** é prova de requisito resolvido |
+| `negativo` | recusada, cortada, não concluída, ou aplicada em tarefa que o oráculo/revisão **reprovou** (falso "concluído") | `negativos.jsonl` |
+
+O runtime só atesta a validação visível; o atestado vem depois, de fora:
+`lia_treino.py atestar TRAJ.json --saida COPIA.json --tipo independente --oraculo-sha256 H --referencia AVAL/TAREFA --passou sim`
+(grava numa **cópia**; nunca sobrescreve a trajetória original).
+
+## Partições e aptidão
+
+A partição é por repositório (`sha256(semente|repo) % 10`: 0 teste, 1 dev,
+resto treino). Com poucos repositórios ela pode sair vazia, o que **não** mede
+generalização. O manifesto agora traz `particoes` (repositórios e positivos
+por partição), `avisos`, `avaliacao_de_generalizacao` e `apto_para_adaptador`.
+Fica "não apto" enquanto houver qualquer aviso: partição dev/teste vazia ou
+sem positivos, treino com menos de `MIN_REPOS_TREINO` (5) repositórios ou
+menos de `MIN_POSITIVOS_TREINO` (200) positivos confirmados (limiares fixados
+no código; `construir --exigir-aptidao` sai com código 4 se não apto).
+
+## Conjuntos congelados fora do treino
+
+Recusa (a) enunciado igual ou parecido (Jaccard ≥ 0,6), (b) ≥ 2 identificadores
+de código em comum (`normalise_phone`, `core.py`...), (c) trajetória do
+**repositório** de qualquer tarefa congelada. **Limites** (também no
+manifesto): não vê paráfrase semântica sem palavras em comum, tradução, a
+mesma ideia em outro projeto, nem compara o código dos artefatos; os limiares
+nunca foram calibrados com exemplos reais.
+
 ## Pré-requisitos (nada disso é instalado sem autorização)
 
 1. **Dados**: ≥ algumas centenas de trajetórias **positivas** verificadas
