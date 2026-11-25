@@ -42,6 +42,7 @@ struct LlamaCppRequisicao {
     glong content_length;
     int status_http;
     gboolean viu_done;
+    LlamaCppFim *fim;
 
     Fase fase;
     gboolean finalizado;
@@ -71,6 +72,8 @@ LlamaCppConfig *llama_cpp_config_novo(const char *host_ou_null, int porta)
     cfg->porta = porta > 0 ? porta : 8080; /* padrão do próprio llama-server */
     cfg->timeout_ms = 30000; /* inferência em CPU é mais lenta — mais folga que o padrão do Ollama */
     cfg->limite_resposta_bytes = 1024 * 1024;
+    cfg->temperatura = 0.0;
+    cfg->semente = -1;
     return cfg;
 }
 
@@ -238,6 +241,23 @@ static gboolean processar_eventos_sse(LlamaCppRequisicao *req)
             gboolean parar = json_object_has_member(obj, "stop") &&
                              JSON_NODE_TYPE(json_object_get_member(obj, "stop")) == JSON_NODE_VALUE &&
                              json_object_get_boolean_member(obj, "stop");
+            if (parar && req->fim) {
+                #define BOOL_M(k) (json_object_has_member(obj, k) && JSON_NODE_TYPE(json_object_get_member(obj, k)) == JSON_NODE_VALUE && \
+                                   json_node_get_value_type(json_object_get_member(obj, k)) == G_TYPE_BOOLEAN && json_object_get_boolean_member(obj, k))
+                #define INT_M(k) (json_object_has_member(obj, k) && JSON_NODE_TYPE(json_object_get_member(obj, k)) == JSON_NODE_VALUE ? \
+                                  json_object_get_int_member(obj, k) : -1)
+                /* versões novas: "stop_type" (limit | eos | word | none); antigas: stopped_* */
+                const char *st = json_object_has_member(obj, "stop_type") && JSON_NODE_TYPE(json_object_get_member(obj, "stop_type")) == JSON_NODE_VALUE &&
+                                 json_node_get_value_type(json_object_get_member(obj, "stop_type")) == G_TYPE_STRING
+                                 ? json_object_get_string_member(obj, "stop_type") : NULL;
+                g_strlcpy(req->fim->motivo, (st && !strcmp(st, "limit")) || BOOL_M("stopped_limit") ? "length"
+                                            : (st && (!strcmp(st, "eos") || !strcmp(st, "word"))) || BOOL_M("stopped_eos") || BOOL_M("stopped_word") ? "stop" : "",
+                          sizeof req->fim->motivo);
+                req->fim->tokens_gerados = INT_M("tokens_predicted");
+                req->fim->tokens_prompt = INT_M("tokens_evaluated");
+                #undef BOOL_M
+                #undef INT_M
+            }
             g_object_unref(p);
 
             if ((gsize)req->texto_completo->len > req->cfg->limite_resposta_bytes) {
@@ -476,7 +496,8 @@ static void ao_conectar(GObject *origem, GAsyncResult *res, gpointer dados)
         json_builder_add_int_value(b, n_predict);
     }
     json_builder_set_member_name(b, "temperature");
-    json_builder_add_int_value(b, 0);
+    json_builder_add_double_value(b, req->cfg->temperatura);
+    if (req->cfg->semente >= 0) { json_builder_set_member_name(b, "seed"); json_builder_add_int_value(b, req->cfg->semente); }
     json_builder_end_object(b);
     JsonNode *raiz = json_builder_get_root(b);
     JsonGenerator *gen = json_generator_new();
@@ -559,6 +580,14 @@ LlamaCppRequisicao *llama_cpp_gerar_opcoes(LlamaCppConfig *cfg, const char *prom
     g_socket_client_connect_to_host_async(req->cliente_socket, cfg->host, (guint16)cfg->porta,
                                            req->cancelavel, ao_conectar, req);
     return req;
+}
+
+void llama_cpp_definir_fim(LlamaCppRequisicao *req, LlamaCppFim *destino)
+{
+    if (!req || !destino) return;
+    destino->motivo[0] = '\0';
+    destino->tokens_gerados = destino->tokens_prompt = -1;
+    req->fim = destino;
 }
 
 void llama_cpp_cancelar(LlamaCppRequisicao *req)

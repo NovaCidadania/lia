@@ -14,6 +14,7 @@ void modelo_resposta_liberar(ModeloResposta *r)
     g_free(r->erro_mensagem);
     g_free(r->tipo);
     g_free(r->plano_json);
+    g_free(r->fim);
 }
 
 /* Procura o primeiro objeto JSON top-level em 'texto' (varredura simples

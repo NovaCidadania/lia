@@ -146,7 +146,7 @@ int main(void)
     checar(!a && e && strstr(e, "Git"), "criar: dentro de .git/ recusado");
     g_clear_pointer(&e, g_free);
     a = aplicar("{\"edicoes\":[{\"acao\":\"apagar\",\"caminho\":\"soma.c\"}]}", lidos, shas, &hash, &e);
-    checar(!a && e && strstr(e, "ação desconhecida"), "ação fora de criar/editar recusada (o modelo não apaga nada)");
+    checar(!a && e && strstr(e, "desconhecida"), "ação fora de criar/editar recusada (o modelo não apaga nada)");
     g_clear_pointer(&e, g_free);
     a = aplicar("{\"edicoes\":[{\"acao\":\"editar\",\"caminho\":\"soma.c\",\"procurar\":\"int soma\",\"substituir\":\"int soma\"}]}", lidos, shas, &hash, &e);
     checar(!a && e && strstr(e, "não muda nada"), "proposta sem efeito recusada (nunca 'sucesso' sem diff)");
@@ -342,6 +342,40 @@ int main(void)
     }
 
     /* substituir_funcao */
+    /* TS/JS reais da avaliação: regex literal e template string na função; arrow de uma linha; arrow em bloco */
+    {
+        const char *ts = "/** csv */\nexport function gerarCsv(colunas: string[], linhas: Array<Array<string | number | null>>) {\n"
+                         "  const escapar = (v: string | number | null) => {\n    const s = v === null || v === undefined ? '' : String(v)\n"
+                         "    return /[\";\\n]/.test(s) ? `\"${s.replace(/\"/g, '\"\"')}\"` : s\n  }\n"
+                         "  return `${colunas.map(escapar).join(';')}\\n`\n}\n\n"
+                         "export const rotuloStatus = (s: string) => ROTULOS[s] ?? s\n\n"
+                         "export const outro = async (x: number): Promise<number> => {\n  if (x) { return 1 }\n  return 2\n}\n";
+        gravar("lib.ts", ts);
+        g_hash_table_insert(lidos, g_strdup("lib.ts"), proj_ler_texto("lib.ts", 100000, &sha, &e));
+        g_hash_table_insert(shas, g_strdup("lib.ts"), sha);
+        a = aplicar("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"lib.ts\",\"funcao\":\"gerarCsv\",\"conteudo\":\"export function gerarCsv(c: string[]) {\\n  return `${c.join(';')}`\\n}\"}]}", lidos, shas, &hash, &e);
+        CodingArquivo *f1 = a ? g_ptr_array_index(a, 0) : NULL;
+        checar(f1 && strstr(f1->conteudo, "return `${c.join(';')}`") && !strstr(f1->conteudo, "escapar") && strstr(f1->conteudo, "export const rotuloStatus"),
+               "substituir_funcao TS: função com regex literal e template string é delimitada certo");
+        if (a) g_ptr_array_unref(a);
+        g_free(hash); hash = NULL;
+        a = aplicar("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"lib.ts\",\"funcao\":\"rotuloStatus\",\"conteudo\":\"export const rotuloStatus = (s: string) => ROTULOS[s.trim().toLowerCase()] ?? s\"}]}", lidos, shas, &hash, &e);
+        f1 = a ? g_ptr_array_index(a, 0) : NULL;
+        checar(f1 && strstr(f1->conteudo, "ROTULOS[s.trim().toLowerCase()] ?? s\n\nexport const outro") && !strstr(f1->conteudo, "ROTULOS[s] ??"),
+               "substituir_funcao TS: arrow de uma linha (const f = (..) => expr) é substituída inteira");
+        if (a) g_ptr_array_unref(a);
+        g_free(hash); hash = NULL;
+        a = aplicar("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"lib.ts\",\"funcao\":\"outro\",\"conteudo\":\"export const outro = async (x: number): Promise<number> => {\\n  return x\\n}\"}]}", lidos, shas, &hash, &e);
+        f1 = a ? g_ptr_array_index(a, 0) : NULL;
+        checar(f1 && strstr(f1->conteudo, "=> {\n  return x\n}\n") && !strstr(f1->conteudo, "return 2") && strstr(f1->conteudo, "function gerarCsv"),
+               "substituir_funcao TS: arrow async com bloco é substituída inteira");
+        if (a) g_ptr_array_unref(a);
+        g_free(hash); hash = NULL;
+        a = aplicar("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"lib.ts\",\"funcao\":\"rotuloStatus\",\"conteudo\":\"const x = 1\"}]}", lidos, shas, &hash, &e);
+        checar(!a && e && strstr(e, "inteira"), "substituir_funcao TS: conteúdo que não é a arrow do nome é recusado");
+        g_free(e); e = NULL;
+    }
+
     gravar("f.php", "<?php\nclass A {\n    public function um($x) {\n        return $x + 1;\n    }\n    public function dois($y) {\n        return $y;\n    }\n}\n");
     g_hash_table_insert(lidos, g_strdup("f.php"), proj_ler_texto("f.php", 100000, &sha, &e));
     g_hash_table_insert(shas, g_strdup("f.php"), sha);
@@ -353,7 +387,7 @@ int main(void)
     if (a) g_ptr_array_unref(a);
     g_free(hash); hash = NULL;
     a = aplicar("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"f.php\",\"funcao\":\"um\",\"conteudo\":\"public function um($x) { ... }\"}]}", lidos, shas, &hash, &e);
-    checar(!a && e && strstr(e, "sem abreviar"), "substituir_funcao: conteúdo abreviado com '...' é recusado");
+    checar(!a && e && strstr(e, "abreviado"), "substituir_funcao: conteúdo abreviado com '...' é recusado");
     g_clear_pointer(&e, g_free);
     a = aplicar("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"f.php\",\"funcao\":\"um\",\"conteudo\":\"public function um($x) {\\n return 1;\"}]}", lidos, shas, &hash, &e);
     checar(!a && e && strstr(e, "chaves balanceadas"), "substituir_funcao: função incompleta (chaves) recusada");
@@ -513,6 +547,93 @@ int main(void)
                "conferência: no_diff, so_testes e intocado passam quando cumpridos e falham quando violados");
         coding_plano_liberar(p2);
 
+        /* busca por assunto: pedido sem arquivo nem símbolo acha o código pelo conteúdo, sem modelo */
+        {
+            char *tmp = g_dir_make_tmp("lia-assunto-XXXXXX", NULL);
+            const char *arqs[][2] = {
+                { "nucleo.py", "def ja_enviado(log, contato):\n    # deduplicacao de envios por e-mail e telefone\n    return contato in log\n" },
+                { "outro.py", "def soma(a, b):\n    return a + b\n" },
+                { "web/envio.js", "export const deduplicar = (envios) => envios // envio e-mail\n" },
+                { "test_nucleo.py", "# teste de deduplicacao de envios por e-mail\n" },
+            };
+            for (guint i = 0; i < G_N_ELEMENTS(arqs); i++) {
+                char *f = g_build_filename(tmp, arqs[i][0], NULL), *dir = g_path_get_dirname(f);
+                g_mkdir_with_parents(dir, 0755);
+                g_file_set_contents(f, arqs[i][1], -1, NULL);
+                g_free(f); g_free(dir);
+            }
+            char **ler = NULL, **cria = NULL, *notas = NULL;
+            coding_selecionar_contexto(tmp, "Faça a deduplicação de envios por e-mail não diferenciar maiúsculas de minúsculas, em Python (pytest).", NULL, &ler, &cria, &notas);
+            gboolean tem_nucleo = FALSE, tem_outro = FALSE, tem_js = FALSE, tem_teste_na_busca = FALSE;
+            for (int i = 0; ler && ler[i]; i++) {
+                if (!strcmp(ler[i], "nucleo.py")) tem_nucleo = TRUE;
+                if (!strcmp(ler[i], "outro.py")) tem_outro = TRUE;
+                if (g_str_has_suffix(ler[i], ".js")) tem_js = TRUE;
+                if (g_str_has_prefix(ler[i], "test_")) tem_teste_na_busca = TRUE;
+            }
+            checar(tem_nucleo && !tem_outro && !tem_js && tem_teste_na_busca && notas && strstr(notas, "palavras do assunto"),
+                   "busca por assunto: acha o arquivo pelo conteúdo, ignora o que não tem relação e outra linguagem, traz o teste existente e diz por quê");
+            g_strfreev(ler); g_strfreev(cria); g_free(notas);
+            coding_selecionar_contexto(tmp, "Corrija a coisa", NULL, &ler, &cria, &notas);
+            checar(ler && !ler[0], "busca por assunto: pedido com menos de 2 palavras de assunto não adivinha arquivo");
+            g_strfreev(ler); g_strfreev(cria); g_free(notas);
+            g_free(tmp);
+        }
+
+        /* regressão da avaliação real (le-preciso): linha só reformatada não é texto novo */
+        {
+            CodingPlano *pr = coding_plano_do_pedido("Em src/services/leilao-estado.ts, faça validarTransicaoLeilao lançar AppError TRANSICAO_INVALIDA com HTTP 409. Acrescente em src/services/leilao-estado.test.ts um teste para a transição desconhecida.", NULL, NULL);
+            const char *reformatado = "--- a/s.ts\n+++ b/s.ts\n-    throw new AppError(\n-      'TRANSICAO_INVALIDA',\n+    throw new AppError('TRANSICAO_INVALIDA', `x`, 409,\n";
+            const char *acrescentado = "--- a/s.ts\n+++ b/s.ts\n+  if (!(t in P)) throw new AppError('TRANSICAO_INVALIDA', 'x', 409)\n";
+            char *so_prod[] = { "src/services/leilao-estado.ts", NULL }, *com_teste[] = { "src/services/leilao-estado.ts", "src/services/leilao-estado.test.ts", NULL };
+            int nd = 0, tt = 0, nd_ok = 0, tt_ok = 0;
+            for (guint i = 0; i < pr->criterios->len; i++) {
+                CodingCriterio *c = g_ptr_array_index(pr->criterios, i);
+                char *como = NULL;
+                if (!strcmp(c->verificacao, "no_diff")) {
+                    nd++;
+                    if (!coding_conferir_criterio_ex(c, TRUE, so_prod, NULL, reformatado, &como)) nd_ok++;
+                    g_free(como);
+                    como = NULL;
+                    if (coding_conferir_criterio_ex(c, TRUE, so_prod, NULL, acrescentado, &como)) nd_ok++;
+                    g_free(como);
+                }
+                if (!strcmp(c->verificacao, "tocou_teste")) {
+                    tt++;
+                    if (!coding_conferir_criterio_ex(c, TRUE, so_prod, NULL, acrescentado, &como)) tt_ok++;
+                    g_free(como);
+                    como = NULL;
+                    if (coding_conferir_criterio_ex(c, TRUE, com_teste, NULL, acrescentado, &como)) tt_ok++;
+                    g_free(como);
+                }
+            }
+            checar(nd >= 1 && nd_ok == 2 * nd, "no_diff: reformatar linha existente NÃO satisfaz; acrescentar de verdade satisfaz");
+            checar(tt == 1 && tt_ok == 2, "pedido que manda acrescentar teste: sem arquivo de teste gravado o critério falha");
+            coding_plano_liberar(pr);
+            CodingPlano *pq = coding_plano_do_pedido("Corrija a soma em soma.c", NULL, NULL);
+            gboolean tem = FALSE;
+            for (guint i = 0; i < pq->criterios->len; i++)
+                if (!strcmp(((CodingCriterio *)g_ptr_array_index(pq->criterios, i))->verificacao, "tocou_teste")) tem = TRUE;
+            checar(!tem, "pedido sem menção a acrescentar teste não ganha o critério");
+            coding_plano_liberar(pq);
+            CodingPlano *pa = coding_plano_do_pedido("Em core.py, faça normalise_phone descartar o ramal. Crie tests/test_x.py com testes. Não leia .env.", NULL, NULL);
+            char *so_teste[] = { "tests/test_x.py", NULL }, *alvo_ok[] = { "core.py", "tests/test_x.py", NULL };
+            int na = 0, na_ok = 0;
+            for (guint i = 0; i < pa->criterios->len; i++) {
+                CodingCriterio *c = g_ptr_array_index(pa->criterios, i);
+                char *como = NULL;
+                if (strcmp(c->verificacao, "tocou_alvo")) continue;
+                na++;
+                if (!coding_conferir_criterio_ex(c, TRUE, so_teste, NULL, "", &como)) na_ok++;
+                g_free(como);
+                como = NULL;
+                if (coding_conferir_criterio_ex(c, TRUE, alvo_ok, NULL, "", &como)) na_ok++;
+                g_free(como);
+            }
+            checar(na == 1 && na_ok == 2, "arquivo citado como alvo (\"Em core.py, faça…\"): criar só o teste não cumpre; alterar o alvo cumpre");
+            coding_plano_liberar(pa);
+        }
+
         CodingPlano *p3 = coding_plano_do_pedido("O endpoint deve responder com o código ERRO_PAGINA", NULL, NULL);
         gboolean achou = FALSE;
         for (guint i = 0; i < p3->criterios->len; i++)
@@ -528,11 +649,11 @@ int main(void)
         g_hash_table_insert(lp, g_strdup("parser.py"), g_strdup("import x\n\ndef _iter_log(p):\n    rows = []\n    for l in p:\n        rows.append(l.split('|'))\n    return rows\n\n\ndef outra():\n    return 1\n"));
         g_hash_table_insert(sp, g_strdup("parser.py"), g_strdup("0"));
         char *hh = NULL, *ee = NULL;
-        GPtrArray *ap = coding_aplicar_edicoes("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"parser.py\",\"conteudo\":"
+        GPtrArray *ap = coding_aplicar_edicoes("{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"parser.py\",\"funcao\":\"_iter_log\",\"conteudo\":"
                                                "\"def _iter_log(p):\\n    return [l.split('|', 4) for l in p]\"}]}", lp, sp, &hh, NULL, &ee);
         checar(ap && ap->len == 1 && !strcmp(((CodingArquivo *)g_ptr_array_index(ap, 0))->conteudo,
                                              "import x\n\ndef _iter_log(p):\n    return [l.split('|', 4) for l in p]\n\n\ndef outra():\n    return 1\n"),
-               "substituir_funcao em Python: sem \"funcao\", o nome vem do def; só a função muda");
+               "substituir_funcao em Python: só a função muda (região pelo recuo)");
         if (ap) g_ptr_array_unref(ap);
         g_free(hh); g_free(ee);
         g_hash_table_unref(lp); g_hash_table_unref(sp);
@@ -571,6 +692,92 @@ int main(void)
                "pedido de código: ajuste/acrescente/garanta com caminho ou símbolo");
         checar(coding_e_pedido("Melhore os diagnósticos de registros malformados do log lido por core.py") &&
                !coding_e_pedido("melhore a redação do README"), "pedido de código: 'melhore' com caminho de código sim; texto sem código não");
+
+        /* contrato por operação — inclui a proposta REAL do llama3.2:3b no
+         * diagnóstico de le-preciso (avaliação de 2026-11-24): só o nome */
+        {
+            struct { const char *json; const char *espera; const char *desc; } C[] = {
+                { "{\"acao\":\"substituir_funcao\",\"caminho\":\"src/services/leilao-estado.ts\",\"funcao\":\"validarTransicaoLeilao\"}",
+                  "falta \"conteudo\"", "contrato: substituir_funcao só com o nome (resposta real do modelo) é recusada" },
+                { "{\"acao\":\"substituir_funcao\",\"caminho\":\"a.ts\",\"funcao\":\"validar(atual: S) { ... }\",\"conteudo\":\"function validar() { return 1 }\"}",
+                  "só o NOME", "contrato: assinatura em \"funcao\" é recusada" },
+                { "{\"acao\":\"substituir_funcao\",\"caminho\":\"a.ts\",\"conteudo\":\"function validar() { return 1 }\"}",
+                  "falta \"funcao\"", "contrato: substituir_funcao sem nome é recusada" },
+                { "{\"acao\":\"criar\",\"caminho\":\"a.py\"}", "falta \"conteudo\"", "contrato: criar sem conteúdo" },
+                { "{\"acao\":\"criar\",\"caminho\":\"a.py\",\"conteudo\":\"\"}", "vazio", "contrato: criar com conteúdo vazio" },
+                { "{\"acao\":\"editar\",\"caminho\":\"a.py\",\"procurar\":\"x = 1\"}", "falta \"substituir\"", "contrato: editar sem substituir" },
+                { "{\"acao\":\"editar\",\"caminho\":\"a.py\",\"procurar\":\"x\",\"substituir\":\"y\",\"conteudo\":\"z\"}",
+                  "não pertence", "contrato: campo de outra operação é recusado" },
+                { "{\"acao\":\"criar\",\"caminho\":\"a.py\",\"conteudo\":\"x = 1\\n\",\"linha\":3}", "não pertence", "contrato: campo desconhecido é recusado" },
+                { "{\"acao\":\"criar\",\"conteudo\":\"x\"}", "caminho", "contrato: sem caminho" },
+                { "{\"acao\":\"criar\",\"caminho\":\"a.py\",\"conteudo\":\"def f():\\n    # ... resto igual\\n    return 1\\n\"}",
+                  "abreviado", "contrato: comentário '# ... resto' é abreviação" },
+                { "{\"acao\":\"editar\",\"caminho\":\"a.ts\",\"procurar\":\"if (x) {\",\"substituir\":\"if (x) { throw new AppError('T', ...); }\"}",
+                  NULL, "contrato: spread/argumento '...' no meio do código não é abreviação" },
+                { "{\"acao\":\"editar\",\"caminho\":\"a.py\",\"procurar\":\"x = 1\",\"substituir\":\"\"}", NULL, "contrato: editar pode apagar o trecho (substituir vazio)" },
+            };
+            for (guint ci = 0; ci < G_N_ELEMENTS(C); ci++) {
+                JsonParser *cp = json_parser_new();
+                json_parser_load_from_data(cp, C[ci].json, -1, NULL);
+                char *ce = coding_contrato_edicao(json_node_get_object(json_parser_get_root(cp)), 1);
+                checar(C[ci].espera ? (ce && strstr(ce, C[ci].espera)) : !ce, C[ci].desc);
+                if (ce && !C[ci].espera) printf("   (motivo inesperado: %s)\n", ce);
+                g_free(ce);
+                g_object_unref(cp);
+            }
+            checar(!coding_conteudo_abreviado("const b = { ...a, x: 1 };\nf(...args);\n") &&
+                   coding_conteudo_abreviado("class A {\n    // ...\n}\n") && coding_conteudo_abreviado("    ...\n") &&
+                   coding_conteudo_abreviado("x = [1, 2]\n… resto do código\n"),
+                   "abreviação: spread não; '// ...', linha só com '...' e '… resto' sim");
+        }
+
+        /* contexto: linguagem do pedido, relevância da escolha do modelo, arquivos do harness */
+        {
+            checar(!g_strcmp0(coding_linguagem("src/A.php"), "php") && !g_strcmp0(coding_linguagem("a/b.tsx"), "js/ts") &&
+                   !g_strcmp0(coding_linguagem("X.cs"), "c#") && coding_linguagem("README.md") == NULL, "linguagem pela extensão");
+            char **lg = coding_linguagens_do_pedido("Crie um teste PHPUnit para Fatura::emAtraso em app/Fatura.php");
+            checar(lg[0] && !strcmp(lg[0], "php") && !lg[1], "linguagem do pedido: caminho .php e 'PHPUnit' -> só php");
+            g_strfreev(lg);
+            lg = coding_linguagens_do_pedido("melhore a mensagem de erro do parser");
+            checar(!lg[0], "pedido sem caminho nem ferramenta não indica linguagem");
+            g_strfreev(lg);
+            gravar("app/Fatura.php", "<?php\nclass Fatura {\n    public function emAtraso() { return false; }\n}\n");
+            gravar("web/js/fatura.js", "export class Fatura { emAtraso() { return 0 } }\n");
+            char **lc = NULL, *dc[] = { "app/Fatura.php", "web/js/fatura.js", NULL }, **cc = NULL, *nc = NULL;
+            coding_selecionar_contexto(raiz, "Crie um teste PHPUnit para Fatura::emAtraso em app/Fatura.php", dc, &lc, &cc, &nc);
+            checar(lc && g_strv_contains((const char *const *)lc, "app/Fatura.php") && !g_strv_contains((const char *const *)lc, "web/js/fatura.js") &&
+                   strstr(nc, "web/js/fatura.js define um nome citado, mas é js/ts"), "contexto: quem define o símbolo em OUTRA linguagem fica fora, com nota");
+            g_strfreev(lc); g_strfreev(cc); g_free(nc);
+            coding_selecionar_contexto(raiz, "corrija Fatura::emAtraso", dc, &lc, &cc, &nc);
+            checar(lc && g_strv_contains((const char *const *)lc, "web/js/fatura.js") && g_strv_contains((const char *const *)lc, "app/Fatura.php"),
+                   "contexto: sem indicação de linguagem, todos os que definem continuam");
+            g_strfreev(lc); g_strfreev(cc); g_free(nc);
+
+            GHashTable *lr = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+            g_hash_table_insert(lr, g_strdup("src/rotas/usuarios.ts"), g_strdup("export function listarUsuarios() { return db.usuarios.findMany() }\n"));
+            char *mr = NULL;
+            gboolean rel = coding_contexto_relevante("Torne previsível o tratamento de reembolsos rejeitados da fatura", lr, &mr);
+            checar(!rel && strstr(mr, "nenhum arquivo lido tem palavras do assunto"), "relevância: arquivos sem nenhuma palavra do assunto -> pede o caminho");
+            g_free(mr);
+            g_hash_table_insert(lr, g_strdup("src/faturas/reembolso.ts"), g_strdup("export function reembolsar() {}\n"));
+            rel = coding_contexto_relevante("Torne previsível o tratamento de reembolsos rejeitados da fatura", lr, &mr);
+            checar(rel && strstr(mr, "reembolso.ts"), "relevância: palavra do assunto no caminho basta");
+            g_free(mr);
+            g_hash_table_remove(lr, "src/faturas/reembolso.ts");
+            g_hash_table_insert(lr, g_strdup("src/servicos/pagamentos.ts"), g_strdup("// reembolsos rejeitados viram erro\nexport const x = 1\n"));
+            rel = coding_contexto_relevante("Torne previsível o tratamento de reembolsos rejeitados da fatura", lr, &mr);
+            checar(rel, "relevância: duas palavras do assunto no conteúdo bastam");
+            g_free(mr);
+            g_hash_table_unref(lr);
+
+            /* arquivos do harness/da Lia (.lia/) nunca entram no contexto nem na lista para o modelo */
+            gravar(".lia/vitest.config.mjs", "export default {}\n");
+            gravar(".lia/validacao.json", "{}\n");
+            char *lista = NULL, **def2 = NULL;
+            coding_explorar_projeto(raiz, "configure o vitest", 200, &lista, &def2);
+            checar(lista && !strstr(lista, ".lia/"), "harness em .lia/ fica fora da lista de arquivos do projeto");
+            g_free(lista); g_strfreev(def2);
+        }
 
         /* conteúdo proposto que ACESSA caminho proibido (avaliação real sf-preciso:
          * o teste do modelo abria sends.txt, o log real de envios) */

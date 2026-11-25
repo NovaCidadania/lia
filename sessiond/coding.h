@@ -70,6 +70,20 @@ GPtrArray *coding_aplicar_edicoes(const char *texto_modelo, GHashTable *lidos, G
 GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *lidos, GHashTable *shas, char **reescreviveis,
                                          char **hash, char **explicacao, char **erro);
 
+/* Contrato por operação, conferido no runtime para TODA proposta (com ou
+ * sem esquema no backend): criar = caminho + conteudo; editar = caminho +
+ * procurar + substituir; substituir_funcao = caminho + funcao (só o nome) +
+ * conteudo (a função inteira). Campo de outra operação ou desconhecido,
+ * valor vazio, acima do limite, UTF-8 inválido ou código abreviado ("...")
+ * recusam a edição. NULL = ok; senão o motivo (para o modelo e o relatório). */
+char *coding_contrato_edicao(JsonObject *edicao, guint indice);
+/* linha que é só reticência, comentário com reticência ("// ..."),
+ * "{ ... }" ou "... resto do código" — não "...args" */
+gboolean coding_conteudo_abreviado(const char *conteudo);
+/* esquema JSON da proposta, por operação (anyOf com os campos obrigatórios
+ * de cada uma), com no máximo 'max_edicoes' edições (1 depois de truncamento) */
+char *coding_esquema_edicoes(guint max_edicoes);
+
 /* arquivo de código novo trivial (só o nome do método, PHP sem <?php,
  * teste sem caso de teste...): devolve o motivo, ou NULL se parece código */
 char *coding_conteudo_trivial(const char *caminho, const char *conteudo);
@@ -151,6 +165,18 @@ gboolean coding_arquivo_de_contexto(const char *rel);
  * *a_criar: arquivos de código citados que não existem; *notas: o que foi
  * ignorado e por quê (uma linha por item) */
 void coding_selecionar_contexto(const char *raiz, const char *pedido, char **definem, char ***ler, char ***a_criar, char **notas);
+/* família de linguagem pela extensão ("php", "js/ts", "c#"...), ou NULL */
+const char *coding_linguagem(const char *rel);
+/* linguagens indicadas pelo pedido (extensões citadas, "PHPUnit", "pytest",
+ * "Unity"...); vazio = não indica — quem define um símbolo citado em
+ * outra linguagem fica fora do contexto */
+char **coding_linguagens_do_pedido(const char *pedido);
+/* contexto escolhido pelo MODELO tem relação verificável com o pedido?
+ * (palavra de assunto no caminho, ou ≥ 2 no conteúdo); senão a Lia pede o
+ * caminho em vez de propor sobre arquivos sem relação. Com menos de 2
+ * palavras de assunto no pedido não há sinal: aceita (limite conhecido:
+ * relação semântica sem palavra em comum não é vista) */
+gboolean coding_contexto_relevante(const char *pedido, GHashTable *lidos, char **motivo);
 /* critérios derivados do PEDIDO e da validação: validação passa; arquivos
  * a criar existem; identificadores exigidos (`crase`, CONSTANTE_X) estão no
  * diff; só testes (se o pedido proíbe produção); nada proibido tocado */

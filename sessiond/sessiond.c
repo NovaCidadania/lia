@@ -54,6 +54,7 @@
 #include "../projeto/git.h"
 #include "../projeto/processo.h"
 #include "coding.h"
+#include "arvore.h"
 #include "intencao_arquivos.h"
 
 #define LIA_SESSIOND_LINHA_MAX 65536
@@ -4157,7 +4158,16 @@ static void aquecer_modelo(void)
  * próxima etapa. Sucesso SÓ com diff real, validação que passou depois da
  * última edição e todos os critérios conferidos. */
 
-#define LIA_MODELO_TOKENS_CODIGO 1400
+/* limite de tokens gerados por proposta de código (LIA_SESSIOND_CODIGO_MAX_TOKENS,
+ * 256..8192). Parar no limite NÃO é "JSON malformado": é truncamento, com
+ * estado e estratégia próprios (coding_processar_proposta). */
+#define LIA_MODELO_TOKENS_CODIGO_PADRAO 2048
+static int tokens_codigo(void)
+{
+    const char *v = g_getenv("LIA_SESSIOND_CODIGO_MAX_TOKENS");
+    gint64 n = v ? g_ascii_strtoll(v, NULL, 10) : 0;
+    return n >= 256 && n <= 8192 ? (int)n : LIA_MODELO_TOKENS_CODIGO_PADRAO;
+}
 
 typedef enum { COD_PLANEJANDO, COD_PROPONDO, COD_AGUARDANDO_EDICAO, COD_AGUARDANDO_VALIDACAO } CodEstado;
 
@@ -4190,6 +4200,13 @@ struct Coding {
     char *lista;            /* arquivos do projeto (para o modelo escolher contexto, se as regras não acharem nada) */
     GPtrArray *origens;     /* origem de cada proposta aplicada ("ciclo 1: modelo local ...") */
     char *impressao_proibidos; /* arquivos proibidos antes da validação (tamanho+mtime) */
+    gboolean reduzido;      /* resposta cortada no limite: daqui em diante, UMA edição por chamada */
+    int truncamentos;       /* respostas do modelo cortadas no limite de tokens */
+    char *causa;            /* causa do encerramento (relatório, checkpoint, avaliação) */
+    Arvore *arvore;         /* DAG da tarefa: nós, tentativas, evidências com alcance (sessiond/arvore.h) */
+    guint n_crit_pedido;    /* critérios vindos do pedido/validação (os seguintes são do modelo, filtrados) */
+    char *prompt_sha;       /* artefato do último prompt de proposta enviado ao modelo */
+    char *modelo_desc;      /* "Ollama · llama3.2:3b" (relatório e trajetória) */
 };
 
 static void coding_liberar(Coding *k)
@@ -4203,6 +4220,10 @@ static void coding_liberar(Coding *k)
     g_strfreev(k->a_criar);
     g_free(k->lista);
     g_free(k->impressao_proibidos);
+    g_free(k->causa);
+    arvore_liberar(k->arvore);
+    g_free(k->prompt_sha);
+    g_free(k->modelo_desc);
     if (k->origens) g_ptr_array_unref(k->origens);
     g_free(k->id); g_free(k->pedido); g_free(k->pergunta_id);
     coding_plano_liberar(k->plano);
@@ -4251,13 +4272,18 @@ static void coding_progresso(Cliente *c, const char *etapa, const char *mensagem
 
 /* checkpoint privado (~/.lia/projeto/coding/<id>.json, 0600): estado para
  * retomar, sem conteúdo de arquivo nem saída de testes */
+static void coding_arvore_gravar(Coding *k);
 static void coding_checkpoint(Coding *k, const char *estado)
 {
+    coding_arvore_gravar(k);
     JsonObject *o = json_object_new();
     json_object_set_string_member(o, "id", k->id);
     json_object_set_string_member(o, "raiz", proj_raiz() ? proj_raiz() : "");
     json_object_set_string_member(o, "pedido", k->pedido);
     json_object_set_string_member(o, "estado", estado);
+    if (k->causa) json_object_set_string_member(o, "causa", k->causa);
+    json_object_set_int_member(o, "truncamentos", k->truncamentos);
+    json_object_set_boolean_member(o, "uma_edicao_por_chamada", k->reduzido);
     json_object_set_int_member(o, "ciclo", k->ciclo);
     json_object_set_boolean_member(o, "editou", k->editou);
     json_object_set_boolean_member(o, "validou_depois_da_ultima_edicao", k->validou_depois);
@@ -4308,6 +4334,171 @@ static void coding_checkpoint(Coding *k, const char *estado)
 }
 
 /* relatório final (a 'resposta') e fim da sessão de coding */
+/* ---- árvore da tarefa: ~/.lia/projeto/coding/<id>/{arvore.json,
+ * eventos.jsonl, artefatos/<sha256>} — código, diffs e saídas de teste só
+ * como artefatos (fora do JSON); tudo 0600/0700, nunca no projeto ---- */
+static char *coding_dir_tarefa(Coding *k)
+{
+    char *d = coding_dir_checkpoints();
+    char *r = g_build_filename(d, k->id, NULL);
+    g_free(d);
+    return r;
+}
+
+static char *coding_artefato(Coding *k, const char *conteudo)
+{
+    if (!conteudo) return NULL;
+    char *d = coding_dir_tarefa(k);
+    char *art = g_build_filename(d, "artefatos", NULL);
+    char *erro = NULL;
+    char *sha = artefato_gravar(art, conteudo, strlen(conteudo), &erro);
+    if (!sha) { g_print("lia-sessiond: coding %s: artefato não gravado: %s\n", k->id, erro); g_free(erro); }
+    g_free(art); g_free(d);
+    return sha;
+}
+
+static void coding_arvore_gravar(Coding *k)
+{
+    if (!k->arvore || !coding_id_valido(k->id)) return;
+    char *d = coding_dir_tarefa(k);
+    if (g_mkdir_with_parents(d, 0700) == 0) {
+        char *j = arvore_para_json(k->arvore);
+        char *arq = g_build_filename(d, "arvore.json", NULL);
+        GError *e = NULL;
+        if (!g_file_set_contents_full(arq, j, -1, G_FILE_SET_CONTENTS_CONSISTENT, 0600, &e)) {
+            g_print("lia-sessiond: coding %s: árvore não gravada: %s\n", k->id, e->message);
+            g_error_free(e);
+        }
+        char *ev = arvore_eventos_pendentes(k->arvore);
+        if (*ev) {
+            char *ea = g_build_filename(d, "eventos.jsonl", NULL);
+            int fd = open(ea, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
+            if (fd >= 0) { gsize n = strlen(ev), f = 0; while (f < n) { ssize_t w = write(fd, ev + f, n - f); if (w <= 0) break; f += (gsize)w; } close(fd); }
+            g_free(ea);
+        }
+        g_free(ev); g_free(arq); g_free(j);
+    }
+    g_free(d);
+}
+
+static char *coding_no_proposta(Coding *k, int ciclo)
+{
+    char *id = g_strdup_printf("proposta-%d", ciclo);
+    if (k->arvore && !arvore_no(k->arvore, id)) {
+        char *obj = g_strdup_printf("ciclo %d: uma proposta de edição que passe no verificador e na aprovação", ciclo);
+        const char *const dep[] = { "contexto", NULL };
+        char *e = arvore_adicionar(k->arvore, id, "raiz", arvore_no(k->arvore, "contexto") ? dep : NULL, obj, NULL);
+        g_free(obj);
+        if (e) { g_print("lia-sessiond: coding %s: árvore: %s\n", k->id, e); g_free(e); }
+        else arvore_no(k->arvore, id)->max_tentativas = 3; /* 2 recusas + 1 resposta cortada */
+    }
+    return id;
+}
+
+/* Trajetória para treino — SÓ com opt-in explícito da pessoa
+ * (LIA_SESSIOND_TRAJETORIAS=1). Licença e proveniência são declaradas por
+ * ela (LIA_TRAJETORIA_LICENCA, LIA_TRAJETORIA_PROVENIENCIA); sem elas o
+ * pipeline (treino/) recusa a trajetória. Vai para ~/.lia/trajetorias/<id>.json
+ * (0600), nunca para o projeto. Contém o pedido, a árvore e os artefatos
+ * referenciados (prompts, respostas, diff, saída de testes) — os segredos
+ * por nome já não são lidos; o pipeline ainda anonimiza. */
+static char *coding_trajetoria_exportar(Coding *k, gboolean sucesso)
+{
+    if (g_strcmp0(g_getenv("LIA_SESSIOND_TRAJETORIAS"), "1") != 0 || !k->arvore) return NULL;
+    char *dt = coding_dir_tarefa(k);
+    char *dir_art = g_build_filename(dt, "artefatos", NULL);
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    #define S(n, v) do { json_builder_set_member_name(b, n); if (v) json_builder_add_string_value(b, v); else json_builder_add_null_value(b); } while (0)
+    S("versao", "lia-trajetoria/1");
+    S("id", k->id);
+    GDateTime *agora = g_date_time_new_now_utc();
+    char *q = g_date_time_format_iso8601(agora);
+    S("criado_em", q);
+    g_free(q); g_date_time_unref(agora);
+    S("licenca", g_getenv("LIA_TRAJETORIA_LICENCA"));
+    S("proveniencia", g_getenv("LIA_TRAJETORIA_PROVENIENCIA"));
+    char *repo = g_compute_checksum_for_string(G_CHECKSUM_SHA256, proj_raiz() ? proj_raiz() : "", -1);
+    S("repositorio", repo); /* identificador opaco: hash da raiz, não o caminho */
+    g_free(repo);
+    S("git_antes", k->git_antes);
+    S("backend", g_modelo ? g_modelo->nome_backend : NULL);
+    S("modelo", k->modelo_desc);
+    S("pedido", k->pedido);
+    json_builder_set_member_name(b, "resultado");
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "concluido"); json_builder_add_boolean_value(b, sucesso);
+    S("causa", k->causa);
+    json_builder_set_member_name(b, "editou"); json_builder_add_boolean_value(b, k->editou);
+    json_builder_set_member_name(b, "validou_depois_da_ultima_edicao"); json_builder_add_boolean_value(b, k->validou_depois);
+    json_builder_set_member_name(b, "validacao_passou"); json_builder_add_boolean_value(b, k->passou);
+    json_builder_set_member_name(b, "gravacoes_aprovadas"); json_builder_add_int_value(b, k->operacoes->len);
+    json_builder_set_member_name(b, "truncamentos"); json_builder_add_int_value(b, k->truncamentos);
+    json_builder_end_object(b);
+    char *aj = arvore_para_json(k->arvore);
+    JsonParser *jp = json_parser_new();
+    json_builder_set_member_name(b, "arvore");
+    if (json_parser_load_from_data(jp, aj, -1, NULL)) json_builder_add_value(b, json_node_copy(json_parser_get_root(jp)));
+    else json_builder_add_null_value(b);
+    g_object_unref(jp);
+    g_free(aj);
+    /* artefatos referenciados pela árvore */
+    json_builder_set_member_name(b, "artefatos");
+    json_builder_begin_object(b);
+    GHashTable *vistos = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < k->arvore->nos->len; i++) {
+        TarefaNo *n = g_ptr_array_index(k->arvore->nos, i);
+        GPtrArray *refs = g_ptr_array_new();
+        for (guint j = 0; j < n->tentativas->len; j++) {
+            NoTentativa *t = g_ptr_array_index(n->tentativas, j);
+            g_ptr_array_add(refs, t->artefato); g_ptr_array_add(refs, t->prompt);
+        }
+        for (guint j = 0; j < n->evidencias->len; j++) g_ptr_array_add(refs, ((NoEvidencia *)g_ptr_array_index(n->evidencias, j))->artefato);
+        for (guint j = 0; j < refs->len; j++) {
+            const char *sha = g_ptr_array_index(refs, j);
+            if (!sha || strlen(sha) != 64 || g_hash_table_contains(vistos, sha)) continue;
+            g_hash_table_add(vistos, g_strdup(sha));
+            char *f = g_build_filename(dir_art, sha, NULL), *txt = NULL;
+            gsize tam = 0;
+            if (g_file_get_contents(f, &txt, &tam, NULL) && tam <= 512 * 1024 && g_utf8_validate(txt, (gssize)tam, NULL)) S(sha, txt);
+            g_free(txt); g_free(f);
+        }
+        g_ptr_array_free(refs, TRUE);
+    }
+    g_hash_table_unref(vistos);
+    json_builder_end_object(b);
+    #undef S
+    json_builder_end_object(b);
+    JsonGenerator *g = json_generator_new();
+    JsonNode *raiz = json_builder_get_root(b);
+    json_generator_set_root(g, raiz);
+    char *texto = json_generator_to_data(g, NULL);
+    json_node_unref(raiz); g_object_unref(g); g_object_unref(b);
+    char *dir = g_build_filename(g_get_home_dir(), ".lia", "trajetorias", NULL);
+    char *arq = NULL;
+    if (g_mkdir_with_parents(dir, 0700) == 0) {
+        arq = g_strdup_printf("%s/%s.json", dir, k->id);
+        GError *e = NULL;
+        if (!g_file_set_contents_full(arq, texto, -1, G_FILE_SET_CONTENTS_CONSISTENT, 0600, &e)) {
+            g_print("lia-sessiond: coding %s: trajetória não gravada: %s\n", k->id, e->message);
+            g_error_free(e);
+            g_clear_pointer(&arq, g_free);
+        }
+    }
+    g_free(dir); g_free(texto); g_free(dir_art); g_free(dt);
+    return arq;
+}
+
+/* causa do encerramento, uma de: concluido, truncamento, proposta_invalida,
+ * modelo_<timeout|cancelado|transporte|limite_bytes|resposta_invalida>,
+ * prazo_modelo, limite_ciclos, repeticao, sem_contexto, sem_validacao,
+ * validacao_proibidos, validacao, gravacao, criterios */
+static void coding_causa(Coding *k, const char *causa)
+{
+    if (!k || k->causa) return; /* a primeira causa registrada vale */
+    k->causa = g_strdup(causa);
+}
+
 static void coding_encerrar(Cliente *c, const char *motivo)
 {
     Coding *k = c->coding;
@@ -4332,6 +4523,37 @@ static void coding_encerrar(Cliente *c, const char *motivo)
         g_free(como);
     }
     gboolean sucesso = !motivo && k->editou && k->diffs->len > 0 && k->passou && k->validou_depois && todos;
+    /* a árvore decide pelas próprias regras (critérios da raiz conferidos,
+     * validação da raiz depois do último patch da subárvore); "concluído"
+     * exige que as duas contas concordem */
+    char *motivo_arvore = NULL;
+    NoEstado estado_raiz = NO_FALHOU;
+    if (k->arvore && arvore_no(k->arvore, "raiz")) {
+        TarefaNo *rz = arvore_no(k->arvore, "raiz");
+        if (!rz->criterios->len)
+            for (guint i = 0; k->plano && i < k->plano->criterios->len; i++) {
+                CodingCriterio *cr = g_ptr_array_index(k->plano->criterios, i);
+                arvore_criterio(k->arvore, "raiz", cr->descricao, i < k->n_crit_pedido ? "pedido/validação" : "modelo (filtrado)");
+            }
+        for (guint i = 0; k->plano && i < k->plano->criterios->len && i < rz->criterios->len; i++) {
+            CodingCriterio *cr = g_ptr_array_index(k->plano->criterios, i);
+            char *como = NULL;
+            gboolean ok = k->editou && coding_conferir_criterio_ex(cr, k->passou && k->validou_depois, (char **)k->tocados->pdata,
+                                                                    (char **)lidos_v->pdata, k->diffs->str, &como);
+            arvore_conferir(k->arvore, "raiz", i, ok, como ? como : "não conferido: nada gravado");
+            g_free(como);
+        }
+        estado_raiz = arvore_avaliar(k->arvore, "raiz", &motivo_arvore);
+        if (motivo) arvore_marcar(k->arvore, "raiz", NO_FALHOU, motivo);
+    }
+    /* LIA_SESSIOND_ARVORE_PORTAO=0 só para ABLAÇÃO na avaliação (loop simples): a árvore continua registrando, mas não decide */
+    if (sucesso && estado_raiz != NO_PASSOU && g_strcmp0(g_getenv("LIA_SESSIOND_ARVORE_PORTAO"), "0") != 0) {
+        sucesso = FALSE;
+        coding_causa(k, "arvore");
+        g_print("lia-sessiond: coding %s: a árvore da tarefa não confirma o sucesso: %s\n", k->id, motivo_arvore ? motivo_arvore : "?");
+    }
+    if (sucesso) { g_free(k->causa); k->causa = g_strdup("concluido"); }
+    else coding_causa(k, !k->editou ? "sem_alteracao" : !k->validou_depois || !k->passou ? "validacao" : "criterios");
     if (sucesso) {
         g_string_append_printf(o, "Resposta: concluído — %u gravação(ões) aprovada(s) e a validação \"%s\" passou depois da última edição.\n",
                                k->operacoes->len, k->comando ? k->comando : "?");
@@ -4341,9 +4563,19 @@ static void coding_encerrar(Cliente *c, const char *motivo)
         else if (!k->editou) g_string_append(o, "nenhuma alteração foi gravada");
         else if (!k->validou_depois) g_string_append(o, "a validação não rodou depois da última edição");
         else if (!k->passou) g_string_append(o, "a validação não passou");
+        else if (todos && motivo_arvore) g_string_append_printf(o, "a árvore da tarefa não confirma: %s", motivo_arvore);
         else g_string_append(o, "há critério de aceite não conferido");
         g_string_append_c(o, '\n');
     }
+    if (k->arvore) {
+        char *dt = coding_dir_tarefa(k);
+        g_string_append_printf(o, "Árvore da tarefa: raiz %s — %s (%s/arvore.json)\n", sucesso ? "passou" : arvore_estado_nome(estado_raiz == NO_PASSOU && !sucesso ? NO_FALHOU : estado_raiz),
+                               motivo ? motivo : motivo_arvore ? motivo_arvore : "?", dt);
+        g_free(dt);
+    }
+    g_free(motivo_arvore);
+    g_string_append_printf(o, "Encerramento: %s%s\n", k->causa,
+                           k->truncamentos ? (k->truncamentos == 1 ? " (1 resposta do modelo cortada no limite de tokens)" : " (respostas do modelo cortadas no limite de tokens)") : "");
     if (crit->len) { g_string_append(o, "\nCritérios de aceite (do pedido e da validação; os do modelo só depois do filtro):\n"); g_string_append(o, crit->str); }
     if (lidos_v->len > 1) {
         char *j = g_strjoinv(", ", (char **)lidos_v->pdata);
@@ -4394,6 +4626,10 @@ static void coding_encerrar(Cliente *c, const char *motivo)
         g_string_append_c(o, '\n');
     }
     g_string_append_printf(o, "\nCheckpoint: %s%s\n", k->id, sucesso ? "" : " (para continuar: \"retome a tarefa de código <id>\")");
+    coding_arvore_gravar(k);
+    char *traj = coding_trajetoria_exportar(k, sucesso);
+    if (traj) g_string_append_printf(o, "Trajetória (opt-in LIA_SESSIOND_TRAJETORIAS=1): %s\n", traj);
+    g_free(traj);
     gint64 ms = (g_get_monotonic_time() - k->inicio_us) / 1000;
     g_print("lia-sessiond: coding %s: %s em %" G_GINT64_FORMAT " ms (ciclos %d, gravações %u)%s%s\n", k->id, sucesso ? "concluído" : "não concluído", ms,
             k->ciclo, k->operacoes->len, motivo ? " — " : "", motivo ? motivo : "");
@@ -4451,6 +4687,7 @@ static gboolean ao_codctx_prazo(gpointer p)
     g_print("lia-sessiond: coding %s: %s\n", k->id, mot);
     if (g_modelo) g_modelo->cancelar(g_modelo, id); /* pode chamar o callback aqui mesmo: x não é mais usado depois daqui */
     g_free(id);
+    coding_causa(k, "prazo_modelo");
     if (c->coding == k) coding_encerrar(c, mot);
     g_free(mot);
     cliente_unref(c);
@@ -4530,9 +4767,33 @@ static void ao_coding_criterios(gpointer ctx, const ModeloResposta *r);
 
 /* critérios do PEDIDO e da validação (sem modelo); opcionalmente o modelo
  * sugere mais, já vendo os arquivos lidos, e o verificador filtra */
+static void coding_arvore_contexto(Coding *k)
+{
+    if (!k->arvore || arvore_no(k->arvore, "contexto")) return;
+    char *e = arvore_adicionar(k->arvore, "contexto", "raiz", NULL, "ler o contexto mínimo (regras primeiro; o modelo só escolhe da lista do projeto)", NULL);
+    if (e) { g_free(e); return; }
+    GList *lk = g_list_sort(g_hash_table_get_keys(k->lidos), (GCompareFunc)strcmp);
+    for (GList *it = lk; it; it = it->next) {
+        const char *rel = it->data, *txt = g_hash_table_lookup(k->lidos, rel);
+        gboolean define = k->definem && g_strv_contains((const char *const *)k->definem, rel);
+        const char *origem = define ? "regra: define um símbolo citado" : strstr(k->pedido, rel) ? "pedido: caminho citado"
+                           : coding_caminho_de_teste(rel) ? "regra: teste existente do código citado" : "modelo (escolha conferida contra a lista do projeto)";
+        guint linhas = 0;
+        for (const char *q = txt; q && *q; q++) if (*q == '\n') linhas++;
+        char *tr = g_strdup_printf("arquivo inteiro (%u linhas)", linhas);
+        arvore_contexto(k->arvore, "contexto", rel, origem, g_hash_table_lookup(k->shas, rel), tr);
+        g_free(tr);
+    }
+    g_list_free(lk);
+    for (int i = 0; k->a_criar && k->a_criar[i]; i++) arvore_contexto(k->arvore, "contexto", k->a_criar[i], "pedido: arquivo a criar", "", "não existe");
+    gboolean tem = g_hash_table_size(k->lidos) || (k->a_criar && k->a_criar[0]);
+    arvore_marcar(k->arvore, "contexto", tem ? NO_PASSOU : NO_FALHOU, tem ? "contexto lido (caminhos e hashes registrados)" : "nenhum contexto");
+}
+
 static void coding_definir_criterios(Cliente *c)
 {
     Coding *k = c->coding;
+    coding_arvore_contexto(k);
     char *val = NULL;
     char *erro = NULL, *lj = validacao_listar(&erro);
     g_free(erro);
@@ -4559,6 +4820,7 @@ static void coding_definir_criterios(Cliente *c)
     k->plano = coding_plano_do_pedido(k->pedido, k->a_criar, val ? val : padrao);
     g_free(k->plano->validacao);
     k->plano->validacao = val; /* só o que o pedido nomeou; senão, coding_validar usa o padrão */
+    k->n_crit_pedido = k->plano->criterios->len;
     g_free(padrao);
     GString *m = g_string_new("critérios de aceite (do pedido e da validação, sem modelo):");
     for (guint i = 0; i < k->plano->criterios->len; i++)
@@ -4639,9 +4901,28 @@ static void ao_coding_contexto(gpointer ctx, const ModeloResposta *r)
     }
     g_strfreev(esc);
     if (g_hash_table_size(k->lidos) == 0) {
+        coding_causa(c->coding, "sem_contexto");
         coding_encerrar(c, "não localizei o código do pedido (nenhum arquivo citado, nenhum símbolo definido no projeto, e o modelo não indicou um arquivo válido) — "
                            "cite o arquivo ou a função a alterar");
         return;
+    }
+    {
+        /* a escolha do modelo precisa ter relação verificável com o pedido;
+         * sem evidência, pergunto em vez de propor sobre arquivos alheios */
+        char *mr = NULL;
+        gboolean rel = coding_contexto_relevante(k->pedido, k->lidos, &mr);
+        char *m = g_strdup_printf("relevância do contexto escolhido pelo modelo: %s", mr);
+        coding_progresso(c, "contexto", m);
+        g_free(m);
+        if (!rel) {
+            coding_causa(k, "sem_contexto");
+            char *mot = g_strdup_printf("o contexto que o modelo escolheu não tem relação verificável com o pedido (%s) — cite o arquivo ou a função a alterar", mr);
+            g_free(mr);
+            coding_encerrar(c, mot);
+            g_free(mot);
+            return;
+        }
+        g_free(mr);
     }
     coding_checkpoint(k, "contexto");
     coding_definir_criterios(c);
@@ -4669,9 +4950,56 @@ static void coding_processar_proposta(Cliente *c, const ModeloResposta *r)
 {
     Coding *k = c->coding;
     if (!r->sucesso) {
-        char *mot = g_strdup_printf("o modelo não respondeu (%s)", r->erro_codigo ? r->erro_codigo : "erro");
+        /* término do backend com causa própria: timeout, cancelado, transporte... */
+        const char *fim = r->fim ? r->fim : "resposta_invalida";
+        char *causa = g_strdup_printf("modelo_%s", fim);
+        coding_causa(k, causa);
+        g_free(causa);
+        char *mot = g_strdup_printf("o modelo não respondeu (%s: %s)", fim, r->erro_mensagem ? r->erro_mensagem : r->erro_codigo ? r->erro_codigo : "erro");
         coding_encerrar(c, mot);
         g_free(mot);
+        return;
+    }
+    /* cada resposta do modelo (ou da receita) é uma TENTATIVA do nó da
+     * proposta: guardada à parte (artefato), com hash; a mesma resposta de
+     * novo é repetição sem progresso e o orçamento do nó é finito */
+    char *no_prop = coding_no_proposta(k, k->ciclo + 1);
+    {
+        const char *bruto = r->resposta_texto ? r->resposta_texto : "";
+        char *art = coding_artefato(k, bruto);
+        char *h = g_compute_checksum_for_string(G_CHECKSUM_SHA256, bruto, -1);
+        char *et = k->arvore ? arvore_tentativa(k->arvore, no_prop, h, art) : NULL;
+        /* receita determinística: sem prompt; modelo: o prompt desta chamada */
+        if (!et && k->origem_proposta && g_str_has_prefix(k->origem_proposta, "modelo")) arvore_tentativa_prompt(k->arvore, no_prop, k->prompt_sha);
+        g_free(h); g_free(art);
+        if (et) {
+            g_free(no_prop);
+            coding_recusar_proposta(c, et);
+            g_free(et);
+            return;
+        }
+    }
+    if (!g_strcmp0(r->fim, "limite_tokens")) {
+        arvore_tentativa_resultado(k->arvore, no_prop, "cortada no limite de tokens (truncamento)");
+        g_free(no_prop);
+        /* resposta CORTADA no limite: não é proposta malformada nem conta
+         * como recusa; muda a estratégia (uma edição por chamada) uma vez */
+        k->truncamentos++;
+        char *m = g_strdup_printf("a resposta do modelo foi cortada no limite de %d tokens (%" G_GINT64_FORMAT " gerados) — truncamento, não JSON malformado%s",
+                                  tokens_codigo(), r->tokens_gerados,
+                                  k->reduzido ? "" : "; peço de novo UMA edição só, a menor possível");
+        coding_progresso(c, "truncado", m);
+        g_free(m);
+        if (!k->reduzido) {
+            k->reduzido = TRUE;
+            coding_propor(c);
+        } else {
+            coding_causa(k, "truncamento");
+            char *mot = g_strdup_printf("a resposta do modelo foi cortada no limite de %d tokens de novo, já pedindo uma edição só — "
+                                        "aumente LIA_SESSIOND_CODIGO_MAX_TOKENS ou divida o pedido (um arquivo ou função por vez)", tokens_codigo());
+            coding_encerrar(c, mot);
+            g_free(mot);
+        }
         return;
     }
     if (g_strcmp0(g_getenv("LIA_SESSIOND_DEPURAR_CODIGO"), "1") == 0)
@@ -4705,6 +5033,7 @@ static void coding_processar_proposta(Cliente *c, const ModeloResposta *r)
         g_strfreev(proib);
         if (erro) { g_ptr_array_unref(arqs); arqs = NULL; g_clear_pointer(&hash, g_free); g_clear_pointer(&expl, g_free); }
     }
+    g_free(no_prop);
     if (!arqs) {
         coding_recusar_proposta(c, erro);
         g_free(erro);
@@ -4718,10 +5047,26 @@ static void coding_recusar_proposta(Cliente *c, const char *erro)
 {
     Coding *k = c->coding;
     k->recusas_proposta++;
+    {
+        /* só a tentativa AINDA pendente recebe o motivo: numa repetição a
+         * tentativa nem é criada, e a anterior guarda o próprio resultado */
+        char *no = g_strdup_printf("proposta-%d", k->ciclo + 1);
+        TarefaNo *n = k->arvore ? arvore_no(k->arvore, no) : NULL;
+        NoTentativa *ult = n && n->tentativas->len ? g_ptr_array_index(n->tentativas, n->tentativas->len - 1) : NULL;
+        if (ult && !g_strcmp0(ult->resultado, "pendente")) {
+            char *res = g_strdup_printf("recusada pelo verificador: %s", erro);
+            arvore_tentativa_resultado(k->arvore, no, res);
+            g_free(res);
+        } else if (n) {
+            arvore_evento(k->arvore, "recusa_sem_tentativa", no, erro);
+        }
+        g_free(no);
+    }
     char *m = g_strdup_printf("proposta recusada pelo verificador: %s", erro);
     coding_progresso(c, "proposta", m);
     g_free(m);
     if (k->recusas_proposta >= 2) {
+        coding_causa(k, "proposta_invalida");
         char *mot = g_strdup_printf("o modelo não produziu uma proposta válida em duas tentativas (última: %s)", erro);
         coding_encerrar(c, mot);
         g_free(mot);
@@ -4870,6 +5215,7 @@ static void coding_seguir_proposta(Cliente *c, GPtrArray *arqs, char *hash, char
         if (!strcmp(g_ptr_array_index(k->propostas, i), hash)) {
             g_ptr_array_unref(arqs);
             g_free(hash); g_free(expl);
+            coding_causa(k, "repeticao");
             coding_encerrar(c, "repetição sem progresso: o modelo propôs exatamente a mesma alteração que já tinha sido aplicada e não resolveu");
             return;
         }
@@ -4878,6 +5224,12 @@ static void coding_seguir_proposta(Cliente *c, GPtrArray *arqs, char *hash, char
     g_ptr_array_add(k->propostas, hash);
     k->ciclo++;
     g_ptr_array_add(k->origens, g_strdup_printf("ciclo %d: %s", k->ciclo, k->origem_proposta ? k->origem_proposta : "?"));
+    {
+        char *no = g_strdup_printf("proposta-%d", k->ciclo);
+        char *res = g_strdup_printf("passou no verificador; prévia enviada para aprovação (%s)", k->origem_proposta ? k->origem_proposta : "?");
+        arvore_tentativa_resultado(k->arvore, no, res);
+        g_free(res); g_free(no);
+    }
     /* cada arquivo vira UM passo de gravação, preso ao hash observado na leitura */
     AgentePlano *p = agente_plano_novo(expl && *expl ? expl : "gravar a alteração de código proposta", "codigo_edicao");
     for (guint i = 0; i < arqs->len; i++) {
@@ -4926,11 +5278,13 @@ static void coding_propor(Cliente *c)
     Coding *k = c->coding;
     k->estado = COD_PROPONDO;
     if (k->ciclo >= CODING_MAX_CICLOS) {
+        coding_causa(k, "limite_ciclos");
         char *mot = g_strdup_printf("limite de %d ciclos de correção atingido sem a validação passar", CODING_MAX_CICLOS);
         coding_encerrar(c, mot);
         g_free(mot);
         return;
     }
+    g_free(coding_no_proposta(k, k->ciclo + 1));
     /* receita determinística primeiro (sem modelo): SQL montada com variável
      * num arquivo que define o símbolo citado, quando o pedido é sobre isso */
     if (!k->receita_tentada && k->ciclo == 0) {
@@ -4982,6 +5336,10 @@ static void coding_propor(Cliente *c)
         g_string_append_printf(dg, "- %s foi criado nesta tarefa (está em \"arquivos lidos\"): para corrigi-lo, mande o arquivo COMPLETO de novo com "
                                    "{\"acao\":\"criar\",\"caminho\":\"%s\",\"conteudo\":\"...\"} ou use \"editar\"\n",
                                (char *)g_ptr_array_index(k->criados, i), (char *)g_ptr_array_index(k->criados, i));
+    if (k->reduzido)
+        g_string_append_printf(dg, "- a resposta anterior foi CORTADA no limite de %d tokens: agora mande UMA edição só — a menor mudança que avança o pedido "
+                                   "(prefira \"editar\" com um trecho curto, ou \"substituir_funcao\" de UMA função); nunca reescreva um arquivo inteiro "
+                                   "que já existe; o resto vem nos próximos ciclos\n", tokens_codigo());
     char *dicas = g_string_free(dg, FALSE);
     char *prompt = *dicas ? g_strdup_printf("%s\n----- a tarefa em termos concretos -----\n%s", prompt0, dicas) : g_strdup(prompt0);
     g_free(dicas); g_free(prompt0);
@@ -4994,15 +5352,21 @@ static void coding_propor(Cliente *c)
     /* saída estruturada: o JSON da proposta sai válido por construção
      * (medido no POC: llama3.2:3b errou a sintaxe nas duas tentativas sem
      * esquema). Desligável com LIA_SESSIOND_CODIGO_ESQUEMA=0. */
-    static const char *ESQUEMA_EDICOES =
-        "{\"type\":\"object\",\"properties\":{\"edicoes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":6,\"items\":{\"type\":\"object\",\"properties\":{"
-        "\"acao\":{\"type\":\"string\",\"enum\":[\"criar\",\"editar\",\"substituir_funcao\"]},\"caminho\":{\"type\":\"string\"},"
-        "\"conteudo\":{\"type\":\"string\"},\"procurar\":{\"type\":\"string\"},\"substituir\":{\"type\":\"string\"},\"funcao\":{\"type\":\"string\"}},"
-        "\"required\":[\"acao\",\"caminho\"]}},\"explicacao\":{\"type\":\"string\",\"maxLength\":300}},\"required\":[\"edicoes\",\"explicacao\"]}";
+    /* saída estruturada POR OPERAÇÃO (coding_esquema_edicoes): a gramática
+     * do backend já impede, p.ex., substituir_funcao sem o código (falha
+     * dominante da avaliação real de 2026-11-24). O contrato é conferido de
+     * novo no runtime (coding_contrato_edicao) — a gramática é ajuda, não
+     * prova. Desligável com LIA_SESSIOND_CODIGO_ESQUEMA=0. */
     gboolean esquema = g_strcmp0(g_getenv("LIA_SESSIOND_CODIGO_ESQUEMA"), "0") != 0;
-    ModeloOpcoes op = { .esquema_json = esquema ? ESQUEMA_EDICOES : NULL, .max_tokens = LIA_MODELO_TOKENS_CODIGO, .resumo = TRUE,
+    char *esq = esquema ? coding_esquema_edicoes(k->reduzido ? 1 : 6) : NULL;
+    ModeloOpcoes op = { .esquema_json = esq, .max_tokens = tokens_codigo(), .resumo = TRUE,
                         .progresso_cb = ao_coding_tokens, .progresso_ctx = x };
+    g_free(k->prompt_sha);
+    k->prompt_sha = coding_artefato(k, prompt);
+    g_free(k->modelo_desc);
+    k->modelo_desc = g_strdup(x->desc);
     g_modelo->perguntar(g_modelo, k->modelo_id, prompt, &op, ao_coding_edicoes, x);
+    g_free(esq);
     g_free(prompt);
 }
 
@@ -5025,6 +5389,7 @@ static void coding_validar(Cliente *c)
     if (!k->comando) k->comando = padrao ? g_strdup(padrao) : NULL;
     g_free(padrao);
     if (!k->comando) {
+        coding_causa(k, "sem_validacao");
         coding_encerrar(c, "não há comando de validação configurado (crie .lia/validacao.json ou um Makefile com alvo teste) — sem validação não declaro concluído");
         return;
     }
@@ -5120,6 +5485,8 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
             g_object_unref(jp);
         }
         if (gravados) { k->editou = TRUE; k->validou_depois = FALSE; k->passou = FALSE; }
+        GPtrArray *p_arqs = g_ptr_array_new_with_free_func(g_free), *p_antes = g_ptr_array_new_with_free_func(g_free),
+                  *p_depois = g_ptr_array_new_with_free_func(g_free);
         /* os arquivos gravados passam a ser os "lidos" (conteúdo e hash novos) */
         GList *chaves = g_hash_table_get_keys(k->shas);
         for (guint i = 0; i < t->plano->passos->len; i++) {
@@ -5133,7 +5500,13 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
                     if (!ja_criado) g_ptr_array_add(k->criados, g_strdup(cam));
                 }
                 char *sha = NULL, *e = NULL;
+                char *antes_sha = cam ? g_strdup(g_hash_table_lookup(k->shas, cam)) : NULL;
                 char *txt = cam ? proj_ler_texto(cam, CODING_MAX_BYTES_ARQUIVO, &sha, &e) : NULL;
+                if (cam) {
+                    g_ptr_array_add(p_arqs, g_strdup(cam));
+                    g_ptr_array_add(p_antes, antes_sha ? antes_sha : g_strdup(""));
+                    g_ptr_array_add(p_depois, g_strdup(sha ? sha : ""));
+                } else g_free(antes_sha);
                 if (txt) { g_hash_table_insert(k->lidos, g_strdup(cam), txt); g_hash_table_insert(k->shas, g_strdup(cam), sha); }
                 else g_free(sha);
                 gboolean ja = FALSE;
@@ -5144,6 +5517,16 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
             g_object_unref(jp);
         }
         g_list_free(chaves);
+        if (gravados && k->arvore) {
+            /* evidência de patch (arquivos e hashes antes/depois; diff como artefato) */
+            g_ptr_array_add(p_arqs, NULL); g_ptr_array_add(p_antes, NULL); g_ptr_array_add(p_depois, NULL);
+            char *no = g_strdup_printf("proposta-%d", k->ciclo);
+            char *art = coding_artefato(k, k->diffs->str);
+            arvore_patch(k->arvore, no, (char **)p_arqs->pdata, (char **)p_antes->pdata, (char **)p_depois->pdata, art);
+            arvore_tentativa_resultado(k->arvore, no, "aplicada: aprovada e gravada");
+            g_free(art); g_free(no);
+        }
+        g_ptr_array_unref(p_arqs); g_ptr_array_unref(p_antes); g_ptr_array_unref(p_depois);
         if (erro_passo) {
             char *mot = g_strdup_printf("a gravação não foi feita: %s", erro_passo);
             coding_encerrar(c, mot);
@@ -5185,6 +5568,24 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
     }
     g_free(k->validacao_json);
     k->validacao_json = json_rel;
+    if (k->arvore) {
+        /* evidência de validação na RAIZ, com o alcance: comando, arquivos
+         * tocados com os hashes atuais, depois de qual patch */
+        gint64 rc = -1;
+        JsonParser *jp = json_parser_new();
+        if (json_rel && json_parser_load_from_data(jp, json_rel, -1, NULL) && JSON_NODE_TYPE(json_parser_get_root(jp)) == JSON_NODE_OBJECT)
+            rc = json_object_get_int_member_with_default(json_node_get_object(json_parser_get_root(jp)), "codigo_saida", -1);
+        g_object_unref(jp);
+        GPtrArray *hs = g_ptr_array_new();
+        for (guint i = 0; i < k->tocados->len; i++) g_ptr_array_add(hs, g_hash_table_lookup(k->shas, g_ptr_array_index(k->tocados, i)));
+        g_ptr_array_add(hs, NULL);
+        g_ptr_array_add(k->tocados, NULL);
+        char *art = coding_artefato(k, finais->len ? finais->str : (json_rel ? json_rel : ""));
+        arvore_validacao(k->arvore, "raiz", k->comando, (int)rc, passou, (char **)k->tocados->pdata, (char **)hs->pdata, art);
+        g_ptr_array_remove_index(k->tocados, k->tocados->len - 1);
+        g_ptr_array_free(hs, TRUE);
+        g_free(art);
+    }
     if (k->impressao_proibidos) {
         char **proib = coding_caminhos_proibidos(k->pedido);
         char *depois = coding_impressao_proibidos(proj_raiz(), proib);
@@ -5192,6 +5593,7 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
         g_strfreev(proib);
         g_free(depois);
         if (*mud) {
+            coding_causa(c->coding, "validacao_proibidos");
             char *mot = g_strdup_printf("a validação (código do projeto/dos testes) mexeu em caminho que o pedido proíbe: %s — "
                                         "não declaro concluído; confira e desfaça essas mudanças", mud);
             g_free(mud);
@@ -5213,6 +5615,7 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
     } else if (interrompida) {
         coding_encerrar(c, "a validação foi interrompida (tempo esgotado ou cancelada)");
     } else if (k->falha_sha && sha_saida && !strcmp(k->falha_sha, sha_saida)) {
+        coding_causa(k, "repeticao");
         coding_encerrar(c, "repetição sem progresso: a validação falhou exatamente do mesmo jeito depois da correção");
     } else {
         g_free(k->falha); k->falha = final; final = NULL;
@@ -5229,6 +5632,11 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
 static gboolean coding_apos_rejeicao(Cliente *c, Tarefa *t)
 {
     if (!c->coding || !g_str_has_prefix(t->plano->intencao, "codigo_")) return FALSE;
+    if (!strcmp(t->plano->intencao, "codigo_edicao")) {
+        char *no = g_strdup_printf("proposta-%d", c->coding->ciclo);
+        arvore_tentativa_resultado(c->coding->arvore, no, "rejeitada pela pessoa na prévia");
+        g_free(no);
+    }
     coding_encerrar(c, !strcmp(t->plano->intencao, "codigo_validacao")
                            ? "você recusou a execução da validação — a alteração ficou gravada, mas sem prova de que funciona"
                            : "você recusou a gravação da proposta — nenhum arquivo foi alterado nesta etapa");
@@ -5242,6 +5650,8 @@ static void coding_cancelar(Cliente *c, const char *motivo)
     Coding *k = c->coding;
     if (!k) return;
     c->coding = NULL; /* antes de cancelar o modelo: um callback síncrono já encontra a tarefa encerrada */
+    coding_causa(k, motivo);
+    arvore_marcar(k->arvore, "raiz", NO_BLOQUEADO, !strcmp(motivo, "desconectado") ? "o cliente desconectou (retomável)" : "cancelado pela pessoa (retomável)");
     if (k->modelo_id && g_modelo) g_modelo->cancelar(g_modelo, k->modelo_id);
     coding_checkpoint(k, motivo);
     g_print("lia-sessiond: coding %s: %s\n", k->id, !strcmp(motivo, "desconectado") ? "encerrado: o cliente desconectou (checkpoint guardado)"
@@ -5265,6 +5675,12 @@ static Coding *coding_novo(const char *id, const char *pergunta_id, const char *
     k->origens = g_ptr_array_new_with_free_func(g_free);
     k->a_criar = g_new0(char *, 1);
     k->inicio_us = g_get_monotonic_time();
+    k->arvore = arvore_nova(id);
+    {
+        char *obj = g_strdup_printf("o pedido, provado por critérios próprios e uma validação depois do último patch: %.400s", pedido);
+        char *e = arvore_adicionar(k->arvore, "raiz", NULL, NULL, obj, NULL);
+        g_free(obj); g_free(e);
+    }
     return k;
 }
 
@@ -5463,6 +5879,29 @@ static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id)
     k->plano = coding_plano_do_pedido(k->pedido, k->a_criar, json_object_get_string_member_with_default(o, "comando_validacao", NULL));
     g_clear_pointer(&k->plano->validacao, g_free);
     if (json_object_has_member(o, "comando_validacao")) k->plano->validacao = g_strdup(json_object_get_string_member(o, "comando_validacao"));
+    k->n_crit_pedido = k->plano->criterios->len;
+    {
+        /* a árvore gravada continua (tentativas, patches e evidências
+         * anteriores); inválida (ciclo, versão, referência) -> recomeça */
+        char *dt = coding_dir_tarefa(k);
+        char *arq = g_build_filename(dt, "arvore.json", NULL);
+        char *txt = NULL, *er = NULL;
+        if (g_file_get_contents(arq, &txt, NULL, NULL)) {
+            Arvore *av = arvore_de_json(txt, &er);
+            if (av) { arvore_liberar(k->arvore); k->arvore = av; }
+            else {
+                char *aviso = g_strdup_printf("a árvore gravada da tarefa foi descartada (%s); recomeço uma nova", er);
+                coding_progresso(c, "retomada", aviso);
+                g_free(aviso);
+            }
+        }
+        if (arvore_no(k->arvore, "raiz")) {
+            /* critérios da raiz são reconferidos no fim; a prova antiga não vale */
+            g_ptr_array_set_size(arvore_no(k->arvore, "raiz")->criterios, 0);
+            arvore_marcar(k->arvore, "raiz", NO_EXECUTANDO, "retomada a partir do checkpoint");
+        }
+        g_free(txt); g_free(er); g_free(arq); g_free(dt);
+    }
     JsonObject *shas = json_object_get_object_member(o, "arquivos_lidos_sha256");
     GPtrArray *ler = g_ptr_array_new();
     if (shas) { GList *ks = json_object_get_members(shas); for (GList *it = ks; it; it = it->next) g_ptr_array_add(ler, g_strdup(it->data)); g_list_free(ks); }
@@ -5510,6 +5949,27 @@ static void coding_retomar(Cliente *c, const char *pergunta_id, const char *id)
         g_free(er);
     }
     json_object_unref(o);
+    if (k->editou && k->arvore && k->tocados->len) {
+        /* árvore sem o patch anterior (descartada ou de versão antiga): o
+         * checkpoint diz que houve gravação — registra como evidência
+         * RECONSTRUÍDA, com os hashes de agora; a validação a seguir é a prova */
+        gboolean tem_patch = FALSE;
+        for (guint i = 0; i < k->arvore->nos->len && !tem_patch; i++) {
+            TarefaNo *n = g_ptr_array_index(k->arvore->nos, i);
+            for (guint j = 0; j < n->evidencias->len; j++)
+                if (!strcmp(((NoEvidencia *)g_ptr_array_index(n->evidencias, j))->tipo, "patch")) tem_patch = TRUE;
+        }
+        if (!tem_patch) {
+            char *e = arvore_adicionar(k->arvore, "retomada", "raiz", NULL, "alterações gravadas antes da retomada (reconstruídas do checkpoint)", NULL);
+            g_free(e);
+            GPtrArray *hs = g_ptr_array_new(), *vz = g_ptr_array_new();
+            for (guint i = 0; i < k->tocados->len; i++) { g_ptr_array_add(hs, g_hash_table_lookup(k->shas, g_ptr_array_index(k->tocados, i))); g_ptr_array_add(vz, (gpointer)""); }
+            g_ptr_array_add(hs, NULL); g_ptr_array_add(vz, NULL); g_ptr_array_add(k->tocados, NULL);
+            arvore_patch(k->arvore, "retomada", (char **)k->tocados->pdata, (char **)vz->pdata, (char **)hs->pdata, NULL);
+            g_ptr_array_remove_index(k->tocados, k->tocados->len - 1);
+            g_ptr_array_free(hs, TRUE); g_ptr_array_free(vz, TRUE);
+        }
+    }
     if (validar) coding_validar(c);
     else coding_propor(c);
 }

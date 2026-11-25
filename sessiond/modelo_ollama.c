@@ -18,12 +18,14 @@
 #include "../ollama/cliente_ollama.h"
 #include <gio/gio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct {
     char *pergunta_id;
     ModeloConcluidoCb concluido_cb;
     gpointer ctx;
     gboolean resumo; /* pedido de resumo final: a resposta é só texto, nunca uma proposta */
+    OllamaFim fim; /* como a geração terminou (preenchido pelo cliente antes da conclusão) */
     OllamaRequisicao *req;
 } TarefaOllama;
 
@@ -40,6 +42,12 @@ static OllamaConfig *obter_config(void)
     const char *timeout_s = g_getenv("LIA_OLLAMA_TIMEOUT_MS");
     g_cfg = ollama_config_novo(host, porta_s ? atoi(porta_s) : 11434, modelo);
     if (timeout_s) g_cfg->timeout_ms = atoi(timeout_s);
+    /* LIA_MODELO_TEMPERATURA / LIA_MODELO_SEMENTE: só para avaliação (variância
+     * entre repetições); o padrão continua temperatura 0. LIA_OLLAMA_NUM_CTX: janela. */
+    const char *te = g_getenv("LIA_MODELO_TEMPERATURA"), *se = g_getenv("LIA_MODELO_SEMENTE"), *nc = g_getenv("LIA_OLLAMA_NUM_CTX");
+    if (te) g_cfg->temperatura = g_ascii_strtod(te, NULL);
+    if (se) g_cfg->semente = g_ascii_strtoll(se, NULL, 10);
+    if (nc) g_cfg->num_ctx = atoi(nc);
     return g_cfg;
 }
 
@@ -70,6 +78,12 @@ static void ao_concluir_ollama(gpointer ctx, OllamaErro erro, const char *texto_
         r.erro_mensagem = g_strdup(ollama_erro_texto(erro));
     }
 
+    r.tokens_gerados = t->fim.tokens_gerados;
+    r.fim = g_strdup(erro == OLLAMA_OK ? (!strcmp(t->fim.motivo, "length") ? "limite_tokens" : "completo") :
+                     erro == OLLAMA_ERRO_CANCELADO ? "cancelado" :
+                     erro == OLLAMA_ERRO_TIMEOUT ? "timeout" :
+                     erro == OLLAMA_ERRO_LIMITE_EXCEDIDO ? "limite_bytes" :
+                     erro == OLLAMA_ERRO_RESPOSTA_INVALIDA ? "resposta_invalida" : "transporte");
     t->concluido_cb(t->ctx, &r);
     modelo_resposta_liberar(&r);
 
@@ -93,8 +107,10 @@ static void ollama_perguntar(const ModeloBackend *self, const char *pergunta_id,
     t->ctx = ctx;
     g_hash_table_insert(g_em_andamento, t->pergunta_id, t);
     t->resumo = opcoes && opcoes->resumo;
+    t->fim.tokens_gerados = t->fim.tokens_prompt = -1;
     t->req = ollama_gerar_opcoes(obter_config(), prompt_montado, opcoes ? opcoes->esquema_json : NULL,
                                   opcoes ? opcoes->max_tokens : 0, ao_concluir_ollama, t);
+    if (t->req) ollama_definir_fim(t->req, &t->fim);
     if (t->req && opcoes && opcoes->progresso_cb)
         ollama_definir_progresso(t->req, opcoes->progresso_cb, opcoes->progresso_ctx);
 }

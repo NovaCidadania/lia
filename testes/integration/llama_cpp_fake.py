@@ -90,6 +90,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 {"content": "", "stop": True},
             ]
 
+        if MODO == "limite":      # n_predict atingido (llama.cpp novo: stop_type)
+            eventos[-1] = {"content": "", "stop": True, "stop_type": "limit", "tokens_predicted": 7, "tokens_evaluated": 3}
+        elif MODO == "limite_antigo":   # versões antigas: stopped_limit
+            eventos[-1] = {"content": "", "stop": True, "stopped_limit": True, "stopped_eos": False, "tokens_predicted": 7}
+        elif MODO == "normal":
+            eventos[-1] = dict(eventos[-1], stop_type="eos", tokens_predicted=2)
         for i, obj in enumerate(eventos):
             if MODO == "truncado" and i == len(eventos) - 1:
                 break  # nunca envia o evento final com stop:true

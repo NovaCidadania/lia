@@ -268,6 +268,62 @@ static gboolean chaves_balanceadas(const char *t)
     return *f == '\0';
 }
 
+/* "const nome = (args) => corpo" (TS/JS): corpo em bloco {..} ou expressão de UMA linha. Início na linha da
+ * declaração; fim depois do '}' (ou do fim da expressão), incluindo um ';' final se houver. */
+static gboolean regiao_arrow(const char *c, const char *nome, gsize *ini, gsize *fim)
+{
+    char *esc = g_regex_escape_string(nome, -1);
+    char *pad = g_strdup_printf("^[ \\t]*(?:export\\s+(?:default\\s+)?)?(?:const|let|var)\\s+%s\\s*(?::[^=\\n]+)?=\\s*(?:async\\s+)?"
+                                "(?:\\((?:[^()]|\\([^()]*\\))*\\)|[A-Za-z_$][\\w$]*)\\s*(?::[^=\\n{]+)?=>", esc);
+    GRegex *re = g_regex_new(pad, G_REGEX_MULTILINE, 0, NULL);
+    g_free(pad); g_free(esc);
+    GMatchInfo *mi = NULL;
+    int achados = 0;
+    gint a0 = 0, a1 = 0;
+    if (re && g_regex_match(re, c, 0, &mi))
+        while (g_match_info_matches(mi)) { if (!achados) g_match_info_fetch_pos(mi, 0, &a0, &a1); achados++; g_match_info_next(mi, NULL); }
+    g_match_info_free(mi);
+    if (re) g_regex_unref(re);
+    if (achados != 1) return FALSE;
+    const char *q = c + a1;
+    while (*q == ' ' || *q == '\t') q++;
+    const char *f = NULL;
+    if (*q == '{') {
+        f = fim_do_bloco(q);
+    } else {
+        const char *eol = strchr(q, '\n');
+        if (!eol) eol = q + strlen(q);
+        const char *u = eol;
+        while (u > q && g_ascii_isspace(u[-1])) u--;
+        if (u > q && u[-1] == ';') u--;
+        if (u > q && !strchr("(,[{+-*/&|?:=>", u[-1])) {
+            int par = 0, col = 0, ch = 0;
+            for (const char *x = q; x < u; x++) { par += *x == '(' ? 1 : *x == ')' ? -1 : 0; col += *x == '[' ? 1 : *x == ']' ? -1 : 0; ch += *x == '{' ? 1 : *x == '}' ? -1 : 0; }
+            if (!par && !col && !ch) f = u;
+        }
+    }
+    if (!f) return FALSE;
+    if (*f == ';') f++;
+    *ini = (gsize)a0;
+    *fim = (gsize)(f - c);
+    return TRUE;
+}
+
+static gboolean regiao_funcao_js(const char *c, const char *nome, gsize *ini, gsize *fim)
+{
+    return regiao_da_funcao(c, nome, ini, fim) || regiao_arrow(c, nome, ini, fim);
+}
+
+/* o conteúdo novo é a função inteira: "function nome(..){..}" com chaves balanceadas, ou só a arrow "const nome = .. =>" */
+static gboolean conteudo_e_funcao(const char *novo, const char *nome)
+{
+    gsize ni = 0, nf = 0;
+    if (regiao_da_funcao(novo, nome, &ni, &nf) && chaves_balanceadas(novo)) return TRUE;
+    if (!regiao_arrow(novo, nome, &ni, &nf) || ni != 0) return FALSE;
+    for (const char *r = novo + nf; *r; r++) if (!g_ascii_isspace(*r) && *r != ';') return FALSE;
+    return TRUE;
+}
+
 /* Python: "def nome(" (uma só) até a primeira linha não vazia com recuo
  * menor ou igual ao do def; [ini, fim) vai do início da linha do def ao
  * fim da última linha do corpo (com o '\n') */
@@ -406,9 +462,130 @@ static int ocorrencias(const char *h, const char *n)
     return k;
 }
 
+/* ---- contrato por operação (vale com ou sem esquema no backend: a
+ * gramática do backend é uma ajuda, a validação é esta) ---- */
+gboolean coding_conteudo_abreviado(const char *conteudo)
+{
+    if (!conteudo) return FALSE;
+    static const char *const RESTO[] = { "rest", "resto", "existing", "mesmo", "demais", "codigo", "código", "etc", "outros", "other", "same", NULL };
+    /* no meio da linha: "{ ... }", "( … )", "// ..." */
+    static GRegex *meio = NULL;
+    if (!meio) meio = g_regex_new("[{(\\[]\\s*(?:\\.\\.\\.|\xe2\x80\xa6)\\s*[})\\]]|(?://|#|/\\*)\\s*(?:\\.\\.\\.|\xe2\x80\xa6)", G_REGEX_OPTIMIZE, 0, NULL);
+    if (meio && g_regex_match(meio, conteudo, 0, NULL)) return TRUE;
+    gboolean r = FALSE;
+    char **linhas = g_strsplit(conteudo, "\n", -1);
+    for (int i = 0; linhas[i] && !r; i++) {
+        char *t = g_strstrip(g_strdup(linhas[i]));
+        const char *q = t;
+        gboolean comentario = FALSE;
+        for (;;) {   /* marcadores de comentário e aberturas antes da reticência */
+            if (g_str_has_prefix(q, "//") || g_str_has_prefix(q, "/*") || g_str_has_prefix(q, "--")) { q += 2; comentario = TRUE; }
+            else if (g_str_has_prefix(q, "<!--")) { q += 4; comentario = TRUE; }
+            else if (*q == '#' || *q == '*') { q++; comentario = TRUE; }
+            else if (*q == ' ' || *q == '\t' || *q == '{' || *q == '(' || *q == '[') q++;
+            else break;
+        }
+        gsize lr = g_str_has_prefix(q, "...") ? 3 : g_str_has_prefix(q, "\xe2\x80\xa6") ? 3 : 0;
+        if (lr) {
+            const char *d = q + lr;
+            while (*d == '.' || *d == ' ' || *d == '\t') d++;
+            if (comentario || !*d || *d == '}' || *d == ')' || *d == ']' || *d == ';' || *d == ',')
+                r = TRUE;            /* "// ...", "...", "{ ... }" — não "...args" (spread/varargs) */
+            for (int k = 0; RESTO[k] && !r; k++)
+                if (!g_ascii_strncasecmp(d, RESTO[k], strlen(RESTO[k]))) r = TRUE;   /* "... resto do código" */
+        }
+        g_free(t);
+    }
+    g_strfreev(linhas);
+    return r;
+}
+
+static const char *const CONTRATO_CAMPOS[][5] = {
+    /* ação,               obrigatórios (além de acao/caminho)... */
+    { "criar",             "conteudo", NULL },
+    { "editar",            "procurar", "substituir", NULL },
+    { "substituir_funcao", "funcao", "conteudo", NULL },
+};
+#define CONTRATO_MAX_PROCURAR (16 * 1024)
+#define CONTRATO_MAX_FUNCAO_NOME 120
+
+char *coding_contrato_edicao(JsonObject *e, guint indice)
+{
+    if (!e) return g_strdup_printf("edição %u não é um objeto", indice);
+    const char *acao = jstr(e, "acao"), *caminho = jstr(e, "caminho");
+    if (!acao || !*acao) return g_strdup_printf("edição %u sem \"acao\" (criar | editar | substituir_funcao)", indice);
+    int k = -1;
+    for (guint i = 0; i < G_N_ELEMENTS(CONTRATO_CAMPOS); i++) if (!strcmp(acao, CONTRATO_CAMPOS[i][0])) k = (int)i;
+    if (k < 0) return g_strdup_printf("edição %u: ação \"%.40s\" desconhecida (criar | editar | substituir_funcao)", indice, acao);
+    if (!caminho || !*caminho || !texto_ok(caminho, 300)) return g_strdup_printf("edição %u (%s) sem \"caminho\" válido", indice, acao);
+    /* campos: só os da operação; os de outra operação ou desconhecidos são recusados */
+    GList *membros = json_object_get_members(e);
+    char *err = NULL;
+    for (GList *m = membros; m && !err; m = m->next) {
+        const char *nome = m->data;
+        gboolean ok = !strcmp(nome, "acao") || !strcmp(nome, "caminho");
+        for (int j = 1; j < 5 && CONTRATO_CAMPOS[k][j] && !ok; j++) ok = !strcmp(nome, CONTRATO_CAMPOS[k][j]);
+        if (!ok) err = g_strdup_printf("edição %u (%s %s): campo \"%.40s\" não pertence a \"%s\" (use só %s%s%s)", indice, acao, caminho, nome, acao,
+                                       CONTRATO_CAMPOS[k][1], CONTRATO_CAMPOS[k][2] ? " e " : "", CONTRATO_CAMPOS[k][2] ? CONTRATO_CAMPOS[k][2] : "");
+    }
+    g_list_free(membros);
+    if (err) return err;
+    for (int j = 1; j < 5 && CONTRATO_CAMPOS[k][j]; j++) {
+        const char *campo = CONTRATO_CAMPOS[k][j];
+        JsonNode *n = json_object_get_member(e, campo);
+        if (!n || JSON_NODE_TYPE(n) != JSON_NODE_VALUE || json_node_get_value_type(n) != G_TYPE_STRING)
+            return g_strdup_printf("edição %u (%s %s): falta \"%s\"%s", indice, acao, caminho, campo,
+                                   !strcmp(campo, "conteudo") && k == 2 ? " — a função INTEIRA reescrita, não só o nome" :
+                                   !strcmp(campo, "conteudo") ? " — o arquivo inteiro" : "");
+        const char *v = json_node_get_string(n);
+        gboolean pode_vazio = !strcmp(campo, "substituir"); /* apagar um trecho é legítimo */
+        if (!pode_vazio && !*v) return g_strdup_printf("edição %u (%s %s): \"%s\" vazio", indice, acao, caminho, campo);
+        gsize lim = !strcmp(campo, "funcao") ? CONTRATO_MAX_FUNCAO_NOME : !strcmp(campo, "procurar") ? CONTRATO_MAX_PROCURAR : CODING_MAX_BYTES_ARQUIVO;
+        if (strlen(v) > lim) return g_strdup_printf("edição %u (%s %s): \"%s\" passa do limite de %zu bytes", indice, acao, caminho, campo, lim);
+        if (!g_utf8_validate(v, -1, NULL)) return g_strdup_printf("edição %u (%s %s): \"%s\" não é UTF-8 válido", indice, acao, caminho, campo);
+        if (!strcmp(campo, "funcao") && (strchr(v, '(') || strchr(v, '{') || strchr(v, ' ') || strchr(v, '\n')))
+            return g_strdup_printf("edição %u (substituir_funcao %s): \"funcao\" é só o NOME (ex.: \"validar\"), e o código vai em \"conteudo\"", indice, caminho);
+        if ((!strcmp(campo, "conteudo") || !strcmp(campo, "substituir")) && coding_conteudo_abreviado(v))
+            return g_strdup_printf("edição %u (%s %s): \"%s\" está abreviado (\"...\") — escreva o código completo", indice, acao, caminho, campo);
+    }
+    return NULL;
+}
+
+char *coding_esquema_edicoes(guint max_edicoes)
+{
+    /* só recursos que a conversão esquema→gramática do llama.cpp (usada
+     * pelo Ollama e pelo llama-server) aplica: type, enum, required,
+     * additionalProperties:false, anyOf, minItems/maxItems, minLength/
+     * maxLength — conferido nos dois backends desta máquina */
+    if (max_edicoes < 1) max_edicoes = 1;
+    if (max_edicoes > 6) max_edicoes = 6;
+    return g_strdup_printf(
+        "{\"type\":\"object\",\"properties\":{\"edicoes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":%u,\"items\":{\"anyOf\":["
+        "{\"type\":\"object\",\"properties\":{\"acao\":{\"type\":\"string\",\"enum\":[\"criar\"]},\"caminho\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":300},"
+        "\"conteudo\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"acao\",\"caminho\",\"conteudo\"],\"additionalProperties\":false},"
+        "{\"type\":\"object\",\"properties\":{\"acao\":{\"type\":\"string\",\"enum\":[\"editar\"]},\"caminho\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":300},"
+        "\"procurar\":{\"type\":\"string\",\"minLength\":1},\"substituir\":{\"type\":\"string\"}},\"required\":[\"acao\",\"caminho\",\"procurar\",\"substituir\"],"
+        "\"additionalProperties\":false},"
+        "{\"type\":\"object\",\"properties\":{\"acao\":{\"type\":\"string\",\"enum\":[\"substituir_funcao\"]},\"caminho\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":300},"
+        "\"funcao\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":%d},\"conteudo\":{\"type\":\"string\",\"minLength\":1}},"
+        "\"required\":[\"acao\",\"caminho\",\"funcao\",\"conteudo\"],\"additionalProperties\":false}]}},"
+        "\"explicacao\":{\"type\":\"string\",\"maxLength\":300}},\"required\":[\"edicoes\",\"explicacao\"],\"additionalProperties\":false}",
+        max_edicoes, CONTRATO_MAX_FUNCAO_NOME);
+}
+
 GPtrArray *coding_aplicar_edicoes(const char *texto_modelo, GHashTable *lidos, GHashTable *shas, char **hash, char **explicacao, char **erro)
 {
     return coding_aplicar_edicoes_tarefa(texto_modelo, lidos, shas, NULL, hash, explicacao, erro);
+}
+
+/* "a, b, c" com os arquivos lidos, para a recusa dizer o que PODE ser editado */
+static char *lista_lidos(GHashTable *lidos)
+{
+    GList *ks = g_list_sort(g_hash_table_get_keys(lidos), (GCompareFunc)strcmp);
+    GString *o = g_string_new(NULL);
+    for (GList *it = ks; it; it = it->next) g_string_append_printf(o, "%s%s", o->len ? ", " : "", (char *)it->data);
+    g_list_free(ks);
+    return g_string_free(o, FALSE);
 }
 
 GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *lidos, GHashTable *shas, char **reescreviveis,
@@ -429,8 +606,8 @@ GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *l
     for (guint i = 0; i < json_array_get_length(ed) && i < 20; i++) {
         JsonNode *n = json_array_get_element(ed, i);
         JsonObject *e = JSON_NODE_TYPE(n) == JSON_NODE_OBJECT ? json_node_get_object(n) : NULL;
+        if ((*erro = coding_contrato_edicao(e, i + 1))) goto falha;
         const char *acao = jstr(e, "acao"), *caminho = jstr(e, "caminho");
-        if (!acao || !caminho || !texto_ok(caminho, 300)) { *erro = g_strdup_printf("edição %u sem acao/caminho válidos", i + 1); goto falha; }
         char *abs = proj_resolver(caminho, TRUE, FALSE, erro);
         if (!abs) goto falha;
         char *rel = proj_relativo(abs);
@@ -467,30 +644,11 @@ GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *l
             g_ptr_array_add(arqs, a);
         } else if (!strcmp(acao, "substituir_funcao")) {
             /* a função inteira reescrita: mais fácil para o modelo que copiar trechos exatos */
+            /* o contrato (coding_contrato_edicao) já garantiu nome e função completa */
             const char *nome = jstr(e, "funcao"), *conteudo = jstr(e, "conteudo");
-            char *inferido = NULL;
-            if ((!nome || !*nome) && conteudo) {
-                /* sem "funcao": o nome vem da PRIMEIRA declaração do próprio
-                 * conteúdo (def/function/func/fn nome) — determinístico; a
-                 * região ainda precisa existir no arquivo lido */
-                GRegex *rd = g_regex_new("^[ \\t]*(?:(?:public|private|protected|static|async|export|final|abstract)\\s+)*(?:def|function|func|fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
-                                         G_REGEX_MULTILINE, 0, NULL);
-                GMatchInfo *md = NULL;
-                if (g_regex_match(rd, conteudo, 0, &md)) inferido = g_match_info_fetch(md, 1);
-                g_match_info_free(md);
-                g_regex_unref(rd);
-            }
-            char nome_buf[128];
-            if (inferido) { g_strlcpy(nome_buf, inferido, sizeof nome_buf); g_free(inferido); nome = nome_buf; }
-            if (!nome || !*nome || !conteudo || strlen(conteudo) > CODING_MAX_BYTES_ARQUIVO || !g_utf8_validate(conteudo, -1, NULL)) {
-                *erro = g_strdup_printf("edição %u (substituir_funcao em %s): precisa de \"funcao\" e \"conteudo\" (a função inteira)", i + 1, rel); g_free(rel); goto falha;
-            }
-            if (strstr(conteudo, "...") || strstr(conteudo, "…")) {
-                *erro = g_strdup_printf("edição %u: o conteúdo da função tem \"...\" — escreva a função inteira, sem abreviar", i + 1); g_free(rel); goto falha;
-            }
             if (!a) {
                 const char *lido = g_hash_table_lookup(lidos, rel);
-                if (!lido) { *erro = g_strdup_printf("edição %u: '%s' não foi lido nesta tarefa — só edito o que li", i + 1, rel); g_free(rel); goto falha; }
+                if (!lido) { char *ll = lista_lidos(lidos); *erro = g_strdup_printf("edição %u: '%s' não foi lido nesta tarefa — só edito o que li; use o caminho de um destes: %s", i + 1, rel, *ll ? ll : "(nenhum)"); g_free(ll); g_free(rel); goto falha; }
                 a = g_new0(CodingArquivo, 1);
                 a->caminho = g_strdup(rel); a->conteudo = g_strdup(lido); a->antes = g_strdup(lido); a->existia = TRUE;
                 a->sha_lido = g_strdup(g_hash_table_lookup(shas, rel));
@@ -499,7 +657,7 @@ GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *l
             gsize ini = 0, fim = 0;
             char *novo_trim = g_strstrip(g_strdup(conteudo));
             gsize ni = 0, nf = 0;
-            if (!regiao_da_funcao(a->conteudo, nome, &ini, &fim) && regiao_python(a->conteudo, nome, &ini, &fim)) {
+            if (!regiao_funcao_js(a->conteudo, nome, &ini, &fim) && regiao_python(a->conteudo, nome, &ini, &fim)) {
                 /* Python: o def novo (recuado como o antigo) no lugar do antigo */
                 if (!regiao_python(novo_trim, nome, &ni, &nf)) {
                     *erro = g_strdup_printf("edição %u: o conteúdo novo precisa ser a função Python '%s' inteira (def %s(...):)", i + 1, nome, nome);
@@ -526,10 +684,10 @@ GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *l
                 g_free(rel);
                 continue;
             }
-            if (!regiao_da_funcao(a->conteudo, nome, &ini, &fim)) {
+            if (!regiao_funcao_js(a->conteudo, nome, &ini, &fim)) {
                 *erro = g_strdup_printf("edição %u: não achei uma (e só uma) função '%s' em %s", i + 1, nome, rel); g_free(novo_trim); g_free(rel); goto falha;
             }
-            if (!regiao_da_funcao(novo_trim, nome, &ni, &nf) || !chaves_balanceadas(novo_trim)) {
+            if (!conteudo_e_funcao(novo_trim, nome)) {
                 *erro = g_strdup_printf("edição %u: o conteúdo novo precisa ser a função '%s' inteira, com as chaves balanceadas", i + 1, nome); g_free(novo_trim); g_free(rel); goto falha;
             }
             /* a declaração nova entra no lugar da antiga, mantendo o recuo
@@ -553,7 +711,9 @@ GPtrArray *coding_aplicar_edicoes_tarefa(const char *texto_modelo, GHashTable *l
             if (!a) {
                 const char *lido = g_hash_table_lookup(lidos, rel);
                 if (!lido) {
-                    *erro = g_strdup_printf("edição %u: '%s' não foi lido nesta tarefa — só edito o que li (para não gravar por cima do que não vi)", i + 1, rel);
+                    char *ll = lista_lidos(lidos);
+                    *erro = g_strdup_printf("edição %u: '%s' não foi lido nesta tarefa — só edito o que li (para não gravar por cima do que não vi); use o caminho de um destes: %s", i + 1, rel, *ll ? ll : "(nenhum)");
+                    g_free(ll);
                     g_free(rel); goto falha;
                 }
                 a = g_new0(CodingArquivo, 1);
@@ -862,21 +1022,66 @@ char *coding_achados_sql(const char *arquivo, const char *conteudo, gint64 linha
 /* ------------------------------------------- receita: SQL com bind */
 
 /* fim do bloco { ... } que começa em 'ini' (respeita strings e comentários) */
+/* fim de um literal de regex que começa em '/', ou NULL se não parece um (quebra de linha antes de fechar) */
+static const char *fim_de_regex(const char *p)
+{
+    gboolean classe = FALSE;
+    for (p++; *p && *p != '\n'; p++) {
+        if (*p == '\\' && p[1]) { p++; continue; }
+        if (*p == '[') classe = TRUE;
+        else if (*p == ']') classe = FALSE;
+        else if (*p == '/' && !classe) return p + 1;
+    }
+    return NULL;
+}
+
+/* "return /x/", "typeof /x/"...: a palavra antes da '/' pede um valor, então a '/' abre regex */
+static gboolean palavra_antes_de_regex(const char *ini, const char *p)
+{
+    static const char *const KW[] = { "return", "typeof", "case", "in", "of", "yield", "await", "throw", "delete", "void", "else", "do", "new", NULL };
+    const char *f = p;
+    while (f > ini && g_ascii_isspace(f[-1])) f--;
+    const char *i = f;
+    while (i > ini && (g_ascii_isalnum(i[-1]) || i[-1] == '_' || i[-1] == '$')) i--;
+    for (int k = 0; KW[k]; k++) if ((gsize)(f - i) == strlen(KW[k]) && !strncmp(i, KW[k], f - i)) return TRUE;
+    return FALSE;
+}
+
 static const char *fim_do_bloco(const char *ini)
 {
     int prof = 0;
+    char ant = 0; /* último caractere útil (fora de espaço): distingue "/regex/" de divisão */
     for (const char *p = ini; *p; p++) {
         if (*p == '"' || *p == '\'') {
             char q = *p;
             for (p++; *p && *p != q; p++) if (*p == '\\' && p[1]) p++;
             if (!*p) return NULL;
+            ant = 'x';
+            continue;
+        }
+        if (*p == '`') { /* template string JS/TS: ${ ... } aninhado conta chaves e strings próprias */
+            for (p++; *p && *p != '`'; p++) {
+                if (*p == '\\' && p[1]) { p++; continue; }
+                if (*p == '$' && p[1] == '{') {
+                    const char *f = fim_do_bloco(p + 1);
+                    if (!f) return NULL;
+                    p = f - 1;
+                }
+            }
+            if (!*p) return NULL;
+            ant = 'x';
             continue;
         }
         if (*p == '/' && p[1] == '/') { while (*p && *p != '\n') p++; if (!*p) return NULL; continue; }
         if (*p == '#') { while (*p && *p != '\n') p++; if (!*p) return NULL; continue; }
         if (*p == '/' && p[1] == '*') { const char *f = strstr(p + 2, "*/"); if (!f) return NULL; p = f + 1; continue; }
+        if (*p == '/' && (ant == 0 || strchr("(,=:[!&|?{};", ant) || palavra_antes_de_regex(ini, p))) { /* literal de regex */
+            const char *f = fim_de_regex(p);
+            if (f) { p = f - 1; ant = 'x'; continue; }
+        }
         if (*p == '{') prof++;
         else if (*p == '}' && --prof == 0) return p + 1;
+        if (!g_ascii_isspace(*p)) ant = *p;
     }
     return NULL;
 }
@@ -1146,12 +1351,23 @@ char *coding_prompt_edicoes(const char *pedido, GPtrArray *criterios, const char
         anexar_seguro(o, erro_anterior);
         g_string_append_c(o, '\n');
     }
+    /* exemplo com caminho REAL (o primeiro lido): modelo pequeno copia marcador como "arquivo lido" */
+    char *exemplo = NULL;
+    {
+        GList *ks = g_list_sort(g_hash_table_get_keys(lidos), (GCompareFunc)strcmp);
+        for (GList *it = ks; it && !exemplo; it = it->next) if (!coding_caminho_de_teste(it->data)) exemplo = g_strdup(it->data);
+        if (!exemplo && ks) exemplo = g_strdup(ks->data);
+        g_list_free(ks);
+    }
+    char *ex_json = json_texto(exemplo ? exemplo : "caminho/do/arquivo.ext");
     g_string_append(o, "----- fim dos dados -----\n\n"
-                       "Responda SÓ com JSON:\n"
-                       "{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":\"arquivo lido\",\"funcao\":\"nome\",\"conteudo\":\"a função INTEIRA reescrita\"},"
-                       "{\"acao\":\"editar\",\"caminho\":\"arquivo lido\",\"procurar\":\"trecho EXATO e único do arquivo\",\"substituir\":\"novo trecho\"},"
-                       "{\"acao\":\"criar\",\"caminho\":\"arquivo novo\",\"conteudo\":\"conteúdo completo\"}],\"explicacao\":\"uma frase\"}\n"
-                       "- para mudar uma função, prefira \"substituir_funcao\" com a função inteira (declaração, corpo e chaves)\n"
+                       "Responda SÓ com JSON (os formatos abaixo; o \"caminho\" é o de um arquivo lido, relativo ao projeto, como em \"arquivos lidos\"):\n");
+    g_string_append_printf(o, "{\"edicoes\":[{\"acao\":\"substituir_funcao\",\"caminho\":%s,\"funcao\":\"nome\",\"conteudo\":\"a função INTEIRA reescrita\"},"
+                              "{\"acao\":\"editar\",\"caminho\":%s,\"procurar\":\"trecho EXATO e único do arquivo\",\"substituir\":\"novo trecho\"},"
+                              "{\"acao\":\"criar\",\"caminho\":\"caminho/do/arquivo/novo.ext\",\"conteudo\":\"conteúdo completo\"}],\"explicacao\":\"uma frase\"}\n",
+                           ex_json, ex_json);
+    g_free(ex_json); g_free(exemplo);
+    g_string_append(o, "- para mudar uma função, prefira \"substituir_funcao\" com a função inteira (declaração, corpo e chaves)\n"
                        "- \"editar\"/\"substituir_funcao\" só em arquivos que aparecem acima em \"arquivos lidos\"; \"criar\" só para arquivos que não existem\n"
                        "- NUNCA abrevie com \"...\": escreva o código completo\n");
     return g_string_free(o, FALSE);
@@ -2088,8 +2304,174 @@ static void buscar_testes(BuscaTestes *b, const char *abs, int prof)
     g_dir_close(d);
 }
 
+/* família de linguagem pela extensão (TS e JS juntos: projetos misturam) */
+const char *coding_linguagem(const char *rel)
+{
+    static const struct { const char *ext, *ling; } M[] = {
+        { ".c", "c" }, { ".h", "c" }, { ".cc", "c++" }, { ".cpp", "c++" }, { ".cxx", "c++" }, { ".hpp", "c++" }, { ".hh", "c++" },
+        { ".py", "python" }, { ".js", "js/ts" }, { ".mjs", "js/ts" }, { ".cjs", "js/ts" }, { ".jsx", "js/ts" }, { ".ts", "js/ts" },
+        { ".tsx", "js/ts" }, { ".php", "php" }, { ".cs", "c#" }, { ".java", "java" }, { ".kt", "kotlin" }, { ".go", "go" },
+        { ".rs", "rust" }, { ".rb", "ruby" }, { ".sh", "shell" },
+    };
+    const char *p = rel ? strrchr(rel, '.') : NULL;
+    if (!p || strchr(p, '/')) return NULL;
+    for (guint i = 0; i < G_N_ELEMENTS(M); i++) if (!g_ascii_strcasecmp(p, M[i].ext)) return M[i].ling;
+    return NULL;
+}
+
+/* linguagens que o PEDIDO indica: extensões dos caminhos citados e nomes
+ * de linguagem/ferramenta ("PHPUnit", "pytest", "vitest", "Unity"...) */
+char **coding_linguagens_do_pedido(const char *pedido)
+{
+    GPtrArray *v = g_ptr_array_new();
+    char **cit = intencao_caminhos(pedido);
+    for (int i = 0; cit[i]; i++) {
+        const char *l = coding_linguagem(cit[i]);
+        gboolean ja = FALSE;
+        for (guint k = 0; l && k < v->len; k++) if (!strcmp(g_ptr_array_index(v, k), l)) ja = TRUE;
+        if (l && !ja) g_ptr_array_add(v, (gpointer)l);
+    }
+    g_strfreev(cit);
+    static const struct { const char *palavra, *ling; } P[] = {
+        { "php", "php" }, { "phpunit", "php" }, { "laravel", "php" }, { "python", "python" }, { "pytest", "python" }, { "unittest", "python" },
+        { "typescript", "js/ts" }, { "javascript", "js/ts" }, { "vitest", "js/ts" }, { "jest", "js/ts" }, { "nestjs", "js/ts" }, { "node", "js/ts" },
+        { "c#", "c#" }, { "csharp", "c#" }, { "unity", "c#" }, { "golang", "go" }, { "rust", "rust" }, { "java", "java" },
+    };
+    char *t0 = sem_acento(pedido ? pedido : "");
+    char *t = g_ascii_strdown(t0, -1);
+    g_free(t0);
+    for (guint i = 0; i < G_N_ELEMENTS(P); i++) {
+        const char *q = strstr(t, P[i].palavra);
+        gsize n = strlen(P[i].palavra);
+        gboolean palavra = q && (q == t || !g_ascii_isalnum(q[-1])) && !g_ascii_isalnum(q[n]);
+        gboolean ja = FALSE;
+        for (guint k = 0; k < v->len; k++) if (!strcmp(g_ptr_array_index(v, k), P[i].ling)) ja = TRUE;
+        if (palavra && !ja) g_ptr_array_add(v, (gpointer)P[i].ling);
+    }
+    g_free(t);
+    char **r = g_new0(char *, v->len + 1);
+    for (guint i = 0; i < v->len; i++) r[i] = g_strdup(g_ptr_array_index(v, i));
+    g_ptr_array_free(v, TRUE);
+    return r;
+}
+
+/* palavras do pedido que identificam o ASSUNTO (≥ 6 letras, radical de 5),
+ * sem as genéricas de qualquer pedido de código */
+static GPtrArray *radicais_assunto(const char *pedido)
+{
+    static const char *const GEN[] = { "teste", "proje", "codig", "arqui", "funca", "unita", "migra", "valid", "corri", "alter", "adici",
+                                       "crian", "garan", "segui", "usand", "manten", "sempr", "quand", "atual", "exist", "deven", "possi",
+                                       "compa", "probl", "simpl", "melho", "dados", "reais", "sinte", "fixtu", NULL };
+    GPtrArray *v = g_ptr_array_new_with_free_func(g_free);
+    char *t0 = sem_acento(pedido ? pedido : "");
+    char *t = g_ascii_strdown(t0, -1);
+    g_free(t0);
+    char **pal = g_regex_split_simple("[^a-z0-9_]+", t, 0, 0);
+    for (int i = 0; pal[i]; i++) {
+        if (strlen(pal[i]) < 6) continue;
+        char *r = g_strndup(pal[i], 5);
+        gboolean gen = FALSE;
+        for (int k = 0; GEN[k] && !gen; k++) gen = !strncmp(r, GEN[k], 5);
+        for (guint k = 0; k < v->len && !gen; k++) gen = !strcmp(g_ptr_array_index(v, k), r);
+        if (gen) g_free(r); else g_ptr_array_add(v, r);
+    }
+    g_strfreev(pal);
+    g_free(t);
+    return v;
+}
+
+gboolean coding_contexto_relevante(const char *pedido, GHashTable *lidos, char **motivo)
+{
+    GPtrArray *rad = radicais_assunto(pedido);
+    if (rad->len < 2) {
+        /* uma palavra só (ou nenhuma) não é sinal suficiente: a relação pode
+         * ser semântica ("conta de adição" ↔ soma.c), que esta regra não vê */
+        g_ptr_array_unref(rad);
+        if (motivo) *motivo = g_strdup("o pedido tem poucas palavras de assunto para conferir (aceito a escolha, conferida contra a lista)");
+        return TRUE;
+    }
+    gboolean ok = FALSE;
+    GString *m = g_string_new(NULL);
+    GHashTableIter it;
+    gpointer kk, vv;
+    g_hash_table_iter_init(&it, lidos);
+    while (g_hash_table_iter_next(&it, &kk, &vv) && !ok) {
+        char *a0 = sem_acento(kk), *c0 = sem_acento(vv ? vv : "");
+        char *cam = g_ascii_strdown(a0, -1), *cont = g_ascii_strdown(c0, -1);
+        guint no_cont = 0;
+        for (guint i = 0; i < rad->len && !ok; i++) {
+            const char *r = g_ptr_array_index(rad, i);
+            if (strstr(cam, r)) { ok = TRUE; g_string_printf(m, "%s tem \"%s\" no caminho", (char *)kk, r); }
+            else if (strstr(cont, r)) no_cont++;
+        }
+        if (!ok && no_cont >= 2) { ok = TRUE; g_string_printf(m, "%s cita %u palavras do assunto do pedido", (char *)kk, no_cont); }
+        g_free(a0); g_free(c0); g_free(cam); g_free(cont);
+    }
+    if (!ok) {
+        g_string_assign(m, "nenhum arquivo lido tem palavras do assunto do pedido (");
+        for (guint i = 0; i < rad->len && i < 6; i++) g_string_append_printf(m, "%s%s…", i ? ", " : "", (char *)g_ptr_array_index(rad, i));
+        g_string_append(m, ") no caminho nem no conteúdo");
+    }
+    g_ptr_array_unref(rad);
+    if (motivo) *motivo = g_string_free(m, FALSE); else g_string_free(m, TRUE);
+    return ok;
+}
+
+/* Busca determinística por assunto (antes de perguntar ao modelo): arquivos de
+ * código-fonte (não de teste, não proibidos, na linguagem do pedido) cujo
+ * caminho+conteúdo tenham pelo menos 2 palavras de assunto DISTINTAS do pedido. */
+typedef struct { const char *raiz; GPtrArray *rad; char **proib; char **langs; GPtrArray *achados; GPtrArray *pontos; GPtrArray *motivos; guint vistos; } BuscaAssunto;
+
+static void buscar_assunto(BuscaAssunto *b, const char *abs, int prof)
+{
+    if (prof > 8 || b->vistos > 3000) return;
+    GDir *d = g_dir_open(abs, 0, NULL);
+    if (!d) return;
+    const char *nm;
+    while ((nm = g_dir_read_name(d)) && b->vistos <= 3000) {
+        if (nm[0] == '.' || g_strv_contains(DIRS_IGNORADOS, nm)) continue;
+        char *f = g_build_filename(abs, nm, NULL);
+        if (g_file_test(f, G_FILE_TEST_IS_SYMLINK)) { g_free(f); continue; }
+        if (g_file_test(f, G_FILE_TEST_IS_DIR)) { buscar_assunto(b, f, prof + 1); g_free(f); continue; }
+        const char *rel = f + strlen(b->raiz) + 1;
+        const char *lg = coding_linguagem(rel);
+        if (!lg || e_teste(rel) || !coding_arquivo_de_contexto(rel) || coding_caminho_proibido(b->proib, rel)
+            || (b->langs[0] && !g_strv_contains((const char *const *)b->langs, lg))) { g_free(f); continue; }
+        b->vistos++;
+        gchar *txt = NULL; gsize n = 0;
+        struct stat st;
+        if (!stat(f, &st) && st.st_size > 0 && st.st_size <= 256 * 1024 && g_file_get_contents(f, &txt, &n, NULL)) {
+            char *sa = sem_acento(txt);
+            char *baixo = g_ascii_strdown(sa, -1);
+            char *cam = g_ascii_strdown(rel, -1);
+            guint distintos = 0, total = 0;
+            GString *quais = g_string_new(NULL);
+            for (guint i = 0; i < b->rad->len; i++) {
+                const char *r = g_ptr_array_index(b->rad, i);
+                guint c = 0;
+                for (const char *q = baixo; (q = strstr(q, r)); q += 5) if (++c >= 50) break;
+                if (strstr(cam, r)) c += 3;
+                if (c) { distintos++; total += c; g_string_append_printf(quais, "%s%s", quais->len ? ", " : "", r); }
+            }
+            if (distintos >= 2) {
+                guint pos = b->achados->len;
+                for (guint i = 0; i < b->pontos->len; i++)
+                    if (GPOINTER_TO_UINT(g_ptr_array_index(b->pontos, i)) < distintos * 1000 + total) { pos = i; break; }
+                g_ptr_array_insert(b->achados, pos, g_strdup(rel));
+                g_ptr_array_insert(b->pontos, pos, GUINT_TO_POINTER(distintos * 1000 + total));
+                g_ptr_array_insert(b->motivos, pos, g_strdup_printf("%s tem %u palavras do assunto do pedido (%s)", rel, distintos, quais->str));
+            }
+            g_string_free(quais, TRUE);
+            g_free(sa); g_free(baixo); g_free(cam); g_free(txt);
+        }
+        g_free(f);
+    }
+    g_dir_close(d);
+}
+
 void coding_selecionar_contexto(const char *raiz, const char *pedido, char **definem, char ***ler, char ***a_criar, char **notas)
 {
+    char **langs = coding_linguagens_do_pedido(pedido);
     GPtrArray *l = g_ptr_array_new(), *cr = g_ptr_array_new();
     GString *n = g_string_new(NULL);
     char **proib = coding_caminhos_proibidos(pedido);
@@ -2098,8 +2480,19 @@ void coding_selecionar_contexto(const char *raiz, const char *pedido, char **def
         g_string_append_printf(n, "o pedido proíbe tocar em: %s — esses caminhos não são lidos nem alterados\n", j);
         g_free(j);
     }
-    for (int i = 0; definem && definem[i] && l->len < CODING_MAX_ARQUIVOS_LIDOS; i++)
-        if (!coding_caminho_proibido(proib, definem[i])) add_unico(l, definem[i]);
+    for (int i = 0; definem && definem[i] && l->len < CODING_MAX_ARQUIVOS_LIDOS; i++) {
+        if (coding_caminho_proibido(proib, definem[i])) continue;
+        /* o pedido indica a linguagem (caminho citado, "PHPUnit"...): quem
+         * define o mesmo nome em OUTRA linguagem não é o código do pedido */
+        const char *lg = coding_linguagem(definem[i]);
+        if (langs[0] && lg && !g_strv_contains((const char *const *)langs, lg)) {
+            char *j = g_strjoinv(", ", langs);
+            g_string_append_printf(n, "%s define um nome citado, mas é %s e o pedido é sobre %s: não leio\n", definem[i], lg, j);
+            g_free(j);
+            continue;
+        }
+        add_unico(l, definem[i]);
+    }
     char **cit = intencao_caminhos(pedido);
     for (int i = 0; cit[i]; i++) {
         const char *c = cit[i];
@@ -2117,6 +2510,17 @@ void coding_selecionar_contexto(const char *raiz, const char *pedido, char **def
         g_free(abs); g_free(e);
     }
     g_strfreev(cit);
+    /* nada citado nem definido: busca por assunto no próprio projeto (regra, não modelo) */
+    if (raiz && !l->len && !cr->len) {
+        BuscaAssunto b = { raiz, radicais_assunto(pedido), proib, langs, g_ptr_array_new_with_free_func(g_free), g_ptr_array_new(),
+                           g_ptr_array_new_with_free_func(g_free), 0 };
+        if (b.rad->len >= 2) buscar_assunto(&b, raiz, 0);
+        for (guint i = 0; i < b.achados->len && i < 3; i++) {
+            add_unico(l, g_ptr_array_index(b.achados, i));
+            g_string_append_printf(n, "%s: leio\n", (char *)g_ptr_array_index(b.motivos, i));
+        }
+        g_ptr_array_unref(b.rad); g_ptr_array_unref(b.achados); g_ptr_array_unref(b.pontos); g_ptr_array_unref(b.motivos);
+    }
     /* testes que já existem para os arquivos de código escolhidos */
     if (raiz && l->len) {
         GPtrArray *rad = g_ptr_array_new_with_free_func(g_free);
@@ -2135,6 +2539,7 @@ void coding_selecionar_contexto(const char *raiz, const char *pedido, char **def
     }
     for (guint i = 0; i < cr->len; i++) g_string_append_printf(n, "%s não existe: é um arquivo a criar\n", (char *)g_ptr_array_index(cr, i));
     g_strfreev(proib);
+    g_strfreev(langs);
     g_ptr_array_add(l, NULL);
     g_ptr_array_add(cr, NULL);
     *ler = (char **)g_ptr_array_free(l, FALSE);
@@ -2178,6 +2583,34 @@ static char **literais_exigidos(const char *pedido)
     return (char **)g_ptr_array_free(v, FALSE);
 }
 
+/* alvo citado como "Em src/x.ts, faça ..." / "No arquivo x.py, ...": arquivo de código (não de teste) que o pedido manda alterar */
+static char **alvos_do_pedido(const char *pedido)
+{
+    GPtrArray *v = g_ptr_array_new();
+    GRegex *re = g_regex_new("(?:^|[.!?]\\s+)(?:Em|No arquivo|No|Na)\\s+`?([A-Za-z0-9_./-]+\\.[A-Za-z0-9]+)`?\\s*[,:]", 0, 0, NULL);
+    GMatchInfo *mi = NULL;
+    g_regex_match(re, pedido ? pedido : "", 0, &mi);
+    while (g_match_info_matches(mi) && v->len < 3) {
+        char *x = g_match_info_fetch(mi, 1);
+        if (x && *x != '/' && !strstr(x, "..") && coding_arquivo_de_contexto(x) && !coding_caminho_de_teste(x)) g_ptr_array_add(v, x);
+        else g_free(x);
+        g_match_info_next(mi, NULL);
+    }
+    g_match_info_free(mi);
+    g_regex_unref(re);
+    g_ptr_array_add(v, NULL);
+    return (char **)g_ptr_array_free(v, FALSE);
+}
+
+/* O pedido manda acrescentar/criar/escrever um teste ("Acrescente ... um teste ..."). */
+static gboolean pedido_exige_teste(const char *pedido)
+{
+    static GRegex *re = NULL;
+    if (!re) re = g_regex_new("\\b(acrescent\\w*|adicion\\w*|cri[ae]\\w*|escrev\\w*|inclu\\w*)\\b(?:(?!\\.\\s)[^\\n]){0,120}?\\b(teste|testes|test)\\b",
+                              G_REGEX_CASELESS, 0, NULL);
+    return re && g_regex_match(re, pedido ? pedido : "", 0, NULL);
+}
+
 CodingPlano *coding_plano_do_pedido(const char *pedido, char **a_criar, const char *validacao)
 {
     CodingPlano *p = g_new0(CodingPlano, 1);
@@ -2200,6 +2633,17 @@ CodingPlano *coding_plano_do_pedido(const char *pedido, char **a_criar, const ch
     g_strfreev(lit);
     if (coding_pedido_so_testes(pedido))
         g_ptr_array_add(p->criterios, criterio_novo("só arquivos de teste foram alterados (o pedido proíbe mexer no código de produção)", "so_testes", NULL, NULL));
+    {
+        char **alvos = alvos_do_pedido(pedido);
+        for (int i = 0; alvos[i]; i++) {
+            char *dc = g_strdup_printf("%s, o arquivo que o pedido manda alterar, foi alterado", alvos[i]);
+            g_ptr_array_add(p->criterios, criterio_novo(dc, "tocou_alvo", alvos[i], NULL));
+            g_free(dc);
+        }
+        g_strfreev(alvos);
+    }
+    if (!coding_pedido_so_testes(pedido) && pedido_exige_teste(pedido))
+        g_ptr_array_add(p->criterios, criterio_novo("um arquivo de teste foi alterado ou criado (o pedido manda acrescentar um teste)", "tocou_teste", NULL, NULL));
     char **proib = coding_caminhos_proibidos(pedido);
     if (proib[0]) {
         char *j = g_strjoinv(", ", proib), *t = g_strjoinv("\n", proib);
@@ -2284,7 +2728,7 @@ void coding_filtrar_criterios_ex(CodingPlano *p, const char *pedido, char **tamb
         CodingCriterio *c = g_ptr_array_index(p->criterios, i);
         char *motivo = NULL;
         gboolean do_runtime = c->verificacao && (!strcmp(c->verificacao, "existe") || !strcmp(c->verificacao, "no_diff") ||
-                                                 !strcmp(c->verificacao, "so_testes") || !strcmp(c->verificacao, "intocado"));
+                                                 !strcmp(c->verificacao, "so_testes") || !strcmp(c->verificacao, "tocou_teste") || !strcmp(c->verificacao, "tocou_alvo") || !strcmp(c->verificacao, "intocado"));
         if (do_runtime) { i++; continue; }
         if (c->caminho && coding_caminho_proibido(proib, c->caminho))
             motivo = g_strdup_printf("viola uma proibição do pedido (%s)", c->caminho);
@@ -2356,19 +2800,28 @@ void coding_mesclar_criterios(CodingPlano *destino, CodingPlano *do_modelo)
 }
 
 /* linhas acrescentadas ("+", sem "+++") de um diff unificado contêm 'x'? */
+static guint ocorrencias_sub(const char *t, const char *x)
+{
+    guint n = 0;
+    for (const char *p = t; (p = strstr(p, x)); p += strlen(x)) n++;
+    return n;
+}
+
+/* O literal só conta se o diff o ACRESCENTA de verdade: ocorrências em linhas
+ * "+" menos ocorrências em linhas "-" precisa ser positivo. Linha só
+ * reformatada (sai e entra com o mesmo texto) não prova nada. */
 static gboolean no_diff(const char *diff, const char *x, gboolean *tem_linhas)
 {
     *tem_linhas = FALSE;
-    if (!diff || !x) return FALSE;
+    if (!diff || !x || !*x) return FALSE;
     char **l = g_strsplit(diff, "\n", -1);
-    gboolean r = FALSE;
-    for (int i = 0; l[i] && !r; i++) {
-        if (l[i][0] != '+' || g_str_has_prefix(l[i], "+++")) continue;
-        *tem_linhas = TRUE;
-        if (strstr(l[i] + 1, x)) r = TRUE;
+    guint mais = 0, menos = 0;
+    for (int i = 0; l[i]; i++) {
+        if (l[i][0] == '+' && !g_str_has_prefix(l[i], "+++")) { *tem_linhas = TRUE; mais += ocorrencias_sub(l[i] + 1, x); }
+        else if (l[i][0] == '-' && !g_str_has_prefix(l[i], "---")) menos += ocorrencias_sub(l[i] + 1, x);
     }
     g_strfreev(l);
-    return r;
+    return mais > menos;
 }
 
 gboolean coding_conferir_criterio_ex(const CodingCriterio *c, gboolean validacao_passou, char **tocados, char **lidos, const char *diff, char **como)
@@ -2387,6 +2840,18 @@ gboolean coding_conferir_criterio_ex(const CodingCriterio *c, gboolean validacao
             if (!coding_caminho_de_teste(tocados[i])) { *como = g_strdup_printf("%s não é arquivo de teste e foi alterado", tocados[i]); return FALSE; }
         *como = g_strdup("todos os arquivos alterados são de teste");
         return TRUE;
+    }
+    if (!strcmp(v, "tocou_alvo")) {
+        for (int i = 0; tocados && tocados[i]; i++)
+            if (!strcmp(tocados[i], c->caminho)) { *como = g_strdup_printf("%s foi gravado", c->caminho); return TRUE; }
+        *como = g_strdup_printf("%s foi citado como alvo, mas não foi alterado", c->caminho);
+        return FALSE;
+    }
+    if (!strcmp(v, "tocou_teste")) {
+        for (int i = 0; tocados && tocados[i]; i++)
+            if (coding_caminho_de_teste(tocados[i])) { *como = g_strdup_printf("%s é arquivo de teste e foi gravado", tocados[i]); return TRUE; }
+        *como = g_strdup("nenhum arquivo de teste foi gravado");
+        return FALSE;
     }
     if (!strcmp(v, "intocado")) {
         char **proib = g_strsplit(c->texto ? c->texto : "", "\n", -1);
@@ -2415,7 +2880,8 @@ gboolean coding_conferir_criterio_ex(const CodingCriterio *c, gboolean validacao
                 g_free(t); g_free(sha); g_free(e);
             }
         }
-        *como = ok ? g_strdup_printf("\"%s\" está nas linhas gravadas", c->texto) : g_strdup_printf("\"%s\" NÃO aparece no que foi gravado", c->texto);
+        *como = ok ? g_strdup_printf("\"%s\" é acrescentado pelo diff (mais ocorrências nas linhas novas que nas removidas)", c->texto)
+                   : g_strdup_printf("\"%s\" NÃO é acrescentado pelo diff (ausente, ou só reformatado/movido)", c->texto);
         return ok;
     }
     return coding_conferir_criterio(c, validacao_passou, como);

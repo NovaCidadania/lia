@@ -5,6 +5,7 @@ produção. Modos controlados por variável de ambiente OLLAMA_FAKE_MODO:
 
   normal           -- streaming NDJSON normal, chunked, termina com done:true
   truncado         -- fecha a conexão no meio do streaming, sem 'done:true'
+  limite           -- streaming normal; o objeto final diz done_reason "length" (num_predict)
   json_quebrado    -- envia uma linha que não é JSON válido
   http_erro        -- responde 500
   lento            -- atrasa cada linha (para testar timeout de inatividade)
@@ -108,6 +109,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             linhas = [{"response": texto[:meio], "done": False}, {"response": texto[meio:], "done": False},
                       {"response": "", "done": True}]
 
+        if MODO == "ecoar_opcoes":   # devolve as opções recebidas (num_ctx, temperatura, semente)
+            txt = json.dumps(pedido.get("options", {}), sort_keys=True)
+            linhas = [{"response": txt, "done": False}, {"response": "", "done": True, "done_reason": "stop"}]
+        if MODO == "limite":
+            linhas[-1] = {"response": "", "done": True, "done_reason": "length", "eval_count": 7, "prompt_eval_count": 3}
+        elif MODO == "normal":
+            linhas[-1] = dict(linhas[-1], done_reason="stop", eval_count=2)
         for i, obj in enumerate(linhas):
             if MODO == "truncado" and i == len(linhas) - 1:
                 break  # nunca envia a linha final com done:true

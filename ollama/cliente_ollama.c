@@ -44,6 +44,7 @@ struct OllamaRequisicao {
 
     void (*progresso_cb)(gpointer ctx, gint64 tokens);
     gpointer progresso_ctx;
+    OllamaFim *fim;
     gint64 fragmentos;
     gint64 ultimo_progresso_us;
 
@@ -80,6 +81,9 @@ OllamaConfig *ollama_config_novo(const char *host_ou_null, int porta, const char
      * prompt em 56 s, e prompts maiores passavam de 60 s). Finito sempre. */
     cfg->timeout_ms = 240000;
     cfg->limite_resposta_bytes = 1024 * 1024; /* 1 MiB — suficiente para uma resposta de chat */
+    cfg->temperatura = 0.0;
+    cfg->semente = -1;
+    cfg->num_ctx = 8192;
     return cfg;
 }
 
@@ -143,6 +147,10 @@ char *ollama_config_validar(const OllamaConfig *cfg)
     g_free(erro_resolucao); /* NULL em sucesso; g_free(NULL) é inofensivo */
     if (cfg->porta < OLLAMA_PORTA_MIN || cfg->porta > OLLAMA_PORTA_MAX)
         return g_strdup_printf("porta inválida: %d (esperado %d..%d)", cfg->porta, OLLAMA_PORTA_MIN, OLLAMA_PORTA_MAX);
+    if (!(cfg->temperatura >= 0.0 && cfg->temperatura <= 2.0))
+        return g_strdup_printf("temperatura inválida: %g (esperado 0..2)", cfg->temperatura);
+    if (cfg->num_ctx < 512 || cfg->num_ctx > 131072)
+        return g_strdup_printf("num_ctx inválido: %d (esperado 512..131072)", cfg->num_ctx);
     if (cfg->timeout_ms < OLLAMA_TIMEOUT_MS_MIN || cfg->timeout_ms > OLLAMA_TIMEOUT_MS_MAX)
         return g_strdup_printf("timeout_ms inválido: %d (esperado %d..%d)",
                                 cfg->timeout_ms, OLLAMA_TIMEOUT_MS_MIN, OLLAMA_TIMEOUT_MS_MAX);
@@ -240,6 +248,14 @@ static gboolean processar_linhas_ndjson(OllamaRequisicao *req)
                     " ms · geração %" G_GINT64_FORMAT " tokens em %" G_GINT64_FORMAT " ms (%.1f tokens/s)\n",
                     NS_MS("load_duration"), QTD("prompt_eval_count"), NS_MS("prompt_eval_duration"), ev, evd,
                     ev > 0 && evd > 0 ? (double)ev * 1000.0 / (double)evd : 0.0);
+            if (req->fim) {
+                req->fim->tokens_gerados = ev;
+                req->fim->tokens_prompt = QTD("prompt_eval_count");
+                const char *dr = json_object_has_member(obj, "done_reason") &&
+                                 JSON_NODE_TYPE(json_object_get_member(obj, "done_reason")) == JSON_NODE_VALUE
+                                 ? json_object_get_string_member(obj, "done_reason") : NULL;
+                g_strlcpy(req->fim->motivo, dr ? dr : "", sizeof req->fim->motivo);
+            }
             #undef NS_MS
             #undef QTD
         }
@@ -528,7 +544,10 @@ static void ao_conectar(GObject *origem, GAsyncResult *res, gpointer dados)
     /* temperatura 0: mesma pergunta, mesma escolha de ferramenta — e menos
      * margem para o modelo "enfeitar" números num resumo. */
     json_builder_set_member_name(b, "temperature");
-    json_builder_add_int_value(b, 0);
+    json_builder_add_double_value(b, req->cfg->temperatura);
+    if (req->cfg->semente >= 0) { json_builder_set_member_name(b, "seed"); json_builder_add_int_value(b, req->cfg->semente); }
+    json_builder_set_member_name(b, "num_ctx");
+    json_builder_add_int_value(b, req->cfg->num_ctx);
     json_builder_end_object(b);
     json_builder_end_object(b);
     JsonNode *raiz = json_builder_get_root(b);
@@ -626,6 +645,14 @@ void ollama_cancelar(OllamaRequisicao *req)
         g_cancellable_cancel(req->cancelavel);
     /* a operação assíncrona pendente (connect ou read) vai retornar com
      * G_IO_ERROR_CANCELLED e finalizar() será chamada a partir de lá. */
+}
+
+void ollama_definir_fim(OllamaRequisicao *req, OllamaFim *destino)
+{
+    if (!req || !destino) return;
+    destino->motivo[0] = '\0';
+    destino->tokens_gerados = destino->tokens_prompt = -1;
+    req->fim = destino;
 }
 
 void ollama_definir_progresso(OllamaRequisicao *req, void (*cb)(gpointer ctx, gint64 tokens), gpointer ctx)

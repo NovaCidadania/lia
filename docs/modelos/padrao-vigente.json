@@ -1,0 +1,24 @@
+{
+ "formato": "lia-modelo/1",
+ "id": "lia-coding-padrao",
+ "versao": "2026-11-24",
+ "estado": "padrao-vigente",
+ "observacao": "NÃO é um modelo promovido por avaliação: é o modelo que a Lia usa por padrão hoje. Nenhum adaptador existe.",
+ "base": {"nome": "llama3.2:3b (Ollama)", "licenca": "Llama 3.2 Community License", "sha256": "a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72",
+          "nota_hash": "digest do modelo no Ollama (ollama /api/tags)"},
+ "adaptador": null,
+ "tokenizer": "llama3 (embutido no modelo do Ollama)",
+ "template": "llama3 (aplicado pelo Ollama)",
+ "formato_inferencia": "GGUF quantizado servido pelo Ollama (Q4_K_M)",
+ "backend_testado": "Ollama 0.40.17, CPU (i7 4ª geração, 8 threads), num_ctx 8192",
+ "memoria_minima_medida_mb": 3039,
+ "data": "2026-11-24",
+ "metricas": {"conjunto_sha256": "3b331b4b75ac411e7b2a3778330807867598d0eea31c5fdf16987748f8ed7b29",
+              "fonte": "docs/avaliacao/2026-11-24-resultados-engine.md"},
+ "rollback": {"procedimento": "o padrão é escolhido por variável (LIA_SESSIOND_MODELO, LIA_OLLAMA_MODELO); voltar = restaurar as variáveis anteriores e reiniciar o lia-sessiond", "anterior": "o mesmo (llama3.2:3b)"},
+ "alternativas_disponiveis": [
+  {"nome": "Qwen2.5-Coder-7B-Instruct-Uncensored Q5_K_M (llama-server)", "sha256": "cb8f52cc2bc3f455f36ed8362c6a03beba5c39e61f66db24de37891407423c4f",
+   "licenca": "não declarada no GGUF (a base oficial Qwen2.5-Coder é Apache-2.0; derivado 'uncensored' de origem não verificada)",
+   "memoria_medida_mb": 5581, "backend": "llama-server --device none -ngl 0 -c 8192 -np 1"}
+ ]
+}

@@ -110,6 +110,10 @@ class Cenario:
         parar(self.d)
 
 
+def proj_nao_aparece(obj, caminho):
+    return caminho not in json.dumps(obj, ensure_ascii=False)
+
+
 def resposta_texto(r):
     return r["dados"]["resposta_texto"] if r else ""
 
@@ -307,13 +311,13 @@ def main():
         sleeps = subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True, text=True).stdout.split()
         checar(not sleeps, "C9: o processo da validação foi encerrado", sleeps)
         ck_dir = os.path.join(s.home, ".lia", "projeto", "coding")
-        cks = [json.load(open(os.path.join(ck_dir, f))) for f in os.listdir(ck_dir)]
+        cks = [json.load(open(os.path.join(ck_dir, f))) for f in os.listdir(ck_dir) if f.endswith(".json")]
         checar(cks and cks[0]["estado"] == "cancelado", "C9: checkpoint gravado como cancelado", cks)
         s.fim()
 
         def checkpoints(s):
             d = os.path.join(s.home, ".lia", "projeto", "coding")
-            return [json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d))] if os.path.isdir(d) else []
+            return [json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d)) if f.endswith(".json")] if os.path.isdir(d) else []
 
         def log(s):
             return open(os.path.join(s.home, "sessiond.log")).read()
@@ -370,6 +374,158 @@ def main():
                "F2: erro do modelo nos critérios não interrompe: seguem os critérios do pedido", prog)
         s.decidir(p, "rejeitar")
         s.ate("resposta")
+        s.fim()
+
+        print("== G. protocolo: contrato por operação, esquema por operação, truncamento com estado próprio ==")
+        reg = os.path.join(base, "g1-registro.jsonl")
+        corte = '{"edicoes":[{"acao":"substituir_funcao","caminho":"soma.c","funcao":"soma","conteudo":"int soma(int a, int b) {\\n    return'
+        s = Cenario(base, "g1", {"edicoes": [{"truncado": corte}, editar("a - b", "a + b")]}, {"LIA_MOCK_REGISTRO": reg})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        p = s.ate("plano")
+        prog = s.progresso()
+        chamadas = [json.loads(l) for l in open(reg)] if os.path.exists(reg) else []
+        ed = [c for c in chamadas if c["etapa"] == "edicoes"]
+        checar(any("cortada no limite de 2048 tokens" in x and "não JSON malformado" in x for x in prog) and
+               not any("não devolveu um objeto JSON" in x for x in prog), "G1: resposta cortada vira truncamento (com limite e tokens), não 'JSON malformado'", prog)
+        checar(len(ed) == 2 and ed[0]["max_tokens"] == 2048 and not ed[0]["reduzido"] and ed[1]["reduzido"] and '"maxItems":1' in ed[1]["esquema"] and
+               '"maxItems":6' in ed[0]["esquema"], "G1: depois do corte, a estratégia muda: UMA edição por chamada (prompt e esquema)", ed)
+        esq0 = json.loads(ed[0]["esquema"]) if ed else {}
+        ramos = esq0.get("properties", {}).get("edicoes", {}).get("items", {}).get("anyOf", [])
+        req = {r["properties"]["acao"]["enum"][0]: r["required"] for r in ramos}
+        checar(req.get("substituir_funcao") == ["acao", "caminho", "funcao", "conteudo"] and req.get("criar") == ["acao", "caminho", "conteudo"] and
+               req.get("editar") == ["acao", "caminho", "procurar", "substituir"] and all(r.get("additionalProperties") is False for r in ramos),
+               "G1: esquema enviado ao backend exige os campos de cada operação", req)
+        checar(p and p["dados"]["intencao"] == "codigo_edicao", "G1: a proposta reduzida segue para a prévia normalmente", p and p["dados"].get("intencao"))
+        s.decidir(p, "rejeitar")
+        s.ate("resposta")
+        ck = checkpoints(s)
+        checar(ck and ck[-1].get("truncamentos") == 1 and ck[-1].get("uma_edicao_por_chamada") is True, "G1: checkpoint registra o truncamento e a estratégia", ck and ck[-1])
+        s.fim()
+
+        s = Cenario(base, "g2", {"edicoes": [{"truncado": corte}, {"truncado": '{"edicoes":[{"acao":"editar"'}]})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        r = s.ate("resposta", 30)
+        t = resposta_texto(r)
+        checar(t.startswith("Resposta: NÃO concluído — a resposta do modelo foi cortada no limite") and "Encerramento: truncamento" in t and
+               "JSON" not in t.split("\n")[0], "G2: dois cortes -> encerra com causa 'truncamento' e orientação, nada de 'JSON malformado'", t[:600])
+        checar("a - b" in s.soma(), "G2: nada gravado")
+        s.fim()
+
+        so_nome = json.dumps({"edicoes": [{"acao": "substituir_funcao", "caminho": "soma.c", "funcao": "soma"}], "explicacao": "troca a função"})
+        s = Cenario(base, "g3", {"edicoes": [so_nome, so_nome]}, {"LIA_SESSIOND_CODIGO_ESQUEMA": "0"})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        r = s.ate("resposta", 30)
+        t = resposta_texto(r)
+        prog = s.progresso()
+        checar(any('falta "conteudo" — a função INTEIRA reescrita' in x for x in prog) and "Encerramento: proposta_invalida" in t and "a - b" in s.soma(),
+               "G3: sem esquema no backend, o runtime ainda recusa substituir_funcao só com o nome (antes da prévia, nada gravado)", (prog, t[:400]))
+        s.fim()
+
+        reg4 = os.path.join(base, "g4-registro.jsonl")
+        s = Cenario(base, "g4", {"edicoes": [editar("a - b", "a + b")]}, {"LIA_MOCK_REGISTRO": reg4, "LIA_SESSIOND_CODIGO_MAX_TOKENS": "512"})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        p = s.ate("plano")
+        ed = [json.loads(l) for l in open(reg4)] if os.path.exists(reg4) else []
+        checar(ed and ed[-1]["max_tokens"] == 512, "G4: LIA_SESSIOND_CODIGO_MAX_TOKENS define o limite da proposta", ed)
+        s.decidir(p, "rejeitar")
+        s.ate("resposta")
+        s.fim()
+
+        print("== G5. árvore da tarefa no ciclo real: evidências com alcance, artefatos à parte, retomada ==")
+        s = Cenario(base, "g5", {"edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        p = s.ate("plano")
+        s.decidir(p, "aprovar")
+        v = s.ate("plano")
+        s.decidir(v, "aprovar")
+        r = s.ate("resposta", 60)
+        t = resposta_texto(r)
+        ck = checkpoints(s)
+        cid = ck[-1]["id"] if ck else ""
+        dt = os.path.join(s.home, ".lia", "projeto", "coding", cid)
+        arv = json.load(open(os.path.join(dt, "arvore.json"))) if os.path.exists(os.path.join(dt, "arvore.json")) else {}
+        nos = {n["id"]: n for n in arv.get("nos", [])}
+        raiz, p1 = nos.get("raiz", {}), nos.get("proposta-1", {})
+        checar(t.startswith("Resposta: concluído") and "Árvore da tarefa: raiz passou" in t, "G5: concluído só com a raiz da árvore passando", t[:500])
+        checar(arv.get("versao") == "lia-arvore-tarefas/1" and set(nos) >= {"raiz", "contexto", "proposta-1"} and p1.get("pai") == "raiz" and
+               p1.get("deps") == ["contexto"], "G5: árvore versionada com raiz, contexto e proposta (pai e dependência)", list(nos))
+        pat = [e for e in p1.get("evidencias", []) if e["tipo"] == "patch"]
+        val = [e for e in raiz.get("evidencias", []) if e["tipo"] == "validacao"]
+        checar(pat and pat[0]["arquivos"] == ["soma.c"] and pat[0]["hashes_antes"][0] != pat[0]["hashes_depois"][0] and
+               val and val[-1]["passou"] and val[-1]["seq"] > pat[-1]["seq"] and "depois do patch #%d" % pat[-1]["seq"] in val[-1]["alcance"] and
+               "vale só para" in val[-1]["alcance"], "G5: patch com hashes antes/depois; validação da RAIZ depois do patch, com alcance declarado",
+               (pat, val))
+        checar(p1.get("tentativas") and p1["tentativas"][-1]["resultado"].startswith("aplicada") and
+               [c["origem"] for c in nos.get("contexto", {}).get("contexto", [])] and all(c["sha256"] for c in nos["contexto"]["contexto"] if c["caminho"] == "soma.c"),
+               "G5: tentativa aplicada e contexto com origem e hash", (p1.get("tentativas"), nos.get("contexto", {}).get("contexto")))
+        arts = os.listdir(os.path.join(dt, "artefatos")) if os.path.isdir(os.path.join(dt, "artefatos")) else []
+        todos_arts = "".join(open(os.path.join(dt, "artefatos", f), errors="replace").read() for f in arts)
+        txt_arv = open(os.path.join(dt, "arvore.json")).read() if arv else ""
+        checar(arts and "a + b" in todos_arts and "a + b" not in txt_arv and
+               all(os.stat(os.path.join(dt, "artefatos", f)).st_mode & 0o777 == 0o600 for f in arts) and
+               os.stat(os.path.join(dt, "arvore.json")).st_mode & 0o777 == 0o600,
+               "G5: código/diff só como artefato (0600), nunca dentro do JSON da árvore", arts)
+        evs = [json.loads(l) for l in open(os.path.join(dt, "eventos.jsonl"))] if os.path.exists(os.path.join(dt, "eventos.jsonl")) else []
+        checar(evs and {"no_criado", "tentativa", "patch", "validacao", "avaliacao"} <= {e["tipo"] for e in evs},
+               "G5: eventos em JSONL (criação, tentativa, patch, validação, avaliação)", sorted({e["tipo"] for e in evs}))
+        checar(not os.path.exists(os.path.join(s.home, ".lia", "trajetorias")) and "Trajetória" not in t,
+               "G5: sem opt-in, nenhuma trajetória é gravada")
+        s.fim()
+
+        s = Cenario(base, "g7", {"edicoes": [editar("a - b", "a + b")]},
+                    {"LIA_SESSIOND_TRAJETORIAS": "1", "LIA_TRAJETORIA_LICENCA": "MIT", "LIA_TRAJETORIA_PROVENIENCIA": "projeto de teste sintético"})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        p = s.ate("plano")
+        s.decidir(p, "aprovar")
+        v = s.ate("plano")
+        s.decidir(v, "aprovar")
+        r = s.ate("resposta", 60)
+        t = resposta_texto(r)
+        tdir = os.path.join(s.home, ".lia", "trajetorias")
+        arqs = os.listdir(tdir) if os.path.isdir(tdir) else []
+        tj = json.load(open(os.path.join(tdir, arqs[0]))) if arqs else {}
+        arts = tj.get("artefatos", {})
+        tents = [x for n in tj.get("arvore", {}).get("nos", []) for x in n.get("tentativas", [])]
+        checar(len(arqs) == 1 and os.stat(os.path.join(tdir, arqs[0])).st_mode & 0o777 == 0o600 and tj.get("versao") == "lia-trajetoria/1" and
+               tj.get("licenca") == "MIT" and tj["resultado"]["concluido"] is True and "Trajetória (opt-in" in t,
+               "G7: com opt-in, a trajetória sai em ~/.lia/trajetorias (0600) com versão, licença e resultado", (arqs, tj.get("resultado")))
+        checar(tents and tents[0].get("prompt") in arts and tents[0].get("artefato") in arts and any("a + b" in v for v in arts.values()) and
+               proj_nao_aparece(tj, s.proj), "G7: prompt e resposta de cada tentativa e o diff vêm como artefatos; o caminho do projeto não aparece",
+               (tents, list(arts)[:4]))
+        s.fim()
+
+        # retomada com árvore adulterada (ciclo) -> descartada com aviso, a tarefa segue
+        s = Cenario(base, "g6", {"edicoes": [editar("a - b", "a + b")]})
+        cenarios.append(s)
+        s.perguntar("corrija o bug na função soma em soma.c")
+        p = s.ate("plano")
+        s.decidir(p, "aprovar")
+        v = s.ate("plano")
+        s.decidir(v, "rejeitar")
+        s.ate("resposta")
+        ck = checkpoints(s)
+        cid = ck[-1]["id"] if ck else ""
+        dt = os.path.join(s.home, ".lia", "projeto", "coding", cid)
+        arv = json.load(open(os.path.join(dt, "arvore.json")))
+        for n in arv["nos"]:
+            if n["id"] == "contexto":
+                n["deps"] = ["proposta-1"]
+        json.dump(arv, open(os.path.join(dt, "arvore.json"), "w"))
+        s.c.enviar("perguntar", {"mensagem": "retome a tarefa de código " + cid})
+        v = s.ate("plano")
+        prog = s.progresso()
+        checar(any("árvore gravada da tarefa foi descartada" in x and "ciclo" in x for x in prog) and v and v["dados"]["intencao"] == "codigo_validacao",
+               "G6: árvore adulterada (ciclo) é descartada na retomada, com aviso; a tarefa segue validando", prog[-4:])
+        s.decidir(v, "aprovar")
+        r = s.ate("resposta", 60)
+        t = resposta_texto(r)
+        checar(t.startswith("Resposta: concluído"), "G6: depois da retomada, concluído com validação nova", t[:300])
         s.fim()
 
         print("== F3. prazo do modelo, cancelamento e desconexão durante a proposta ==")

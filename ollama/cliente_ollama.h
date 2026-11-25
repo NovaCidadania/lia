@@ -20,6 +20,13 @@ typedef struct {
     char *modelo;
     int timeout_ms;              /* timeout de conexão e de inatividade entre leituras */
     gsize limite_resposta_bytes; /* aborta com OLLAMA_ERRO_LIMITE_EXCEDIDO se exceder */
+    /* amostragem e janela: temperatura 0 (padrão: mesma pergunta, mesma
+     * resposta), semente (-1 = não envia) e num_ctx — o runner do Ollama
+     * sobe com 4096 por padrão, menos que prompt + geração de uma proposta
+     * de código; sem num_ctx o contexto era deslocado em silêncio */
+    double temperatura;
+    gint64 semente;
+    int num_ctx;
 } OllamaConfig;
 
 /* Limites de configuração — nunca "sem limite": um valor fora destas
@@ -100,6 +107,18 @@ OllamaRequisicao *ollama_gerar_opcoes(OllamaConfig *cfg, const char *prompt,
                                        OllamaConcluidoCb concluido_cb, gpointer ctx);
 
 void ollama_cancelar(OllamaRequisicao *req);
+
+/* Como a geração terminou, preenchido ANTES de concluido_cb (só quando o
+ * Ollama mandou o objeto final): motivo = "done_reason" ("stop": o modelo
+ * terminou; "length": parou no limite num_predict — a resposta está
+ * CORTADA, não malformada); "" se não informado. 'destino' é do chamador
+ * e precisa viver até concluido_cb. */
+typedef struct {
+    char motivo[24];
+    gint64 tokens_gerados;  /* eval_count, -1 se ausente */
+    gint64 tokens_prompt;   /* prompt_eval_count, -1 se ausente */
+} OllamaFim;
+void ollama_definir_fim(OllamaRequisicao *req, OllamaFim *destino);
 
 /* Andamento da geração: 'cb' recebe quantos fragmentos (≈ tokens) já
  * chegaram, no máximo uma vez por segundo, até a conclusão. */

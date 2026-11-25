@@ -179,7 +179,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
                   $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
                   $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o \
-                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o $(B)/sessiond-projeto-arquivos.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-projeto-praticas.o $(B)/sessiond-projeto-processo.o $(B)/sessiond-projeto-validacao.o $(B)/sessiond-projeto-git.o $(B)/sessiond-coding.o
+                  $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o $(B)/sessiond-projeto-arquivos.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-projeto-praticas.o $(B)/sessiond-projeto-processo.o $(B)/sessiond-projeto-validacao.o $(B)/sessiond-projeto-git.o $(B)/sessiond-coding.o $(B)/sessiond-arvore.o
 
 $(B)/sessiond-protocolo.o: gui/protocolo.c gui/protocolo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -274,6 +274,23 @@ $(B)/sessiond-projeto-validacao.o: projeto/validacao.c projeto/validacao.h proje
 
 $(B)/sessiond-coding.o: sessiond/coding.c sessiond/coding.h sessiond/intencao_arquivos.h projeto/arquivos.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-arvore.o: sessiond/arvore.c sessiond/arvore.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-arvore.o: testes/unit/teste_arvore.c sessiond/arvore.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-arvore: $(B)/teste-arvore.o $(B)/sessiond-arvore.o
+	$(CC) $^ $(SESSIOND_LIBS) -o $@
+
+# pipeline de dados de treino (trajetórias -> conjunto com manifesto), sem dependências
+teste-treino:
+	python3 -I testes/treino/teste_pipeline.py
+
+# árvore (DAG) de tarefas: ciclos, alcance das evidências, promoção, orçamento
+teste-arvore: $(B)/teste-arvore
+	$(B)/teste-arvore
 
 $(B)/sessiond-projeto-git.o: projeto/git.c projeto/git.h projeto/processo.h projeto/arquivos.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
@@ -425,7 +442,7 @@ teste-arquivos-projeto: sessiond chat teste-arquivos teste-intencao-arquivos
 
 # fase 2 de coding: ciclo completo com modelo mock roteirizado, validação
 # isolada, rejeições, repetição, limite de ciclos, checkpoint/retomada, Git
-teste-coding: sessiond chat teste-processo teste-validacao-git teste-coding-unit
+teste-coding: sessiond chat teste-processo teste-validacao-git teste-coding-unit teste-arvore
 	python3 -I testes/integration/teste_coding.py
 
 # fase 2b: projeto PHP de fixture (Git como pré-condição, pedido analítico,
@@ -463,4 +480,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-coding-php teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
+.PHONY: teste-treino teste-arvore teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-coding-php teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run

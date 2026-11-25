@@ -37,6 +37,40 @@ env HOME="$HOME_T" LIA_OLLAMA_HOST=127.0.0.1 LIA_OLLAMA_PORTA=1 "$BIN" status_ho
 rc=$?
 [ "$rc" -ne 0 ] && falhas_totais=$((falhas_totais + 1))
 
+echo "== término da geração: servidor falso 'normal' -> completo =="
+env OLLAMA_FAKE_MODO=normal python3 "$RAIZ/testes/integration/ollama_fake.py" 0 > "$HOME_T/fake.port" 2>/dev/null &
+FPID=$!
+i=0; while [ ! -s "$HOME_T/fake.port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+env HOME="$HOME_T" LIA_OLLAMA_PORTA="$(head -1 "$HOME_T/fake.port" | tr -dc '0-9')" "$BIN" fim completo 2
+rc=$?
+kill "$FPID" 2>/dev/null; wait "$FPID" 2>/dev/null; rm -f "$HOME_T/fake.port"
+[ "$rc" -ne 0 ] && falhas_totais=$((falhas_totais + 1))
+
+echo "== término da geração: servidor falso 'limite' -> limite_tokens =="
+env OLLAMA_FAKE_MODO=limite python3 "$RAIZ/testes/integration/ollama_fake.py" 0 > "$HOME_T/fake.port" 2>/dev/null &
+FPID=$!
+i=0; while [ ! -s "$HOME_T/fake.port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+env HOME="$HOME_T" LIA_OLLAMA_PORTA="$(head -1 "$HOME_T/fake.port" | tr -dc '0-9')" "$BIN" fim limite_tokens 7
+rc=$?
+kill "$FPID" 2>/dev/null; wait "$FPID" 2>/dev/null; rm -f "$HOME_T/fake.port"
+[ "$rc" -ne 0 ] && falhas_totais=$((falhas_totais + 1))
+
+echo "== opções: num_ctx 8192 e temperatura 0 por padrão; semente/temperatura só quando configuradas =="
+for caso in "padrao" "avaliacao"; do
+    env OLLAMA_FAKE_MODO=ecoar_opcoes python3 "$RAIZ/testes/integration/ollama_fake.py" 0 > "$HOME_T/fake.port" 2>/dev/null &
+    FPID=$!
+    i=0; while [ ! -s "$HOME_T/fake.port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+    P=$(head -1 "$HOME_T/fake.port" | tr -dc '0-9')
+    if [ "$caso" = padrao ]; then
+        env HOME="$HOME_T" LIA_OLLAMA_PORTA="$P" "$BIN" opcoes '"num_ctx": 8192' '"temperature": 0'
+    else
+        env HOME="$HOME_T" LIA_OLLAMA_PORTA="$P" LIA_MODELO_TEMPERATURA=0.4 LIA_MODELO_SEMENTE=3 LIA_OLLAMA_NUM_CTX=12288 "$BIN" opcoes '"num_ctx": 12288' '"seed": 3' '"temperature": 0.4'
+    fi
+    rc=$?
+    kill "$FPID" 2>/dev/null; wait "$FPID" 2>/dev/null; rm -f "$HOME_T/fake.port"
+    [ "$rc" -ne 0 ] && falhas_totais=$((falhas_totais + 1))
+done
+
 echo
 if [ "$falhas_totais" -eq 0 ]; then
     echo "teste_cliente_ollama: todos os modos passaram"

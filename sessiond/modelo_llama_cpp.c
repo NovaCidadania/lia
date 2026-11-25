@@ -16,12 +16,14 @@
 #include "../ollama/cliente_llama_cpp.h"
 #include <gio/gio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct {
     char *pergunta_id;
     ModeloConcluidoCb concluido_cb;
     gpointer ctx;
     gboolean resumo; /* pedido de resumo final: a resposta é só texto, nunca uma proposta */
+    LlamaCppFim fim; /* como a geração terminou (preenchido pelo cliente antes da conclusão) */
     LlamaCppRequisicao *req;
 } TarefaLlamaCpp;
 
@@ -37,6 +39,10 @@ static LlamaCppConfig *obter_config(void)
     const char *timeout_s = g_getenv("LIA_LLAMACPP_TIMEOUT_MS");
     g_cfg = llama_cpp_config_novo(host, porta_s ? atoi(porta_s) : 0);
     if (timeout_s) g_cfg->timeout_ms = atoi(timeout_s);
+    /* só para avaliação (variância entre repetições); padrão: temperatura 0 */
+    const char *te = g_getenv("LIA_MODELO_TEMPERATURA"), *se = g_getenv("LIA_MODELO_SEMENTE");
+    if (te) g_cfg->temperatura = g_ascii_strtod(te, NULL);
+    if (se) g_cfg->semente = g_ascii_strtoll(se, NULL, 10);
     return g_cfg;
 }
 
@@ -67,6 +73,12 @@ static void ao_concluir_llama_cpp(gpointer ctx, LlamaCppErro erro, const char *t
         r.erro_mensagem = g_strdup(llama_cpp_erro_texto(erro));
     }
 
+    r.tokens_gerados = t->fim.tokens_gerados;
+    r.fim = g_strdup(erro == LLAMACPP_OK ? (!strcmp(t->fim.motivo, "length") ? "limite_tokens" : "completo") :
+                     erro == LLAMACPP_ERRO_CANCELADO ? "cancelado" :
+                     erro == LLAMACPP_ERRO_TIMEOUT ? "timeout" :
+                     erro == LLAMACPP_ERRO_LIMITE_EXCEDIDO ? "limite_bytes" :
+                     erro == LLAMACPP_ERRO_RESPOSTA_INVALIDA ? "resposta_invalida" : "transporte");
     t->concluido_cb(t->ctx, &r);
     modelo_resposta_liberar(&r);
 
@@ -103,9 +115,11 @@ static void llama_cpp_perguntar(const ModeloBackend *self, const char *pergunta_
     t->ctx = ctx;
     g_hash_table_insert(g_em_andamento, t->pergunta_id, t);
     t->resumo = opcoes && opcoes->resumo;
+    t->fim.tokens_gerados = t->fim.tokens_prompt = -1;
     char *prompt = llama_cpp_formatar_prompt(g_getenv("LIA_LLAMACPP_FORMATO"), prompt_montado);
     t->req = llama_cpp_gerar_opcoes(obter_config(), prompt, opcoes ? opcoes->esquema_json : NULL,
                                   opcoes ? opcoes->max_tokens : 0, ao_concluir_llama_cpp, t);
+    if (t->req) llama_cpp_definir_fim(t->req, &t->fim);
     g_free(prompt);
 }
 

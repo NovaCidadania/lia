@@ -148,8 +148,64 @@ static int modo_status_host_valido_sem_servidor(void)
     return falhas;
 }
 
+/* fim <esperado>: pergunta pelo backend (porta do servidor falso no
+ * ambiente) e confere ModeloResposta.fim — "limite_tokens" quando o
+ * servidor diz que parou no limite, "completo" quando o modelo terminou */
+static char *g_fim; static gint64 g_tokens; static gboolean g_feito;
+static void ao_fim(gpointer ctx, const ModeloResposta *r)
+{
+    (void)ctx;
+    g_fim = g_strdup(r->fim ? r->fim : "(nulo)");
+    g_tokens = r->tokens_gerados;
+    g_feito = TRUE;
+}
+static char *g_texto;
+static void ao_texto(gpointer ctx, const ModeloResposta *r)
+{
+    (void)ctx;
+    g_texto = g_strdup(r->resposta_texto ? r->resposta_texto : "");
+    g_feito = TRUE;
+}
+/* opcoes <trecho>...: o servidor falso devolve as opções recebidas */
+static int modo_opcoes(int n, char **trechos)
+{
+    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = 7, .resumo = TRUE };
+    modelo_ollama_obter()->perguntar(modelo_ollama_obter(), "p2", "conte", &op, ao_texto, NULL);
+    gint64 limite = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+    while (!g_feito && g_get_monotonic_time() < limite) g_main_context_iteration(NULL, TRUE);
+    for (int i = 0; i < n; i++) {
+        char *d = g_strdup_printf("opções enviadas ao Ollama contêm %s (recebido: %s)", trechos[i], g_texto ? g_texto : "(nada)");
+        checar(g_texto && strstr(g_texto, trechos[i]), d);
+        g_free(d);
+    }
+    return falhas;
+}
+
+static int modo_fim(const char *esperado, gint64 tokens_esperados)
+{
+    ModeloOpcoes op = { .esquema_json = NULL, .max_tokens = 7, .resumo = TRUE };
+    modelo_ollama_obter()->perguntar(modelo_ollama_obter(), "p1", "conte", &op, ao_fim, NULL);
+    GMainContext *ctx = g_main_context_default();
+    gint64 limite = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+    while (!g_feito && g_get_monotonic_time() < limite) g_main_context_iteration(ctx, TRUE);
+    char *d = g_strdup_printf("término da geração = %s (esperado %s), tokens %" G_GINT64_FORMAT, g_fim ? g_fim : "(sem resposta)", esperado, g_tokens);
+    checar(g_fim && !strcmp(g_fim, esperado) && (tokens_esperados < 0 || g_tokens == tokens_esperados), d);
+    g_free(d);
+    return falhas;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 3 && !strcmp(argv[1], "opcoes")) {
+        int r = modo_opcoes(argc - 2, argv + 2);
+        printf("%d falhas\n", r);
+        return r > 0 ? 1 : 0;
+    }
+    if (argc >= 3 && !strcmp(argv[1], "fim")) {
+        int r = modo_fim(argv[2], argc >= 4 ? g_ascii_strtoll(argv[3], NULL, 10) : -1);
+        printf("%d falhas\n", r);
+        return r > 0 ? 1 : 0;
+    }
     if (argc != 2) {
         fprintf(stderr, "uso: %s <config_validar|status_host_invalido|status_host_valido_sem_servidor>\n", argv[0]);
         return 2;

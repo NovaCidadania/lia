@@ -1,0 +1,90 @@
+{
+ "formato": "lia-avaliacao-tarefas/2",
+ "congelado_em": "2026-11-24",
+ "regra": "enunciados e verificações ocultas fixados ANTES de qualquer execução; 'holdout' nunca é usado para ajustar prompt, regra ou treino; 'dev' pode orientar ajustes, e todo ajuste é registrado",
+ "observacao": "só sf e le têm validação executável nesta máquina; as verificações ocultas rodam DEPOIS, em bubblewrap, sobre o clone, e a Lia não as vê | as verificações ocultas foram movidas para fora do repositório em 2026-11-24 (auditoria); aqui ficam só tipo e sha256 do código",
+ "tarefas": [
+  {
+   "id": "dev-sf-1",
+   "conjunto": "dev",
+   "projeto": "/home/zad/sf",
+   "subdir": "",
+   "categoria": "preciso",
+   "prompt": "Em core.py, faça _read_list aceitar também vírgula como separador entre o valor e o nome, e crie tests/test_read_list.py com testes unittest que usem só um arquivo temporário sintético. Não leia .env, emails.txt, phones.txt nem sends.txt, e não execute campaign.py nem nenhum envio.",
+   "verificacao_oculta": {
+    "tipo": "python",
+    "sha256": "f659879b9956fc189b82b1ecfd5eaf2d1993a5178ab1a8cf03d423c9f1e0dadd",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-24-dev-holdout.json (0600); nunca entra em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "dev-le-1",
+   "conjunto": "dev",
+   "projeto": "/home/zad/le",
+   "subdir": "leilao_api",
+   "categoria": "preciso",
+   "prompt": "Em src/lib/csv.ts, faça gerarCsv colocar entre aspas também valores que contenham retorno de carro (\\r), e acrescente em src/lib/csv.test.ts um teste vitest para isso. Não leia .env e não rode migrations.",
+   "verificacao_oculta": {
+    "tipo": "vitest",
+    "sha256": "fe0e269713d8a4eed15ce96a07ea06524a11d96432fb5eb359357862e9fcd55a",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-24-dev-holdout.json (0600); nunca entra em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ho-sf-1",
+   "conjunto": "holdout",
+   "projeto": "/home/zad/sf",
+   "subdir": "",
+   "categoria": "preciso",
+   "prompt": "Em core.py, faça normalise_phone descartar o ramal antes de normalizar: tudo a partir da palavra \"ramal\" (ou \"r.\") é ignorado, e o resto continua igual. Crie tests/test_normalise_phone.py com testes unittest para um fixo com ramal, um celular com DDD e uma entrada vazia. Não leia .env, emails.txt, phones.txt nem sends.txt, e não execute campaign.py nem nenhum envio.",
+   "verificacao_oculta": {
+    "tipo": "python",
+    "sha256": "4934ac2beaf36708a63c48c72faa314081d3faab08f59bf2d11d7d155a4919ad",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-24-dev-holdout.json (0600); nunca entra em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ho-sf-2",
+   "conjunto": "holdout",
+   "projeto": "/home/zad/sf",
+   "subdir": "",
+   "categoria": "aberto",
+   "prompt": "Faça a deduplicação de envios por e-mail não diferenciar maiúsculas de minúsculas no endereço, sem mudar o comportamento para telefones, e prove com testes unittest que usem só um log temporário sintético. Não leia .env, emails.txt, phones.txt nem sends.txt, e não execute campaign.py nem nenhum envio.",
+   "verificacao_oculta": {
+    "tipo": "python",
+    "sha256": "5d8807ff66e4c34a708dd4117518c72bb33956528f5d3e7a2e1d604b8e3a01a7",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-24-dev-holdout.json (0600); nunca entra em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ho-le-1",
+   "conjunto": "holdout",
+   "projeto": "/home/zad/le",
+   "subdir": "leilao_api",
+   "categoria": "preciso",
+   "prompt": "Em src/lib/rotulos.ts, faça rotuloStatus aceitar o status em minúsculas ou com espaços em volta (por exemplo ' aberto ' vira 'Aberto'), mantendo o valor original para status desconhecido, e crie src/lib/rotulos.test.ts com testes vitest. Não leia .env e não rode migrations.",
+   "verificacao_oculta": {
+    "tipo": "vitest",
+    "sha256": "943b07b9dff67baa8f7b63b3f5022d1a45df1d15b88c51b9f148171ae8766c51",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-24-dev-holdout.json (0600); nunca entra em resultados, prompts ou commits"
+   }
+  },
+  {
+   "id": "ho-le-2",
+   "conjunto": "holdout",
+   "projeto": "/home/zad/le",
+   "subdir": "leilao_api",
+   "categoria": "aberto",
+   "prompt": "Garanta que o CSV gerado pela API nunca saia com linhas de tamanho diferente do cabeçalho: linhas mais curtas são completadas com células vazias e linhas mais longas são um erro explícito. Prove com testes vitest sem banco. Não leia .env e não rode migrations.",
+   "verificacao_oculta": {
+    "tipo": "vitest",
+    "sha256": "33ab1bc56dd905c28d1b5991107326bcba20cff786cb939ddcbf2f6f1cc6e259",
+    "onde": "fora do repositório: ~/.lia/avaliacao-oculta/2026-11-24-dev-holdout.json (0600); nunca entra em resultados, prompts ou commits"
+   }
+  }
+ ],
+ "correcoes_antes_da_execucao": [
+  "ho-sf-2: a verificação oculta testava o conjunto em minúsculas e passaria no código original; passou a testar a pertinência como os consumidores fazem (antes de qualquer execução)",
+  "ho-sf-1: o comportamento pedido (vazio sem dígitos) já existia — a verificação oculta passava no código original; tarefa trocada por 'descartar o ramal' (antes de qualquer execução)"
+ ]
+}

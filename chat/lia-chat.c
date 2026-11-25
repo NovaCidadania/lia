@@ -298,6 +298,7 @@ static void definir_fase(LiaChat *c, Fase f)
                              : !strcmp(e, "proposta") ? "proposta"
                              : !strcmp(e, "correcao") ? "correção"
                              : !strcmp(e, "validacao") ? "validação"
+                             : !strcmp(e, "truncado") ? "resposta cortada no limite"
                              : !strcmp(e, "revisao") ? "revisão" : e;
             char ciclo[48] = "";
             if (c->codigo_ciclo > 0 || !strcmp(e, "proposta") || !strcmp(e, "correcao"))

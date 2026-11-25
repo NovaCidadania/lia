@@ -1,6 +1,9 @@
 # Coding mínimo da Lia — arquitetura
 
 Status: proposta em vigor a partir de 2026-11-24 (ADR: `docs/adr/0001-coding-minimo-runtime.md`).
+Evolução no mesmo dia — contrato por operação, truncamento com estado
+próprio, árvore de tarefas com evidências, trajetórias e promoção:
+`docs/LIA-CODING-ENGINE.md` e `docs/adr/0002-lia-coding-engine.md`.
 
 A Lia não tenta guardar "todo o conhecimento de programação" num modelo
 pequeno. O **runtime** carrega o método de trabalho; o modelo executa
@@ -123,9 +126,9 @@ treinamento moderno). Plano experimental:
 
 | Fase | Entrega | Critério para avançar |
 |---|---|---|
-| A. Runtime determinístico com o modelo atual | contexto por regras, critérios do pedido, proibições, prazo, checkpoints coerentes, relatório com origem (feito em 2026-11-24) | regressões automatizadas passando; nenhum "concluído" falso |
+| A. Runtime determinístico com o modelo atual | contexto por regras, critérios do pedido, proibições, prazo, checkpoints coerentes, relatório com origem; contrato por operação, truncamento, árvore com evidências (feito em 2026-11-24) | regressões automatizadas passando; nenhum "concluído" falso |
 | B. Conjunto de avaliação congelado | enunciados por projeto/linguagem (preciso + aberto), commit-base, comando de validação, critério de sucesso estrito; guardado com hash | enunciados congelados antes de qualquer execução |
-| C. Coleta de trajetórias | opt-in, formato versionado, licença e anonimização | ≥ algumas centenas de positivas verificadas |
+| C. Coleta de trajetórias | opt-in, formato versionado, licença e anonimização (formato, exportação opt-in e pipeline prontos em 2026-11-24; zero trajetórias coletadas) | ≥ algumas centenas de positivas verificadas |
 | D. Adaptação de modelo pequeno | LoRA/QLoRA sobre base existente | treino reprodutível (semente, versão, dados com hash) |
 | E. Comparação cega | modelo adaptado × base × modelos locais (llama3.2:3b, Qwen2.5-Coder-7B) × baseline sem modelo, no conjunto congelado | relatório com sucesso estrito, falsos "concluído", tempo e retrabalho |
 | F. Implantação | só se aumentar o sucesso estrito **sem** aumentar falsos "concluído" | decisão registrada em ADR |

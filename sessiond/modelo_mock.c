@@ -22,6 +22,7 @@
 #include "modelo.h"
 #include <stdlib.h>
 #include <json-glib/json-glib.h>
+#include <stdio.h>
 #include <string.h>
 
 static gboolean contem_ci(const char *texto, const char *alvo)
@@ -152,6 +153,13 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
                     if (len) n = json_array_get_element(ea, (guint)MIN(proxima_edicao, (int)len - 1));
                     proxima_edicao++;
                 }
+                /* {"truncado": "texto parcial"}: simula geração cortada no limite de tokens */
+                if (n && JSON_NODE_TYPE(n) == JSON_NODE_OBJECT && json_object_has_member(json_node_get_object(n), "truncado")) {
+                    texto = g_strdup(json_object_get_string_member(json_node_get_object(n), "truncado"));
+                    rr.fim = g_strdup("limite_tokens");
+                    rr.tokens_gerados = opcoes->max_tokens;
+                    n = NULL;
+                }
                 if (n && JSON_NODE_TYPE(n) == JSON_NODE_VALUE && json_node_get_value_type(n) == G_TYPE_STRING) texto = g_strdup(json_node_get_string(n));
                 else if (n) { JsonGenerator *g = json_generator_new(); json_generator_set_root(g, n); texto = json_generator_to_data(g, NULL); g_object_unref(g); }
             }
@@ -160,6 +168,22 @@ static void mock_perguntar(const ModeloBackend *self, const char *pergunta_id,
                                          : contexto ? "{\"arquivos\":[]}"
                                                     : "{\"edicoes\":[],\"explicacao\":\"(mock) sem roteiro em LIA_MOCK_CODIGO\"}");
             if (opcoes->progresso_cb) opcoes->progresso_cb(opcoes->progresso_ctx, 42);
+            /* LIA_MOCK_REGISTRO=<arquivo>: uma linha JSON por chamada (etapa,
+             * esquema, max_tokens) — os testes conferem o que o runtime pediu */
+            const char *reg = g_getenv("LIA_MOCK_REGISTRO");
+            if (reg) {
+                FILE *f = fopen(reg, "a");
+                if (f) {
+                    char *esq = opcoes->esquema_json ? g_strescape(opcoes->esquema_json, NULL) : NULL;
+                    fprintf(f, "{\"etapa\":\"%s\",\"max_tokens\":%d,\"reduzido\":%s,\"esquema\":%s%s%s}\n",
+                            criterios ? "criterios" : contexto ? "contexto" : "edicoes", opcoes->max_tokens,
+                            strstr(prompt_montado_completo, "UMA edição só") ? "true" : "false",
+                            esq ? "\"" : "", esq ? esq : "null", esq ? "\"" : "");
+                    g_free(esq);
+                    fclose(f);
+                }
+            }
+            if (!rr.fim) rr.fim = g_strdup("completo");
             rr.sucesso = TRUE;
             rr.resposta_texto = texto;
             concluido_cb(ctx, &rr);

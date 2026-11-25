@@ -396,6 +396,47 @@ tempo e tokens; "cancelar" interrompe a geração. Se o modelo falhar, a
 resposta usa o que a regra fixa conseguiu; sem dados suficientes, diz o que
 não foi possível inferir.
 
+**Proposta de código — contrato e término** (detalhes em
+`docs/LIA-CODING-ENGINE.md`):
+
+- contrato por operação, conferido no runtime para toda proposta (com ou
+  sem esquema): `criar` = caminho + conteúdo; `editar` = caminho +
+  procurar + substituir; `substituir_funcao` = caminho + nome (só o nome)
+  + função inteira. Campo de outra operação ou desconhecido, valor vazio,
+  acima do limite, UTF-8 inválido ou código abreviado ("// ...", "{ ... }")
+  recusam a edição antes da prévia;
+- o esquema enviado ao backend é o mesmo contrato (`anyOf` por operação,
+  `additionalProperties: false`) — conferido no Ollama e no llama-server
+  desta máquina; a gramática ajuda, a prova é a validação do runtime;
+- o backend informa como a geração terminou (`completo`,
+  `limite_tokens`, `timeout`, `cancelado`, `transporte`...). Resposta
+  cortada no limite é **truncamento** — etapa e causa próprias, nunca
+  "JSON malformado": a Lia pede de novo UMA edição só (prompt e esquema com
+  `maxItems: 1`) e, se cortar de novo, encerra com causa `truncamento` e
+  orientação. Limite: `LIA_SESSIOND_CODIGO_MAX_TOKENS` (256..8192, padrão 2048);
+- janela do Ollama: `LIA_OLLAMA_NUM_CTX` (padrão 8192 — o runner sobe com
+  4096, menos que prompt + proposta). Temperatura 0 por padrão;
+  `LIA_MODELO_TEMPERATURA`/`LIA_MODELO_SEMENTE` existem para medir
+  variância em avaliação;
+- todo encerramento tem causa (`Encerramento: …` no relatório e `causa`
+  no checkpoint).
+
+**Árvore da tarefa** (`sessiond/arvore.h`): raiz (o pedido), contexto
+(arquivos com origem e hash), uma proposta por ciclo (tentativas com prompt
+e resposta como artefatos, orçamento de 3, repetição idêntica recusada),
+evidências de patch (hashes antes/depois) e de validação na raiz (alcance
+declarado: comando, arquivo@hash, depois de qual patch). "Concluído" exige
+que a raiz passe pelas regras da árvore — filho que passou nunca prova o
+pai. Fica em `~/.lia/projeto/coding/<id>/` (`arvore.json`, `eventos.jsonl`,
+`artefatos/<sha256>`, 0600/0700); a retomada carrega a árvore e descarta
+uma inválida (ciclo, versão) com aviso.
+
+**Trajetórias para treino** só com opt-in: `LIA_SESSIOND_TRAJETORIAS=1`,
+com `LIA_TRAJETORIA_LICENCA` e `LIA_TRAJETORIA_PROVENIENCIA` declaradas
+pela pessoa; vão para `~/.lia/trajetorias/<id>.json` (0600). O pipeline
+`ferramentas/treino/lia_treino.py` recusa as que não têm licença,
+proveniência ou validação verificável (`docs/TREINO.md`).
+
 ### Modelo local via llama.cpp
 
 `LIA_SESSIOND_MODELO=llama_cpp` usa um `llama-server` em loopback
@@ -411,8 +452,13 @@ servidor com `--device none -ngl 0`.
 ```
 make teste-processo        # isolamento real: argv literal, ambiente, rede, limites, timeout, cancelamento (22)
 make teste-validacao-git   # validação e Git num projeto C temporário (38)
-make teste-coding-unit     # partes puras do ciclo: proibições, contexto, critérios do pedido, filtro, roteamento literal, referência a caminho proibido no conteúdo (130)
+make teste-coding-unit     # partes puras: proibições, contexto (linguagem, relevância, harness), critérios, filtro, roteamento,
+                           # contrato por operação, abreviação, referência a caminho proibido no conteúdo (152)
+make teste-arvore          # árvore/DAG: ciclos, alcance, filho não prova pai, orçamento, repetição, JSON, artefatos (31)
 make teste-coding          # ciclo completo com modelo mock: rejeições, retomada, Git, chat, contexto antes dos critérios,
-                           # critérios absurdos, prazo/cancelar/desconexão, caminhos negados, roteamento (66)
+                           # critérios absurdos, prazo/cancelar/desconexão, caminhos negados, roteamento,
+                           # truncamento, esquema por operação, árvore no ciclo real, trajetória opt-in (87)
+make teste-treino          # pipeline de trajetórias: licença, rótulos, anonimização, partição, congelado, manifesto (23)
+make teste-ollama teste-llama-cpp   # clientes: término da geração (stop/length/stop_type), num_ctx, temperatura, semente
 make teste-coding-php      # PHP: receita, modelo, Git, análise, Docker (fatos, citados, injection), pedidos de teste/amplos, php -l, correção, lento/cancelar, .env (71)
 ```

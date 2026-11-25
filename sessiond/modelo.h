@@ -45,6 +45,15 @@ typedef struct {
      * ({"objetivo":"...","passos":[...]}), ou NULL. É só uma sugestão — a
      * validação integral é de sessiond/agente.c (agente_plano_validar). */
     char *plano_json;
+    /* Como a geração terminou — SEMPRE preenchido pelos backends:
+     *   "completo"      o modelo terminou a resposta;
+     *   "limite_tokens" parou no limite de tokens gerados: o texto está
+     *                   CORTADO (não é "JSON malformado");
+     *   "timeout" | "cancelado" | "transporte" (conexão/HTTP) |
+     *   "limite_bytes" | "resposta_invalida" (protocolo do backend).
+     * NULL só em respostas montadas fora de um backend (receitas). */
+    char *fim;
+    gint64 tokens_gerados;      /* -1 se o backend não informou */
 } ModeloResposta;
 
 void modelo_resposta_liberar(ModeloResposta *r);

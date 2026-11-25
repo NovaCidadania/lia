@@ -27,6 +27,8 @@ typedef struct {
     int porta;
     int timeout_ms;              /* timeout de conexão e de inatividade entre leituras */
     gsize limite_resposta_bytes; /* aborta com LLAMACPP_ERRO_LIMITE_EXCEDIDO se exceder */
+    double temperatura;          /* 0 = padrão (determinístico) */
+    gint64 semente;              /* -1 = não envia */
 } LlamaCppConfig;
 
 #define LLAMACPP_PORTA_MIN        1
@@ -78,5 +80,16 @@ LlamaCppRequisicao *llama_cpp_gerar_opcoes(LlamaCppConfig *cfg, const char *prom
                                             LlamaCppConcluidoCb concluido_cb, gpointer ctx);
 
 void llama_cpp_cancelar(LlamaCppRequisicao *req);
+
+/* Como a geração terminou, preenchido ANTES de concluido_cb (evento final
+ * do /completion): motivo "stop" (stop_type eos/word; antigo stopped_eos/
+ * stopped_word) ou "length" (stop_type limit / stopped_limit: parou em n_predict — resposta CORTADA); "" se não
+ * informado. 'destino' é do chamador e vive até concluido_cb. */
+typedef struct {
+    char motivo[24];
+    gint64 tokens_gerados;  /* tokens_predicted, -1 se ausente */
+    gint64 tokens_prompt;   /* tokens_evaluated, -1 se ausente */
+} LlamaCppFim;
+void llama_cpp_definir_fim(LlamaCppRequisicao *req, LlamaCppFim *destino);
 
 #endif
