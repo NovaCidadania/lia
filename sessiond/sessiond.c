@@ -4207,6 +4207,7 @@ struct Coding {
     guint n_crit_pedido;    /* critérios vindos do pedido/validação (os seguintes são do modelo, filtrados) */
     char *prompt_sha;       /* artefato do último prompt de proposta enviado ao modelo */
     char *modelo_desc;      /* "Ollama · llama3.2:3b" (relatório e trajetória) */
+    char *ultima_resposta;  /* resposta bruta do último modelo, só para a retenção opt-in de rejeitadas */
 };
 
 static void coding_liberar(Coding *k)
@@ -4231,7 +4232,7 @@ static void coding_liberar(Coding *k)
     g_ptr_array_unref(k->operacoes);
     g_string_free(k->diffs, TRUE);
     g_ptr_array_unref(k->propostas);
-    g_free(k->falha); g_free(k->falha_sha); g_free(k->erro_proposta);
+    g_free(k->falha); g_free(k->falha_sha); g_free(k->erro_proposta); g_free(k->ultima_resposta);
     g_free(k->validacao_json); g_free(k->comando); g_free(k->modelo_id);
     g_free(k);
 }
@@ -4379,6 +4380,44 @@ static void coding_arvore_gravar(Coding *k)
         g_free(ev); g_free(arq); g_free(j);
     }
     g_free(d);
+}
+
+/* Retenção OPT-IN de propostas rejeitadas, para auditar falso negativo do verificador. Só liga com
+ * LIA_SESSIOND_RETER_REJEITADAS=<diretório> E se o projeto é uma fixture sintética (arquivo
+ * .lia/fixture-sintetica na raiz): nunca grava código de projeto real. Diretório 0700, arquivo 0600, uma linha JSON
+ * por rejeição: hash do contexto (prompt), resposta bruta, motivo da recusa e resultado da validação. */
+static void coding_reter_rejeitada(Coding *k, const char *motivo, const char *validacao)
+{
+    const char *dir = g_getenv("LIA_SESSIOND_RETER_REJEITADAS");
+    if (!dir || !*dir || !proj_raiz() || !k->ultima_resposta) return;
+    char *marca = g_build_filename(proj_raiz(), ".lia", "fixture-sintetica", NULL);
+    gboolean sintetica = g_file_test(marca, G_FILE_TEST_EXISTS);
+    g_free(marca);
+    if (!sintetica) return;
+    g_mkdir_with_parents(dir, 0700);
+    chmod(dir, 0700);
+    char *arq = g_build_filename(dir, "rejeitadas.jsonl", NULL);
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "formato"); json_builder_add_string_value(b, "lia-proposta-rejeitada/1");
+    json_builder_set_member_name(b, "tarefa"); json_builder_add_string_value(b, k->id);
+    json_builder_set_member_name(b, "ciclo"); json_builder_add_int_value(b, k->ciclo);
+    json_builder_set_member_name(b, "contexto_sha256"); json_builder_add_string_value(b, k->prompt_sha ? k->prompt_sha : "");
+    json_builder_set_member_name(b, "resposta"); json_builder_add_string_value(b, k->ultima_resposta);
+    json_builder_set_member_name(b, "motivo_da_recusa"); json_builder_add_string_value(b, motivo ? motivo : "");
+    json_builder_set_member_name(b, "validacao"); json_builder_add_string_value(b, validacao ? validacao : "(não chegou a validar)");
+    json_builder_end_object(b);
+    JsonGenerator *g = json_generator_new();
+    JsonNode *root = json_builder_get_root(b);
+    json_generator_set_root(g, root);
+    char *linha = json_generator_to_data(g, NULL);
+    int fd = open(arq, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd >= 0) {
+        fchmod(fd, 0600);
+        if (write(fd, linha, strlen(linha)) < 0 || write(fd, "\n", 1) < 0) g_print("lia-sessiond: retenção de rejeitada não gravada\n");
+        close(fd);
+    }
+    g_free(linha); json_node_unref(root); g_object_unref(g); g_object_unref(b); g_free(arq);
 }
 
 static char *coding_no_proposta(Coding *k, int ciclo)
@@ -4743,7 +4782,7 @@ static void coding_ler_lista(Cliente *c, char **lista)
         if (!abs) continue;
         char *rel = proj_relativo(abs);
         g_free(abs);
-        if (g_hash_table_contains(k->lidos, rel) || coding_caminho_proibido(proib, rel)) { g_free(rel); continue; }
+        if (g_hash_table_contains(k->lidos, rel) || coding_caminho_proibido_em(proj_raiz(), proib, rel)) { g_free(rel); continue; }
         char *sha = NULL, *erro = NULL;
         char *txt = proj_ler_texto(rel, CODING_MAX_BYTES_ARQUIVO, &sha, &erro);
         char *m;
@@ -4966,6 +5005,8 @@ static void coding_processar_proposta(Cliente *c, const ModeloResposta *r)
     char *no_prop = coding_no_proposta(k, k->ciclo + 1);
     {
         const char *bruto = r->resposta_texto ? r->resposta_texto : "";
+        g_free(k->ultima_resposta);
+        k->ultima_resposta = g_strdup(bruto);
         char *art = coding_artefato(k, bruto);
         char *h = g_compute_checksum_for_string(G_CHECKSUM_SHA256, bruto, -1);
         char *et = k->arvore ? arvore_tentativa(k->arvore, no_prop, h, art) : NULL;
@@ -5062,6 +5103,7 @@ static void coding_recusar_proposta(Cliente *c, const char *erro)
         }
         g_free(no);
     }
+    coding_reter_rejeitada(k, erro, NULL);
     char *m = g_strdup_printf("proposta recusada pelo verificador: %s", erro);
     coding_progresso(c, "proposta", m);
     g_free(m);
@@ -5618,6 +5660,7 @@ static gboolean coding_apos_tarefa(Cliente *c, Tarefa *t)
         coding_causa(k, "repeticao");
         coding_encerrar(c, "repetição sem progresso: a validação falhou exatamente do mesmo jeito depois da correção");
     } else {
+        coding_reter_rejeitada(k, "a validação falhou depois de gravar a proposta", final);
         g_free(k->falha); k->falha = final; final = NULL;
         g_free(k->falha_sha); k->falha_sha = sha_saida; sha_saida = NULL;
         coding_progresso(c, "correcao", "a validação falhou; pedindo uma correção ao modelo com a saída do erro");

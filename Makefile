@@ -288,6 +288,10 @@ $(B)/teste-arvore: $(B)/teste-arvore.o $(B)/sessiond-arvore.o
 teste-treino:
 	python3 -I testes/treino/teste_pipeline.py
 
+# harness de avaliação: protocolo (daemon falso + caso curto real), limpeza de processos e runner fail-fast
+teste-harness-avaliacao: sessiond
+	python3 -I testes/avaliacao/teste_harness.py
+
 # árvore (DAG) de tarefas: ciclos, alcance das evidências, promoção, orçamento
 teste-arvore: $(B)/teste-arvore
 	$(B)/teste-arvore
@@ -480,4 +484,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-treino teste-arvore teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-coding-php teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
+.PHONY: teste-harness-avaliacao teste-treino teste-arvore teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-coding-php teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run

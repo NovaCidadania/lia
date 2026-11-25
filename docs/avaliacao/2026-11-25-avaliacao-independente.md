@@ -70,3 +70,45 @@ terceiros (`thirdeyeai/Qwen2.5-Coder-7B-Instruct-Uncensored`). O arquivo
 nem de licença compatível. Portanto **não é candidato oficial**: serve só de
 ponto de comparação até que a licença do fine-tune seja verificada na fonte
 (não feito: exigiria acesso à rede).
+
+## Harness corrigido (2026-11-25, depois da primeira tentativa)
+
+A primeira execução desta matriz foi **interrompida e invalidada**: o avaliador não tratava `proposta` com
+`plano_proposto` (só reagia a `plano`), então `ind-py-2` esperou 40 min sem avançar o protocolo. Era defeito do
+harness, não do modelo. Os 13 resultados parciais (todos do baseline sem modelo) foram movidos para
+`~/.lia/avaliacao-resultados/independente-v1-INVALIDO-handshake/` com `INVALIDO.txt`; **não entram em nenhuma comparação**.
+
+Correções (`ferramentas/avaliacao/`):
+
+- `protocolo.py`: sequência real `proposta(plano_proposto)` → `solicitar` (preso a `plano_id`/`hash`, `origem_modelo`,
+  `pergunta_id`) → `plano` → `aprovar` (mesmo hash) → `resultado` → `resposta`. Silêncio (`sem_progresso`; 90 s sem modelo, 720 s
+  com modelo, configurável), desconexão, `erro` do daemon, evento desconhecido e plano reproposto são **erros terminais de
+  harness com diagnóstico** (classe `erro_de_harness`, arquivo `*.harness-erro.json`, exit 3) — nunca falha nem sucesso do modelo.
+  `limite_tempo` com eventos chegando continua sendo `nao_concluido` (o runtime/modelo não terminou).
+- `avaliar.py` (`avaliar/3`): limpeza da árvore do daemon (que abre sessão própria) em saída normal, exceção e
+  SIGTERM/SIGINT/SIGHUP; resultado gravado de forma atômica; `estado_terminal`, `avaliador_versao` e `avaliador_sha256` em cada
+  resultado; `--versao`; `--reter-rejeitadas` (opt-in, só fixtures sintéticas).
+- `matriz.py`: fail-fast e retomável. Confere código de saída **e** o JSON; só reaproveita resultado cujos metadados
+  (tarefa, condição, semente, hash do modelo, parâmetros, hash do arquivo de tarefas, hash do binário, versão e hash do
+  avaliador, estado terminal) conferem; senão descarta e refaz. `manifesto.json` (atômico) com esperadas, válidas, faltantes,
+  falhas de harness e totais por condição. **`FIM` só sai com todas as combinações terminais válidas**; senão `INCOMPLETO`
+  (exit 1); interrompido: `INTERROMPIDO` (exit 130) e toda a descendência é encerrada.
+- `independente-v1.sh` chama o `matriz.py` (54 combinações). Use um diretório de saída **novo**.
+
+Teste obrigatório antes de qualquer matriz: `make teste-harness-avaliacao` (daemon falso para o protocolo, caso curto real
+`ind-py-2` sem modelo, limpeza de processos, runner). Resultado desta rodada: 35 testes, 0 falhas; o caso que esperava 40 min
+termina em ~6 s.
+
+## Runtime: o que mudou junto (causas gerais, não casos)
+
+- **Proibições**: padrões por substring (`*email*`) valiam para código-fonte e escondiam `emails_send.py`. Agora as
+  categorias ("não leia os emails") só cobrem arquivos de **dados** (extensão de dados/configuração); caminhos são
+  normalizados (`./`, `..`, `//`) e há checagem pelo caminho real (link simbólico para arquivo proibido).
+- **Critério `teste_cobre`**: o pedido que manda acrescentar um teste e cita um símbolo só é cumprido se um teste gravado
+  **cita esse símbolo**; teste criado não prova o requisito por existir.
+- **Reparo**: a falha de validação vai ao modelo como diagnóstico mínimo (testes, arquivo:linha, mensagens) mais o final da
+  saída, não a saída inteira. Proposta idêntica sem progresso continua recusada e o limite de tentativas encerra como "NÃO concluído".
+- **Retenção opt-in** (`LIA_SESSIOND_RETER_REJEITADAS=<dir>` + marca `.lia/fixture-sintetica`, que só o avaliador cria para
+  fixtures sintéticas): `rejeitadas.jsonl` 0600 com hash do contexto, resposta, motivo e resultado da validação. Desligada por padrão.
+
+O oráculo continua obrigatório para declarar sucesso; suíte visível verde ou teste recém-criado não bastam.

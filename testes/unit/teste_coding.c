@@ -5,6 +5,7 @@
  * Sem daemon, sem modelo. Uso: make teste-coding-unit */
 #define _GNU_SOURCE
 #include "../../sessiond/coding.h"
+#include <unistd.h>
 #include "../../projeto/arquivos.h"
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -473,6 +474,40 @@ int main(void)
         pr = coding_caminhos_proibidos("corrija core.py preservando o formato de sends.txt");
         checar(!pr[0], "sem negação: nada proibido");
         g_strfreev(pr);
+        /* auditoria 2026-11-25: "não leia emails.txt" escondia emails_send.py (padrão *email*) */
+        pr = coding_caminhos_proibidos("Corrija core.py. Não leia .env, emails.txt nem sends.txt, e não execute campaign.py");
+        checar(coding_caminho_proibido(pr, "emails.txt") && coding_caminho_proibido(pr, "dados/emails.txt") && !coding_caminho_proibido(pr, "emails_send.py") &&
+               !coding_caminho_proibido(pr, "src/emails_send.py") && !coding_caminho_proibido(pr, "email_utils.py") && !coding_caminho_proibido(pr, "core.py"),
+               "proibido emails.txt: o arquivo de dados sim; emails_send.py e email_utils.py (código-fonte) não");
+        g_strfreev(pr);
+        pr = coding_caminhos_proibidos("Não leia os emails, nem os telefones, nem as credenciais. Corrija core.py");
+        checar(coding_caminho_proibido(pr, "emails.txt") && coding_caminho_proibido(pr, "export/emails-2024.csv") && coding_caminho_proibido(pr, "phones.json") &&
+               coding_caminho_proibido(pr, "config/credentials.yml") && !coding_caminho_proibido(pr, "emails_send.py") && !coding_caminho_proibido(pr, "src/telefone_fmt.py") &&
+               !coding_caminho_proibido(pr, "secrets_loader.py") && !coding_caminho_proibido(pr, "tests/test_emails.py"),
+               "categoria 'emails/telefones/credenciais': padrões só de arquivos de dados, nunca de módulos .py/.js");
+        g_strfreev(pr);
+        pr = coding_caminhos_proibidos("Nunca leia config/database.php nem .env. Corrija app/a.php");
+        checar(coding_caminho_proibido(pr, "config/database.php") && coding_caminho_proibido(pr, "./config/database.php") &&
+               coding_caminho_proibido(pr, "src/../config/database.php") && coding_caminho_proibido(pr, "a//b/../../config/./database.php") &&
+               coding_caminho_proibido(pr, "x/../.env") && !coding_caminho_proibido(pr, "config/database_helper.py") &&
+               !coding_caminho_proibido(pr, "config/../app/a.php") && !coding_caminho_proibido(pr, "app/a.php"),
+               "caminhos relativos e traversal são normalizados antes de comparar");
+        g_strfreev(pr);
+        {
+            char *tmp = g_dir_make_tmp("lia-proib-XXXXXX", NULL);
+            char *dados = g_build_filename(tmp, "emails.txt", NULL), *elo = g_build_filename(tmp, "lista.py", NULL), *ok = g_build_filename(tmp, "emails_send.py", NULL);
+            g_file_set_contents(dados, "a@b.c\n", -1, NULL);
+            g_file_set_contents(ok, "print(1)\n", -1, NULL);
+            checar(symlink("emails.txt", elo) == 0, "symlink de teste criado");
+            pr = coding_caminhos_proibidos("Não leia emails.txt. Corrija emails_send.py");
+            checar(!coding_caminho_proibido(pr, "lista.py"), "(pelo nome, o link 'lista.py' não casa — por isso a checagem pelo caminho real)");
+            checar(coding_caminho_proibido_em(tmp, pr, "lista.py"), "link simbólico para um arquivo proibido é proibido (caminho real)");
+            checar(coding_caminho_proibido_em(tmp, pr, "emails.txt") && !coding_caminho_proibido_em(tmp, pr, "emails_send.py"),
+                   "caminho real: o arquivo de dados sim; o módulo vizinho não");
+            g_strfreev(pr);
+            unlink(dados); unlink(elo); unlink(ok); rmdir(tmp);
+            g_free(dados); g_free(elo); g_free(ok); g_free(tmp);
+        }
         checar(coding_arquivo_de_contexto("core.py") && coding_arquivo_de_contexto("src/services/leilao-estado.test.ts") &&
                coding_arquivo_de_contexto("package.json") && !coding_arquivo_de_contexto("sends.txt") && !coding_arquivo_de_contexto("emails.txt") &&
                !coding_arquivo_de_contexto(".env") && !coding_arquivo_de_contexto("dump.sql"), "contexto de código: fonte, teste e build — nunca dados");
@@ -616,6 +651,35 @@ int main(void)
                 if (!strcmp(((CodingCriterio *)g_ptr_array_index(pq->criterios, i))->verificacao, "tocou_teste")) tem = TRUE;
             checar(!tem, "pedido sem menção a acrescentar teste não ganha o critério");
             coding_plano_liberar(pq);
+            /* o teste novo só conta se exercita o que o pedido declara (auditoria 2026-11-25: teste criado não prova o requisito) */
+            gravar("tests/test_vazio.py", "import unittest\n\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertTrue(True)\n");
+            gravar("tests/test_cobre.py", "import unittest\nfrom core import normalise_phone\n\nclass T(unittest.TestCase):\n    def test_ramal(self):\n        self.assertEqual(normalise_phone('11999990000 x12'), '11999990000')\n");
+            CodingPlano *pcb = coding_plano_do_pedido("Em core.py, faça normalise_phone descartar o ramal. Acrescente um teste em tests/test_cobre.py.", NULL, NULL);
+            CodingCriterio *cb = NULL;
+            for (guint i = 0; i < pcb->criterios->len; i++)
+                if (!strcmp(((CodingCriterio *)g_ptr_array_index(pcb->criterios, i))->verificacao, "teste_cobre")) cb = g_ptr_array_index(pcb->criterios, i);
+            checar(cb != NULL, "pedido que manda acrescentar teste e cita um símbolo ganha o critério teste_cobre");
+            if (cb) {
+                char *vazio[] = { "core.py", "tests/test_vazio.py", NULL }, *cobre[] = { "core.py", "tests/test_cobre.py", NULL }, *nenhum[] = { "core.py", NULL };
+                char *c1 = NULL, *c2 = NULL, *c3 = NULL;
+                gboolean r1 = coding_conferir_criterio_ex(cb, TRUE, vazio, NULL, "", &c1), r2 = coding_conferir_criterio_ex(cb, TRUE, cobre, NULL, "", &c2),
+                         r3 = coding_conferir_criterio_ex(cb, TRUE, nenhum, NULL, "", &c3);
+                checar(!r1 && r2 && !r3 && c1 && strstr(c1, "não prova o requisito") && c2 && strstr(c2, "normalise_phone"),
+                       "teste_cobre: teste que não cita o símbolo do pedido NÃO conta; o que cita conta; sem teste gravado falha");
+                g_free(c1); g_free(c2); g_free(c3);
+            }
+            coding_plano_liberar(pcb);
+            {
+                char *d1 = coding_diagnostico_falha("....F\n======\nFAIL: test_ramal (tests.test_core.T.test_ramal)\n------\nTraceback (most recent call last):\n  File \"/tmp/x/tests/test_core.py\", line 12, in test_ramal\n    self.assertEqual(a, b)\nAssertionError: '1199' != '11999990000'\n\nRan 5 tests\nFAILED (failures=1)\n");
+                checar(strstr(d1, "test_ramal (") == NULL && strstr(d1, "teste(s) que falharam: test_ramal") && strstr(d1, "test_core.py:12") && strstr(d1, "AssertionError: '1199' != '11999990000'"),
+                       "diagnóstico da falha (unittest): teste, arquivo:linha e mensagem, sem o resto da saída");
+                char *d2 = coding_diagnostico_falha("TAP version 13\nnot ok 2 - parseDataBR rejeita 31/02\n  ---\n  error: 'Expected values to be strictly equal'\n  stack: |-\n    TestContext.<anonymous> (file:///tmp/r/tests/datas.test.js:14:10)\n    at node:internal/test_runner/test:1:1\n");
+                checar(strstr(d2, "teste(s) que falharam: parseDataBR rejeita 31/02") && strstr(d2, "datas.test.js:14") && !strstr(d2, "node:internal") && strstr(d2, "Expected values"),
+                       "diagnóstico da falha (node:test): teste, arquivo:linha (sem frames internos) e mensagem");
+                char *d3 = coding_diagnostico_falha("tudo certo\n");
+                checar(!*d3, "diagnóstico da falha: sem nada reconhecível devolve vazio (cai na saída bruta)");
+                g_free(d1); g_free(d2); g_free(d3);
+            }
             CodingPlano *pa = coding_plano_do_pedido("Em core.py, faça normalise_phone descartar o ramal. Crie tests/test_x.py com testes. Não leia .env.", NULL, NULL);
             char *so_teste[] = { "tests/test_x.py", NULL }, *alvo_ok[] = { "core.py", "tests/test_x.py", NULL };
             int na = 0, na_ok = 0;

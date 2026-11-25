@@ -15,14 +15,19 @@ lia-sessiond real em HOME isolado, aprovação por política fixa (registrada),
 depois revisão independente em bubblewrap: verificação OCULTA da tarefa e a
 suíte do projeto. O repositório original é conferido antes e depois.
 Nunca instala nada, nunca liga banco, nunca roda migrations."""
-import argparse, atexit, hashlib, json, os, shutil, subprocess, sys, time
+import argparse, atexit, hashlib, json, os, shutil, signal, subprocess, sys, time
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 LIA = os.path.abspath(os.path.join(AQUI, "..", ".."))
 sys.path.insert(0, os.path.join(LIA, "testes", "integration"))
-from teste_web_resposta import Conexao, parar  # noqa: E402
+sys.path.insert(0, AQUI)
+from teste_web_resposta import Conexao  # noqa: E402
+import protocolo  # noqa: E402
 
 SESSIOND = os.path.join(LIA, "build", "lia-sessiond")
+AVALIADOR_VERSAO = "avaliar/3 (2026-11-25: handshake proposta(plano_proposto)->solicitar, fail-fast, limpeza da árvore de processos)"
+FORMATO = "lia-avaliacao-execucao/3"
+CLASSES_TERMINAIS = ("sucesso", "concluido_falso", "nao_concluido", "sem_oraculo", "bloqueado por ambiente")
 BASE = "/tmp/lia-aval"  # caminho curto: o socket AF_UNIX tem limite de 108 bytes
 
 # harness de validação por repositório: só o que JÁ existe nesta máquina
@@ -88,7 +93,74 @@ def redigir_tarefa(t):
     return t
 
 
+FIXTURES_SINTETICAS = ("inventario-py", "agenda-js")  # só estas podem ter propostas rejeitadas retidas (nunca código de projeto real)
+
+
+def e_fixture_sintetica(chave):
+    return chave in FIXTURES_SINTETICAS
+
+
+def sha_avaliador():
+    """hash do avaliador (este arquivo + protocolo.py): o runner só reaproveita resultado da MESMA versão"""
+    h = hashlib.sha256()
+    for f in ("avaliar.py", "protocolo.py"):
+        h.update(open(os.path.join(AQUI, f), "rb").read())
+    return h.hexdigest()
+
+
+def gravar_atomico(caminho, doc):
+    """tmp + rename no mesmo diretório: nunca fica um JSON pela metade"""
+    os.makedirs(os.path.dirname(caminho), exist_ok=True)
+    tmp = caminho + ".tmp.%d" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, caminho)
+
+
+def politica_de_plano(h, argv_harness):
+    """aprovação por política fixa e registrada (não é revisão humana)"""
+    def decidir(dd):
+        passos = [{"ferramenta": x.get("ferramenta"), "caminho": (x.get("parametros") or {}).get("caminho")} for x in dd.get("passos", [])]
+        previas = "\n".join(x.get("previa") or "" for x in (dd.get("previas") or []))
+        decisao, motivo = "aprovar", ""
+        if dd.get("intencao") == "codigo_validacao":
+            if not h or ("argv: " + argv_harness) not in previas:
+                decisao, motivo = "rejeitar", "argv diferente do harness"
+        else:
+            for x in passos:
+                cam = x.get("caminho") or ""
+                if cam.startswith("/") or ".." in cam.split("/") or cam.endswith(".meta") or cam.startswith(".env") or cam.startswith(".lia"):
+                    decisao, motivo = "rejeitar", "caminho fora do escopo: " + cam
+        return decisao, motivo, passos
+    return decidir
+
+
+def erro_de_harness(res, a, rotulo, d, causa, diagnostico, log):
+    """Execução INVÁLIDA por defeito do harness/protocolo: não é sucesso nem falha do modelo.
+    Grava <rotulo>.harness-erro.json (nunca o .json de resultado válido) e sai com 3."""
+    try:
+        log.close()
+    except Exception:
+        pass
+    try:
+        res["log_daemon"] = open(os.path.join(d, "sessiond.log")).read()[-4000:]
+    except OSError:
+        res["log_daemon"] = ""
+    res["classe"], res["sucesso_estrito"] = "erro_de_harness", None
+    res["estado_terminal"] = "invalido_harness"
+    res["harness_erro"] = {"causa": causa, "diagnostico": diagnostico}
+    gravar_atomico(os.path.join(a.saida, rotulo + ".harness-erro.json"), res)
+    print("%s: ERRO DE HARNESS (%s) — %s" % (rotulo, causa, diagnostico))
+    return 3
+
+
 def main():
+    if sys.argv[1:] == ["--versao"]:  # o runner confere a versão/hash antes de aceitar resultado
+        print(json.dumps({"avaliador_versao": AVALIADOR_VERSAO, "avaliador_sha256": sha_avaliador(), "formato": FORMATO,
+                          "lia_sessiond_sha256": hashlib.sha256(open(SESSIOND, "rb").read()).hexdigest()}))
+        return 0
     ap = argparse.ArgumentParser()
     ap.add_argument("--tarefas", required=True)
     ap.add_argument("--id", required=True)
@@ -97,8 +169,11 @@ def main():
     ap.add_argument("--saida", required=True)
     ap.add_argument("--modelo-hash", default="")
     ap.add_argument("--limite-min", type=int, default=40)
+    ap.add_argument("--sem-progresso-s", type=int, default=0, help="sem nenhum evento do daemon por este tempo = erro de harness (0: 90 s sem modelo, 720 s com modelo)")
     ap.add_argument("--temperatura", default="")   # vazio = padrão da Lia (0)
     ap.add_argument("--semente", default="")
+    ap.add_argument("--reter-rejeitadas", action="store_true",
+                    help="opt-in: grava (0600) as propostas rejeitadas — contexto-hash, resposta, motivo, validação — SÓ de fixtures sintéticas")
     ap.add_argument("--sem-portao-arvore", action="store_true", help="ablação: loop simples (a árvore registra, mas não decide o concluído)")
     a = ap.parse_args()
     doc = json.load(open(a.tarefas))
@@ -122,7 +197,7 @@ def main():
         return 2
     proj = os.path.join(clone, subdir) if subdir else clone
     tarefas_sha = hashlib.sha256(open(a.tarefas, "rb").read()).hexdigest()
-    res = {"formato": "lia-avaliacao-execucao/2", "tarefa": redigir_tarefa(t), "tarefas_arquivo": os.path.relpath(a.tarefas, LIA), "tarefas_sha256": tarefas_sha,
+    res = {"formato": FORMATO, "avaliador_versao": AVALIADOR_VERSAO, "avaliador_sha256": sha_avaliador(), "tarefa": redigir_tarefa(t), "tarefas_arquivo": os.path.relpath(a.tarefas, LIA), "tarefas_sha256": tarefas_sha,
            "condicao": a.condicao, "rep": a.rep, "modelo_hash": a.modelo_hash, "repositorio_clonado": origem,
            "commit_base": sh("git", "-C", clone, "rev-parse", "HEAD").stdout.strip(), "commit_original": orig_head,
            "lia_sessiond_sha256": hashlib.sha256(open(SESSIOND, "rb").read()).hexdigest(), "eventos": [], "aprovacoes": []}
@@ -155,55 +230,43 @@ def main():
         env["LIA_MODELO_SEMENTE"] = a.semente
     if a.sem_portao_arvore:
         env["LIA_SESSIOND_ARVORE_PORTAO"] = "0"
+    if a.reter_rejeitadas:
+        if e_fixture_sintetica(chave_repo(t["projeto"])):
+            open(os.path.join(proj, ".lia", "fixture-sintetica"), "w").write("fixture sintética: retenção de propostas rejeitadas permitida\n")
+            env["LIA_SESSIOND_RETER_REJEITADAS"] = os.path.join(os.path.abspath(a.saida), "rejeitadas", rotulo)
+        else:
+            print("retenção de rejeitadas ignorada: %s não é fixture sintética" % chave_repo(t["projeto"]))
     res["parametros"] = {k: v for k, v in env.items() if k.startswith("LIA_") and k != "LIA_SESSIOND_PROJETO"}
     log = open(os.path.join(d, "sessiond.log"), "w")
     p = subprocess.Popen([SESSIOND], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    atexit.register(lambda: p.poll() is None and parar(p))
+    # limpeza GARANTIDA da árvore do daemon (que abriu sessão própria): saída normal, exceção, SIGTERM/SIGINT/SIGHUP
+    atexit.register(lambda: protocolo.encerrar_arvore(p))
+    for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sg, lambda n, f: sys.exit(128 + n))
     sock = os.path.join(home, ".lia", "run", "session.sock")
     for _ in range(200):
         if os.path.exists(sock):
             break
         time.sleep(0.05)
-    c = Conexao(home)
     t0 = time.time()
     res["inicio"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    c.enviar("perguntar", {"mensagem": t["prompt"]})
-    fim, resposta = time.time() + a.limite_min * 60, None
+    if not os.path.exists(sock) or p.poll() is not None:
+        return erro_de_harness(res, a, rotulo, d, "daemon_nao_iniciou", "o lia-sessiond não abriu o socket (rc %s)" % p.poll(), log)
+    c = Conexao(home)
     argv_harness = json.dumps((h or {}).get("comandos", {}).get("teste", []), separators=(",", ":"))
-    while time.time() < fim and resposta is None:
-        msgs, _ = c.ate("__nada__", 5)
-        for m in msgs:
-            ev = {"t": round(time.time() - t0, 1), "tipo": m["tipo"]}
-            dd = m.get("dados", {})
-            if m["tipo"] == "progresso":
-                ev["mensagem"] = dd.get("mensagem")
-                if "codigo" in dd:
-                    ev["etapa"] = dd["codigo"].get("etapa")
-            elif m["tipo"] == "plano":
-                ev["intencao"] = dd.get("intencao")
-                passos = [{"ferramenta": x.get("ferramenta"), "caminho": (x.get("parametros") or {}).get("caminho")} for x in dd.get("passos", [])]
-                previas = "\n".join(x.get("previa") or "" for x in (dd.get("previas") or []))
-                decisao, motivo = "aprovar", ""
-                if dd.get("intencao") == "codigo_validacao":
-                    if not h or ("argv: " + argv_harness) not in previas:
-                        decisao, motivo = "rejeitar", "argv diferente do harness"
-                else:
-                    for x in passos:
-                        cam = x.get("caminho") or ""
-                        if cam.startswith("/") or ".." in cam.split("/") or cam.endswith(".meta") or cam.startswith(".env") or cam.startswith(".lia"):
-                            decisao, motivo = "rejeitar", "caminho fora do escopo: " + cam
-                res["aprovacoes"].append({"t": ev["t"], "intencao": dd.get("intencao"), "decisao": decisao, "motivo": motivo, "passos": passos})
-                c.enviar("aprovar", {"plano_id": dd["plano_id"], "hash": dd["hash"], "decisao": decisao, "escopo": "uma_vez"})
-            elif m["tipo"] == "resposta":
-                resposta = dd.get("resposta_texto")
-            elif m["tipo"] == "proposta" and not dd.get("codigo") and not dd.get("plano_proposto"):
-                resposta = dd.get("resposta_texto") or "(proposta sem tarefa de código)"
-            res["eventos"].append(ev)
+    sem_prog = a.sem_progresso_s or (90 if cond[0] == "sem-modelo" else 720)
+    out = protocolo.conduzir(c, t["prompt"], politica_de_plano(h, argv_harness), a.limite_min * 60, sem_prog)
+    res["eventos"], res["aprovacoes"], res["solicitacoes"] = out["eventos"], out["aprovacoes"], out["solicitacoes"]
+    res["termino_do_protocolo"] = out["termino"]
+    c.fechar()
+    if out["termino"] in protocolo.TERMINOS_DE_HARNESS:
+        res["duracao_s"] = round(time.time() - t0, 1)
+        return erro_de_harness(res, a, rotulo, d, out["termino"], out["diagnostico"], log)
+    resposta = out["resposta"]
+    protocolo.encerrar_arvore(p)
+    log.close()
     res["duracao_s"] = round(time.time() - t0, 1)
     res["resposta"] = resposta if resposta is not None else "(sem resposta final no limite)"
-    c.fechar()
-    parar(p)
-    log.close()
     texto_log = open(os.path.join(d, "sessiond.log")).read()
     res["log_daemon"] = texto_log[-8000:]
     import re
@@ -264,8 +327,9 @@ def main():
                                       and res["original_intocado"] and not res["violacao_proibicao"])
         res["classe"] = "sucesso" if res["sucesso_estrito"] else ("concluido_falso" if concluido else "nao_concluido")
     res["causa"] = ck.get("causa")
-    os.makedirs(a.saida, exist_ok=True)
-    json.dump(res, open(os.path.join(a.saida, rotulo + ".json"), "w"), ensure_ascii=False, indent=1)
+    res["estado_terminal"] = "ok"
+    assert res["classe"] in CLASSES_TERMINAIS
+    gravar_atomico(os.path.join(a.saida, rotulo + ".json"), res)
     print("%s: %s em %.0f s — causa %s; tentativas %d (válidas %d, cortadas %d); oculta %s" % (
         rotulo, res["classe"], res["duracao_s"], res["causa"], res["tentativas"], res["tentativas_validas"], res["tentativas_truncadas"],
         None if res["oculta"] is None else res["oculta"]["passou"]))

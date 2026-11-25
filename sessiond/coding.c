@@ -4,6 +4,7 @@
 #include "intencao_arquivos.h"
 #include "../projeto/arquivos.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <glib/gstdio.h>
@@ -1303,6 +1304,78 @@ static char *regioes_dos_simbolos(const char *c, char **simbolos, guint *total_l
     return algum ? g_string_free(o, FALSE) : (g_string_free(o, TRUE), NULL);
 }
 
+/* Diagnóstico mínimo e estruturado da saída de uma validação que falhou: nomes dos testes, arquivo:linha
+ * citados e as linhas de erro/asserção — sem o repositório e sem a saída inteira. Vazio se nada reconhecível. */
+char *coding_diagnostico_falha(const char *saida)
+{
+    if (!saida || !*saida) return g_strdup("");
+    GPtrArray *testes = g_ptr_array_new_with_free_func(g_free), *locais = g_ptr_array_new_with_free_func(g_free),
+              *msgs = g_ptr_array_new_with_free_func(g_free);
+    const char *pad_teste[] = {
+        "^(?:FAIL|ERROR): (\\S+) \\(",              /* unittest */
+        "^\\s*not ok \\d+ - (.+?)\\s*$",            /* node:test (TAP) */
+        "^\\s*(?:FAIL|✗|×|✖)\\s+(.+?)\\s*$",        /* vitest/jest */
+        "^(?:FAILED|ERROR) (\\S+::\\S+)",            /* pytest */
+        NULL };
+    const char *pad_local[] = {
+        "File \"([^\"]+)\", line (\\d+)",           /* traceback Python */
+        "(?:at |\\()?((?:[\\w./-]+/)?[\\w.-]+\\.(?:js|mjs|ts|tsx|py|php|c|h)):(\\d+)(?::\\d+)?", /* node/ts/gcc */
+        NULL };
+    const char *pad_msg[] = { "^\\s*((?:\\w*Error|AssertionError|Exception|error)\\b[^\\n]{0,200})", "^\\s*(expected[^\\n]{0,160})", "^\\s*(?:error|message): '?([^\\n]{1,200})", NULL };
+    GRegex *rt[8] = { NULL }, *rl[8] = { NULL }, *rm[8] = { NULL };
+    for (int k = 0; pad_teste[k]; k++) rt[k] = g_regex_new(pad_teste[k], 0, 0, NULL);
+    for (int k = 0; pad_local[k]; k++) rl[k] = g_regex_new(pad_local[k], 0, 0, NULL);
+    for (int k = 0; pad_msg[k]; k++) rm[k] = g_regex_new(pad_msg[k], 0, 0, NULL);
+    char **linhas = g_strsplit(saida, "\n", -1);
+    for (int i = 0; linhas[i] && i < 4000; i++) {
+        for (int k = 0; pad_teste[k]; k++) {
+            GRegex *re = rt[k];
+            GMatchInfo *mi = NULL;
+            if (re && g_regex_match(re, linhas[i], 0, &mi) && testes->len < 8) {
+                char *nome = g_match_info_fetch(mi, 1);
+                gboolean dup = FALSE;
+                for (guint t = 0; t < testes->len; t++) if (!strcmp(g_ptr_array_index(testes, t), nome)) dup = TRUE;
+                if (!dup) g_ptr_array_add(testes, nome); else g_free(nome);
+            }
+            g_match_info_free(mi);
+        }
+        for (int k = 0; pad_local[k]; k++) {
+            GRegex *re = rl[k];
+            GMatchInfo *mi = NULL;
+            if (re && g_regex_match(re, linhas[i], 0, &mi) && locais->len < 8) {
+                char *f = g_match_info_fetch(mi, 1), *n = g_match_info_fetch(mi, 2);
+                if (!strstr(f, "node_modules") && !strstr(f, "/usr/lib") && !g_str_has_prefix(f, "node:")) {
+                    char *loc = g_strdup_printf("%s:%s", f, n);
+                    gboolean dup = FALSE;
+                    for (guint t = 0; t < locais->len; t++) if (!strcmp(g_ptr_array_index(locais, t), loc)) dup = TRUE;
+                    if (!dup) g_ptr_array_add(locais, loc); else g_free(loc);
+                }
+                g_free(f); g_free(n);
+            }
+            g_match_info_free(mi);
+        }
+        for (int k = 0; pad_msg[k] && msgs->len < 4; k++) {
+            GRegex *re = rm[k];
+            GMatchInfo *mi = NULL;
+            if (re && g_regex_match(re, linhas[i], 0, &mi)) {
+                char *m = g_match_info_fetch(mi, 1);
+                gboolean dup = FALSE;
+                for (guint t = 0; t < msgs->len; t++) if (!strcmp(g_ptr_array_index(msgs, t), m)) dup = TRUE;
+                if (!dup) g_ptr_array_add(msgs, m); else g_free(m);
+            }
+            g_match_info_free(mi);
+        }
+    }
+    g_strfreev(linhas);
+    for (int k = 0; k < 8; k++) { if (rt[k]) g_regex_unref(rt[k]); if (rl[k]) g_regex_unref(rl[k]); if (rm[k]) g_regex_unref(rm[k]); }
+    GString *o = g_string_new(NULL);
+    if (testes->len) { g_ptr_array_add(testes, NULL); char *j = g_strjoinv("; ", (char **)testes->pdata); g_string_append_printf(o, "teste(s) que falharam: %s\n", j); g_free(j); }
+    if (locais->len) { g_ptr_array_add(locais, NULL); char *j = g_strjoinv("; ", (char **)locais->pdata); g_string_append_printf(o, "arquivo:linha citados: %s\n", j); g_free(j); }
+    for (guint i = 0; i < msgs->len; i++) g_string_append_printf(o, "mensagem: %s\n", (char *)g_ptr_array_index(msgs, i));
+    g_ptr_array_free(testes, TRUE); g_ptr_array_free(locais, TRUE); g_ptr_array_free(msgs, TRUE);
+    return g_string_free(o, FALSE);
+}
+
 char *coding_prompt_edicoes(const char *pedido, GPtrArray *criterios, const char *praticas, GHashTable *lidos,
                             const char *falha, const char *erro_anterior, int ciclo, char **simbolos)
 {
@@ -1342,9 +1415,19 @@ char *coding_prompt_edicoes(const char *pedido, GPtrArray *criterios, const char
     }
     g_list_free(chaves);
     if (falha && *falha) {
-        g_string_append_printf(o, "\n----- a validação FALHOU depois da tentativa %d (saída) -----\n", ciclo);
-        anexar_seguro(o, falha);
+        g_string_append_printf(o, "\n----- a validação FALHOU depois da tentativa %d -----\n", ciclo);
+        char *diag = coding_diagnostico_falha(falha);
+        const char *cru = falha;
+        if (*diag) {
+            /* diagnóstico mínimo e estruturado primeiro; da saída bruta só o final (onde fica o resumo do corredor de testes) */
+            anexar_seguro(o, diag);
+            g_string_append(o, "\n(final da saída)\n");
+            gsize n = strlen(falha);
+            if (n > 2500) { cru = falha + n - 2500; const char *b = g_utf8_find_next_char(cru, NULL); if (b) cru = b; }
+        }
+        anexar_seguro(o, cru);
         g_string_append_c(o, '\n');
+        g_free(diag);
     }
     if (erro_anterior && *erro_anterior) {
         g_string_append(o, "\n----- a proposta anterior foi recusada pelo verificador -----\n");
@@ -2067,29 +2150,35 @@ static const char *const NEG_VERBOS =
     "edite|editar|editando|modifique|modificar|modificando|execute|executar|executando|rode|rodar|rodando|use|usar|usando|apague|"
     "apagar|envie|enviar|enviando|conecte|conectar|conectando|inclua|incluir|copie|copiar|mostre|mostrar|exponha|expor|consulte|consultar)";
 
-/* palavras de categoria dentro de uma negação -> padrões de caminho */
+/* palavras de categoria dentro de uma negação -> padrões de caminho.
+ * Padrões por substring (*email*) valem SÓ para arquivos de dados (extensão de
+ * dados/configuração): "não leia os emails" não pode esconder emails_send.py
+ * (auditoria 2026-11-25). Quem quer proibir um módulo de código o cita pelo nome. */
+#define EXT_DADOS(x) "*" x "*.txt", "*" x "*.csv", "*" x "*.tsv", "*" x "*.json", "*" x "*.yaml", "*" x "*.yml", "*" x "*.toml", \
+    "*" x "*.ini", "*" x "*.conf", "*" x "*.xlsx", "*" x "*.xls", "*" x "*.db", "*" x "*.sqlite", "*" x "*.sqlite3", \
+    "*" x "*.sql", "*" x "*.dump", "*" x "*.log", "*" x "*.eml", "*" x "*.mbox", "*" x "*.dat"
 typedef struct { const char *palavra; const char *const *padroes; } CatProibida;
 static const CatProibida CATEGORIAS[] = {
     { "env", L(".env", ".env.*", "*.env") },
     { "log", L("*.log", "logs/", "log/") },
     { "logs", L("*.log", "logs/", "log/") },
-    { "contatos", L("*contato*", "*contact*", "*email*", "*phone*", "*telefone*", "*lead*", "*.csv") },
-    { "contato", L("*contato*", "*contact*", "*email*", "*phone*", "*telefone*", "*lead*", "*.csv") },
-    { "emails", L("*email*", "*contato*", "*contact*") },
-    { "telefones", L("*phone*", "*telefone*") },
-    { "filas", L("*fila*", "*queue*") },
-    { "banco", L("*.sql", "*.sqlite", "*.sqlite3", "*.db", "*.dump", "dump*", "*database.php", "*database.yml", "*database.json") },
-    { "database", L("*.sql", "*.sqlite", "*.sqlite3", "*.db", "*.dump", "dump*", "*database.php", "*database.yml", "*database.json") },
-    { "dumps", L("dump*", "*.dump", "*.sql") },
-    { "dump", L("dump*", "*.dump", "*.sql") },
+    { "contatos", L(EXT_DADOS("contato"), EXT_DADOS("contact"), EXT_DADOS("email"), EXT_DADOS("phone"), EXT_DADOS("telefone"), EXT_DADOS("lead"), "*.csv") },
+    { "contato", L(EXT_DADOS("contato"), EXT_DADOS("contact"), EXT_DADOS("email"), EXT_DADOS("phone"), EXT_DADOS("telefone"), EXT_DADOS("lead"), "*.csv") },
+    { "emails", L(EXT_DADOS("email"), EXT_DADOS("contato"), EXT_DADOS("contact")) },
+    { "telefones", L(EXT_DADOS("phone"), EXT_DADOS("telefone")) },
+    { "filas", L(EXT_DADOS("fila"), EXT_DADOS("queue")) },
+    { "banco", L("*.sql", "*.sqlite", "*.sqlite3", "*.db", "*.dump", "dump*.sql", "dump*.dump", "dump*.gz", "*database.php", "*database.yml", "*database.json") },
+    { "database", L("*.sql", "*.sqlite", "*.sqlite3", "*.db", "*.dump", "dump*.sql", "dump*.dump", "dump*.gz", "*database.php", "*database.yml", "*database.json") },
+    { "dumps", L("dump*.sql", "dump*.dump", "dump*.gz", "dump*.json", "dump*.txt", "*.dump", "*.sql") },
+    { "dump", L("dump*.sql", "dump*.dump", "dump*.gz", "dump*.json", "dump*.txt", "*.dump", "*.sql") },
     { "migrations", L("migrations/", "migration/", "*migration*") },
     { "migration", L("migrations/", "migration/", "*migration*") },
     { "migracoes", L("migrations/", "migration/", "*migration*") },
     { "migracao", L("migrations/", "migration/", "*migration*") },
     { "git", L(".git/") },
-    { "credenciais", L(".env", ".env.*", "*secret*", "*credential*", "*.pem", "*.key", "*pgpass*") },
-    { "segredos", L(".env", ".env.*", "*secret*", "*credential*", "*.pem", "*.key", "*pgpass*") },
-    { "senhas", L(".env", ".env.*", "*secret*", "*credential*", "*pgpass*", "*passw*") },
+    { "credenciais", L(".env", ".env.*", EXT_DADOS("secret"), EXT_DADOS("credential"), "*.pem", "*.key", "*pgpass*") },
+    { "segredos", L(".env", ".env.*", EXT_DADOS("secret"), EXT_DADOS("credential"), "*.pem", "*.key", "*pgpass*") },
+    { "senhas", L(".env", ".env.*", EXT_DADOS("secret"), EXT_DADOS("credential"), "*pgpass*", EXT_DADOS("passw")) },
     { NULL, NULL },
 };
 
@@ -2167,11 +2256,33 @@ char **coding_caminhos_proibidos(const char *pedido)
     return (char **)g_ptr_array_free(v, FALSE);
 }
 
+/* "./a/../b//c" -> "b/c": "." e ".." resolvidos lexicalmente; sem isso,
+ * "src/../config/database.php" escaparia de uma proibição literal */
+static char *caminho_normalizado(const char *rel)
+{
+    char **partes = g_strsplit(rel, "/", -1);
+    GPtrArray *pilha = g_ptr_array_new();
+    gboolean abs = rel[0] == '/';
+    for (int i = 0; partes[i]; i++) {
+        if (!*partes[i] || !strcmp(partes[i], ".")) continue;
+        if (!strcmp(partes[i], "..") && pilha->len && strcmp(g_ptr_array_index(pilha, pilha->len - 1), "..")) { g_ptr_array_remove_index(pilha, pilha->len - 1); continue; }
+        g_ptr_array_add(pilha, partes[i]);
+    }
+    g_ptr_array_add(pilha, NULL);
+    char *j = g_strjoinv("/", (char **)pilha->pdata);
+    char *r = abs ? g_strconcat("/", j, NULL) : g_strdup(j);
+    g_free(j);
+    g_ptr_array_free(pilha, TRUE);
+    g_strfreev(partes);
+    return r;
+}
+
 gboolean coding_caminho_proibido(char **proibidos, const char *rel)
 {
     if (!proibidos || !rel) return FALSE;
-    while (rel[0] == '.' && rel[1] == '/') rel += 2;
-    char *low = g_ascii_strdown(rel, -1);
+    char *norm = caminho_normalizado(rel);
+    char *low = g_ascii_strdown(norm, -1);
+    g_free(norm);
     char *base = g_path_get_basename(low);
     gboolean r = FALSE;
     for (int i = 0; proibidos[i] && !r; i++) {
@@ -2193,6 +2304,23 @@ gboolean coding_caminho_proibido(char **proibidos, const char *rel)
     }
     g_free(base);
     g_free(low);
+    return r;
+}
+
+/* como coding_caminho_proibido, e também pelo caminho REAL: um link simbólico
+ * dentro do projeto que aponta para um arquivo proibido é proibido */
+gboolean coding_caminho_proibido_em(const char *raiz, char **proibidos, const char *rel)
+{
+    if (coding_caminho_proibido(proibidos, rel)) return TRUE;
+    if (!raiz || !rel || rel[0] == '/') return FALSE;
+    char *abs = g_build_filename(raiz, rel, NULL);
+    char *real = realpath(abs, NULL), *real_raiz = realpath(raiz, NULL);
+    gboolean r = FALSE;
+    gsize n = real_raiz ? strlen(real_raiz) : 0;
+    if (real && real_raiz && !strncmp(real, real_raiz, n) && real[n] == '/') r = coding_caminho_proibido(proibidos, real + n + 1);
+    free(real);
+    free(real_raiz);
+    g_free(abs);
     return r;
 }
 
@@ -2644,6 +2772,18 @@ CodingPlano *coding_plano_do_pedido(const char *pedido, char **a_criar, const ch
     }
     if (!coding_pedido_so_testes(pedido) && pedido_exige_teste(pedido))
         g_ptr_array_add(p->criterios, criterio_novo("um arquivo de teste foi alterado ou criado (o pedido manda acrescentar um teste)", "tocou_teste", NULL, NULL));
+    if (!coding_pedido_so_testes(pedido) && pedido_exige_teste(pedido)) {
+        /* o teste novo só conta se EXERCITA o que o pedido declara: precisa citar o símbolo que o pedido manda corrigir */
+        char **sim = coding_simbolos(pedido);
+        if (sim[0]) {
+            char *t = g_strjoinv("\n", sim);
+            char *j = g_strjoinv(", ", sim);
+            char *dc = g_strdup_printf("o teste gravado exercita o que o pedido declara (cita %s)", j);
+            g_ptr_array_add(p->criterios, criterio_novo(dc, "teste_cobre", NULL, t));
+            g_free(dc); g_free(j); g_free(t);
+        }
+        g_strfreev(sim);
+    }
     char **proib = coding_caminhos_proibidos(pedido);
     if (proib[0]) {
         char *j = g_strjoinv(", ", proib), *t = g_strjoinv("\n", proib);
@@ -2728,7 +2868,7 @@ void coding_filtrar_criterios_ex(CodingPlano *p, const char *pedido, char **tamb
         CodingCriterio *c = g_ptr_array_index(p->criterios, i);
         char *motivo = NULL;
         gboolean do_runtime = c->verificacao && (!strcmp(c->verificacao, "existe") || !strcmp(c->verificacao, "no_diff") ||
-                                                 !strcmp(c->verificacao, "so_testes") || !strcmp(c->verificacao, "tocou_teste") || !strcmp(c->verificacao, "tocou_alvo") || !strcmp(c->verificacao, "intocado"));
+                                                 !strcmp(c->verificacao, "so_testes") || !strcmp(c->verificacao, "tocou_teste") || !strcmp(c->verificacao, "teste_cobre") || !strcmp(c->verificacao, "tocou_alvo") || !strcmp(c->verificacao, "intocado"));
         if (do_runtime) { i++; continue; }
         if (c->caminho && coding_caminho_proibido(proib, c->caminho))
             motivo = g_strdup_printf("viola uma proibição do pedido (%s)", c->caminho);
@@ -2852,6 +2992,23 @@ gboolean coding_conferir_criterio_ex(const CodingCriterio *c, gboolean validacao
             if (coding_caminho_de_teste(tocados[i])) { *como = g_strdup_printf("%s é arquivo de teste e foi gravado", tocados[i]); return TRUE; }
         *como = g_strdup("nenhum arquivo de teste foi gravado");
         return FALSE;
+    }
+    if (!strcmp(v, "teste_cobre")) {
+        /* cada arquivo de teste gravado é lido do disco; basta um que cite (como token) um símbolo do pedido */
+        char **sim = g_strsplit(c->texto ? c->texto : "", "\n", -1);
+        gboolean ok = FALSE, houve_teste = FALSE;
+        for (int i = 0; tocados && tocados[i] && !ok; i++) {
+            if (!coding_caminho_de_teste(tocados[i])) continue;
+            houve_teste = TRUE;
+            char *sha = NULL, *e = NULL;
+            char *t = proj_ler_texto(tocados[i], 4 * 1024 * 1024, &sha, &e);
+            for (int k = 0; t && sim[k] && !ok; k++)
+                if (*sim[k] && contar_token(t, sim[k])) { ok = TRUE; *como = g_strdup_printf("%s cita %s", tocados[i], sim[k]); }
+            g_free(t); g_free(sha); g_free(e);
+        }
+        if (!ok) *como = g_strdup(houve_teste ? "o teste gravado não cita nenhum símbolo do pedido — não prova o requisito" : "nenhum arquivo de teste foi gravado");
+        g_strfreev(sim);
+        return ok;
     }
     if (!strcmp(v, "intocado")) {
         char **proib = g_strsplit(c->texto ? c->texto : "", "\n", -1);

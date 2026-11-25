@@ -152,6 +152,7 @@ char *coding_contradicoes_docker(const char *fatos, const char *texto);
  * padrões proibidos: nunca lidos, nunca alterados, nunca critério. */
 char **coding_caminhos_proibidos(const char *pedido);
 gboolean coding_caminho_proibido(char **proibidos, const char *rel);
+gboolean coding_caminho_proibido_em(const char *raiz, char **proibidos, const char *rel);
 /* a proposta ACRESCENTA ao conteúdo uma referência a caminho proibido
  * literal (abrir "sends.txt", importar campaign.py): devolve o nome, ou NULL.
  * A validação rodaria esse código sobre o arquivo real. Padrões com '*' e
@@ -209,6 +210,9 @@ char *coding_prompt_plano(const char *pedido, const char *lista_arquivos);
 /* 'simbolos': em arquivos grandes, só a região deles vai ao modelo */
 char *coding_prompt_edicoes(const char *pedido, GPtrArray *criterios, const char *praticas, GHashTable *lidos,
                             const char *falha, const char *erro_anterior, int ciclo, char **simbolos);
+
+/* diagnóstico mínimo e estruturado de uma validação que falhou (testes, arquivo:linha, mensagens); "" se nada reconhecível */
+char *coding_diagnostico_falha(const char *saida);
 
 /* critério conferido de verdade? *como: explicação curta */
 gboolean coding_conferir_criterio(const CodingCriterio *c, gboolean validacao_passou, char **como);

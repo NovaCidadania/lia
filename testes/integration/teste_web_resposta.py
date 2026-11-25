@@ -107,6 +107,7 @@ class Conexao:
         self.s.connect(os.path.join(home, ".lia", "run", "session.sock"))
         self.buf = b""
         self.n = 0
+        self.fechado = False  # o outro lado fechou a conexão (EOF/erro) — o avaliador diferencia de "silêncio"
 
     def enviar(self, tipo, dados):
         self.n += 1
@@ -126,7 +127,11 @@ class Conexao:
                     d = self.s.recv(65536)
                 except socket.timeout:
                     return todas, None
+                except OSError:
+                    self.fechado = True
+                    return todas, None
                 if not d:
+                    self.fechado = True
                     return todas, None
                 self.buf += d
             linha, self.buf = self.buf.split(b"\n", 1)
