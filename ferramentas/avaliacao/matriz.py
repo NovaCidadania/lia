@@ -11,8 +11,12 @@ Garantias (auditoria 2026-11-25):
   - falha do harness (exit != 0, JSON ausente/inválido, .harness-erro.json) NÃO é resultado do modelo;
   - 'FIM' só sai se TODAS as combinações esperadas têm resultado terminal válido; senão 'INCOMPLETO';
   - manifesto.json (atômico) com esperadas, válidas, faltantes, falhas de harness e totais por condição;
+  - FAIL-FAST por padrão: o PRIMEIRO erro de harness interrompe a matriz, grava o manifesto e sai com 2 (os resultados
+    seguintes não são produzidos com um harness que já falhou). --continuar-apos-falha é um modo de DIAGNÓSTICO opt-in:
+    continua, mas o manifesto sai com modo "diagnostico" e comparavel=false, e NUNCA imprime FIM (sai com 1);
+  - arquivos .harness-erro.json, .invalido e .descartado nunca contam como resultado de modelo;
   - SIGTERM/SIGINT: encerra o avaliador e toda a sua descendência (inclusive o daemon em sessão própria).
-Exit: 0 completo; 1 incompleto; 130 interrompido."""
+Exit: 0 completo; 1 incompleto (ou diagnóstico); 2 erro de harness (fail-fast); 130 interrompido."""
 import argparse, hashlib, json, os, signal, subprocess, sys, time
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +88,8 @@ def main():
     ap.add_argument("--avaliador", default=os.path.join(AQUI, "avaliar.py"))
     ap.add_argument("--limite-min", type=int, default=40)
     ap.add_argument("--sem-progresso-s", type=int, default=0)
+    ap.add_argument("--continuar-apos-falha", action="store_true",
+                    help="modo de DIAGNÓSTICO (opt-in): não para no primeiro erro de harness; o resultado nunca é comparável nem imprime FIM")
     ap.add_argument("--folga-s", type=int, default=600, help="além do limite do avaliador, antes de o runner matá-lo")
     a = ap.parse_args()
     os.makedirs(a.saida, exist_ok=True)
@@ -101,7 +107,8 @@ def main():
     estado = {"formato": "lia-matriz-manifesto/1", "tarefas_arquivo": os.path.basename(a.tarefas), "tarefas_sha256": tarefas_sha,
               "avaliador_versao": ver["avaliador_versao"], "avaliador_sha256": ver["avaliador_sha256"], "lia_sessiond_sha256": ver["lia_sessiond_sha256"],
               "temperatura": a.temperatura, "sementes": a.sementes, "esperadas": len(esperadas), "validas": [], "reaproveitadas": [],
-              "falhas_de_harness": [], "faltantes": [], "interrompido": False, "iniciado": time.strftime("%Y-%m-%dT%H:%M:%S")}
+              "falhas_de_harness": [], "faltantes": [], "interrompido": False, "abortado_por_harness": False,
+              "modo": "diagnostico" if a.continuar_apos_falha else "padrao", "iniciado": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
     def manifesto():
         feitas = {x["rotulo"] for x in estado["validas"]}
@@ -112,7 +119,9 @@ def main():
             d = por.setdefault(x["condicao"], {c: 0 for c in CLASSES})
             d[x["classe"]] += 1
         estado["por_condicao"] = por
-        estado["completo"] = not estado["faltantes"] and not estado["falhas_de_harness"] and not estado["interrompido"]
+        estado["completo"] = (not estado["faltantes"] and not estado["falhas_de_harness"] and not estado["interrompido"]
+                              and estado["modo"] == "padrao")
+        estado["comparavel"] = estado["completo"]  # só uma matriz completa, válida e em modo padrão serve de comparação
         gravar_atomico(os.path.join(a.saida, "manifesto.json"), estado)
 
     for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -170,6 +179,12 @@ def main():
                 if os.path.exists(alvo):
                     os.replace(alvo, alvo + ".invalido")
                 print("FALHA DE HARNESS em %s: %s" % (rot, "; ".join(motivos)), flush=True)
+                if not a.continuar_apos_falha:
+                    estado["abortado_por_harness"] = True
+                    manifesto()
+                    print("ABORTADO (fail-fast): erro de harness em %s; %d de %d combinações válidas até aqui; manifesto.json preservado — sem FIM" % (
+                        rot, len(estado["validas"]), len(esperadas)), flush=True)
+                    return 2
             else:
                 estado["validas"].append({"rotulo": rot, "condicao": e["condicao"], "classe": res["classe"]})
             manifesto()
@@ -182,7 +197,8 @@ def main():
     if estado["completo"]:
         print("FIM: %d de %d combinações com resultado terminal válido (manifesto.json)" % (len(estado["validas"]), len(esperadas)), flush=True)
         return 0
-    print("INCOMPLETO: %d de %d válidas; %d falhas de harness; %d faltantes (manifesto.json) — sem FIM" % (
+    print("%s: %d de %d válidas; %d falhas de harness; %d faltantes (manifesto.json) — sem FIM" % (
+        "DIAGNOSTICO-INCOMPLETO (modo opt-in, não comparável)" if a.continuar_apos_falha else "INCOMPLETO",
         len(estado["validas"]), len(esperadas), len(estado["falhas_de_harness"]), len(estado["faltantes"])), flush=True)
     return 1
 

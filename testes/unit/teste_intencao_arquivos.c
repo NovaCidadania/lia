@@ -70,6 +70,20 @@ static void pergunta(const char *pedido, const char *trecho)
     if (p) agente_plano_liberar(p);
 }
 
+/* regressão (smoke test 2026-11-26): o verbo de arquivo só vale COMO verbo — "remover levanta X" (identificador num critério)
+ * nunca pode virar "apagar inventario/estoque.py" */
+static void nao_e(const char *pedido, const char *ferramenta, const char *rotulo)
+{
+    char *td = NULL;
+    AgentePlano *p = agente_planejar_arquivos(pedido, &td);
+    gboolean ruim = p && p->passos->len && !strcmp(((AgentePasso *)g_ptr_array_index(p->passos, 0))->ferramenta, ferramenta);
+    char *desc = g_strdup_printf("não vira %s: %s", ferramenta, rotulo);
+    checar(!ruim, desc);
+    if (ruim) printf("      obtido: %s\n", ((AgentePasso *)g_ptr_array_index(p->passos, 0))->parametros_json);
+    g_free(desc); g_free(td);
+    if (p) agente_plano_liberar(p);
+}
+
 #define P(...) ((const char *const[]){ __VA_ARGS__, NULL })
 
 int main(void)
@@ -120,6 +134,27 @@ int main(void)
     espera("converta as quebras de linha de win.txt para LF", "arquivo.converter", P("caminho", "win.txt", "quebra_de_linha", "LF"));
     espera("torne deploy.sh executável", "arquivo.permissoes", P("caminho", "deploy.sh", "executavel", "true"));
     espera("desfaça a operação 20261123-204201-a1b2c3", "arquivo.desfazer", P("operacao_id", "20261123-204201-a1b2c3"));
+
+    /* o verbo precisa ser verbo de arquivo: perto do caminho ou de "arquivo"/"pasta" (smoke test 2026-11-26) */
+    nao_e("Em inventario/estoque.py, faça Estoque.remover recusar retiradas inválidas.\nCritérios de aceitação:\n1. crie a exceção EstoqueInsuficiente;\n"
+          "2. remover levanta EstoqueInsuficiente quando qtd é maior que a quantidade disponível;\n3. qtd <= 0 levanta ValueError.\n"
+          "Acrescente testes unittest em tests/test_estoque.py.", "arquivo.apagar", "'remover' é o nome do método, não 'apague o arquivo'");
+    nao_e("Em core.py, remova o ramal do número antes de normalizar.", "arquivo.apagar", "remover o ramal (conteúdo) em core.py não apaga core.py");
+    nao_e("Em core.py, faça normalise_phone copiar o valor para um novo dict e apagar a chave antiga.", "arquivo.apagar", "apagar a chave (código) não apaga arquivo");
+    espera("apague core.py", "arquivo.apagar", P("caminho", "core.py"));
+    espera("por favor, apague o arquivo build/lixo.o agora", "arquivo.apagar", P("caminho", "build/lixo.o"));
+    espera("exclua a pasta tmp/cache", "arquivo.apagar", P("caminho", "tmp/cache"));
+    /* variações de pontuação, caixa, espaço e acento */
+    espera("Apague  core.py, por favor.", "arquivo.apagar", P("caminho", "core.py"));
+    espera("EXCLUA core.py!", "arquivo.apagar", P("caminho", "core.py"));
+    espera("Exclua o arquivo core.py.", "arquivo.apagar", P("caminho", "core.py"));
+    espera("exclua   a pasta\ttmp/cache.", "arquivo.apagar", P("caminho", "tmp/cache"));
+    /* mencionar exclusão DENTRO do código/critério não é pedir a exclusão do arquivo */
+    nao_e("Em core.py, faça limpar() apagar o arquivo temporário criado pelo teste.", "arquivo.apagar", "'apagar o arquivo temporário' é comportamento do código");
+    nao_e("Em core.py, a função deve remover o arquivo de lock antes de sair.", "arquivo.apagar", "'remover o arquivo de lock' é comportamento do código");
+    nao_e("Em core.py, delete_user deve excluir o registro. Critério: excluir é idempotente.", "arquivo.apagar", "excluir registro não é excluir arquivo");
+    nao_e("Em src/a.py, mova a lógica de validação para uma função própria.", "arquivo.mover", "mover lógica não move arquivo");
+    nao_e("Em src/a.py, copie os campos do dict antes de alterar e duplique a lista.", "arquivo.copiar", "copiar dados não copia arquivo");
 
     /* validação e Git */
     espera("rode os testes", "validar.executar", P(NULL));

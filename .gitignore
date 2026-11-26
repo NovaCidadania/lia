@@ -1,3 +1,4 @@
 build/
 __pycache__/
 .aider*
+modelo-proprio/.venv/

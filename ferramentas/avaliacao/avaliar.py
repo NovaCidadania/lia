@@ -25,7 +25,7 @@ from teste_web_resposta import Conexao  # noqa: E402
 import protocolo  # noqa: E402
 
 SESSIOND = os.path.join(LIA, "build", "lia-sessiond")
-AVALIADOR_VERSAO = "avaliar/3 (2026-11-25: handshake proposta(plano_proposto)->solicitar, fail-fast, limpeza da árvore de processos)"
+AVALIADOR_VERSAO = "avaliar/4 (2026-11-26: protocolo estrito (plano só se solicitado, mesma pergunta), runner fail-fast, atribuição da falha)"
 FORMATO = "lia-avaliacao-execucao/3"
 CLASSES_TERMINAIS = ("sucesso", "concluido_falso", "nao_concluido", "sem_oraculo", "bloqueado por ambiente")
 BASE = "/tmp/lia-aval"  # caminho curto: o socket AF_UNIX tem limite de 108 bytes
@@ -100,6 +100,33 @@ def e_fixture_sintetica(chave):
     return chave in FIXTURES_SINTETICAS
 
 
+def atribuir(res):
+    """A quem atribuir o desfecho de uma execução (heurística DECLARADA, aplicada igual a todas as condições):
+    sucesso | harness | ambiente | oraculo_ou_ambiente | runtime (concluído sem prova) | modelo (proposta/edição inválida ou que não resolve)
+    | backend (o modelo/servidor não respondeu) | indeterminado. Execução de harness inválido nunca é do modelo."""
+    classe, causa = res.get("classe"), res.get("causa") or ""
+    if classe == "sucesso":
+        return "sucesso"
+    if res.get("condicao") == "sem-modelo" and classe in ("nao_concluido", "concluido_falso"):
+        return "baseline_sem_modelo" if classe == "nao_concluido" else "runtime"
+    if classe == "erro_de_harness":
+        return "harness"
+    if classe in ("bloqueado por ambiente", "sem_oraculo"):
+        return "ambiente" if classe != "sem_oraculo" else "sem_oraculo"
+    if res.get("suite_antes") not in (None, 0):
+        return "ambiente"   # a suíte-base já falhava antes: não dá para culpar o modelo
+    oc = res.get("oculta") or {}
+    if oc and oc.get("codigo_saida") in (124, 126, 127):
+        return "oraculo_ou_ambiente"   # o oráculo não chegou a avaliar (tempo, executável ausente)
+    if classe == "concluido_falso":
+        return "runtime"    # a Lia declarou concluído sem que o requisito estivesse atendido
+    if causa.startswith("modelo_") or causa in ("transporte", "timeout", "cancelado"):
+        return "backend"
+    if causa in ("proposta_invalida", "truncamento", "repeticao", "limite_ciclos", "validacao", "criterios", "validacao_proibidos", "sem_contexto"):
+        return "modelo"
+    return "indeterminado"
+
+
 def sha_avaliador():
     """hash do avaliador (este arquivo + protocolo.py): o runner só reaproveita resultado da MESMA versão"""
     h = hashlib.sha256()
@@ -130,6 +157,8 @@ def politica_de_plano(h, argv_harness):
                 decisao, motivo = "rejeitar", "argv diferente do harness"
         else:
             for x in passos:
+                if x.get("ferramenta") in ("arquivo.apagar", "arquivo.mover"):
+                    decisao, motivo = "rejeitar", "operação destrutiva fora do escopo de uma tarefa de coding: " + str(x.get("ferramenta"))
                 cam = x.get("caminho") or ""
                 if cam.startswith("/") or ".." in cam.split("/") or cam.endswith(".meta") or cam.startswith(".env") or cam.startswith(".lia"):
                     decisao, motivo = "rejeitar", "caminho fora do escopo: " + cam
@@ -327,6 +356,7 @@ def main():
                                       and res["original_intocado"] and not res["violacao_proibicao"])
         res["classe"] = "sucesso" if res["sucesso_estrito"] else ("concluido_falso" if concluido else "nao_concluido")
     res["causa"] = ck.get("causa")
+    res["atribuicao"] = atribuir(res)
     res["estado_terminal"] = "ok"
     assert res["classe"] in CLASSES_TERMINAIS
     gravar_atomico(os.path.join(a.saida, rotulo + ".json"), res)

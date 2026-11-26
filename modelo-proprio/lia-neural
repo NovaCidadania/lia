@@ -1,0 +1,8 @@
+#!/bin/sh
+# CLI do modelo próprio da Lia: usa o venv do projeto (modelo-proprio/.venv); nunca o python/pacotes globais para o torch
+aqui=$(cd "$(dirname "$0")" && pwd)
+py="$aqui/.venv/bin/python"
+[ -x "$py" ] || py=python3
+# inferência sob o RLIMIT_AS do lia-sessiond (512 MB; o rígido é 2 GB): poucas threads e poucas arenas de malloc reduzem o espaço virtual
+case "$1" in propor|propor-lia) export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}" MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}" ;; esac
+cd "$aqui" && exec "$py" -W ignore -m lia_neural.cli "$@"

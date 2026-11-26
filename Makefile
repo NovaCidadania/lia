@@ -177,7 +177,7 @@ SESSIOND_OBJS := $(B)/sessiond-sessiond.o $(B)/sessiond-executor-comum.o \
                   $(B)/sessiond-pic-sistema.o $(B)/sessiond-pic-ferramentas.o \
                   $(B)/sessiond-modelo-comum.o $(B)/sessiond-modelo-mock.o \
                   $(B)/sessiond-modelo-ollama.o $(B)/sessiond-cliente-ollama.o \
-                  $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o \
+                  $(B)/sessiond-modelo-llama-cpp.o $(B)/sessiond-cliente-llama-cpp.o $(B)/sessiond-modelo-lia-proprio.o \
                   $(B)/sessiond-prompt.o $(B)/sessiond-roteador.o $(B)/sessiond-apresentacao.o \
                   $(B)/sessiond-agente.o $(B)/sessiond-web-pesquisa.o $(B)/sessiond-sintese-web.o $(B)/sessiond-projeto-arquivos.o $(B)/sessiond-intencao-arquivos.o $(B)/sessiond-projeto-praticas.o $(B)/sessiond-projeto-processo.o $(B)/sessiond-projeto-validacao.o $(B)/sessiond-projeto-git.o $(B)/sessiond-coding.o $(B)/sessiond-arvore.o
 
@@ -218,6 +218,9 @@ $(B)/sessiond-cliente-ollama.o: ollama/cliente_ollama.c ollama/cliente_ollama.h 
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-modelo-llama-cpp.o: sessiond/modelo_llama_cpp.c sessiond/modelo.h ollama/cliente_llama_cpp.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/sessiond-modelo-lia-proprio.o: sessiond/modelo_lia_proprio.c sessiond/modelo.h | $(B)
 	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
 
 $(B)/sessiond-cliente-llama-cpp.o: ollama/cliente_llama_cpp.c ollama/cliente_llama_cpp.h | $(B)
@@ -364,6 +367,21 @@ $(B)/teste-intencao-arquivos: $(B)/teste-intencao-arquivos.o $(B)/sessiond-inten
 teste-intencao-arquivos: $(B)/teste-intencao-arquivos
 	$(B)/teste-intencao-arquivos
 
+# Backend experimental "lia_proprio" (CLI de mentira) e o modelo neural próprio (PyTorch, venv do projeto)
+$(B)/teste-modelo-lia-proprio.o: testes/unit/teste_modelo_lia_proprio.c sessiond/modelo.h | $(B)
+	$(CC) $(SESSIOND_CFLAGS) -c $< -o $@
+
+$(B)/teste-modelo-lia-proprio: $(B)/teste-modelo-lia-proprio.o $(B)/sessiond-modelo-lia-proprio.o $(B)/sessiond-modelo-comum.o
+	$(CC) $^ $(SESSIOND_LIBS) -lm -o $@
+
+teste-modelo-proprio-backend: $(B)/teste-modelo-lia-proprio
+	$(B)/teste-modelo-lia-proprio
+
+# precisa do venv do projeto: python3 -m venv modelo-proprio/.venv && modelo-proprio/.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+teste-modelo-proprio:
+	@test -x modelo-proprio/.venv/bin/python || { echo "teste-modelo-proprio: falta o venv modelo-proprio/.venv (ver docs/MODELO-PROPRIO.md); NÃO foi executado"; exit 2; }
+	modelo-proprio/.venv/bin/python testes/modelo_proprio/teste_modelo.py
+
 # Testes unitários do Agent Runtime v2 (plano, validação, verificador,
 # replanejador, relatório): código puro, sem daemon nem modelo.
 $(B)/teste-agente.o: testes/unit/teste_agente.c sessiond/agente.h | $(B)
@@ -484,4 +502,4 @@ teste-chat: chat sessiond
 chat-run: chat
 	$(B)/lia-chat
 
-.PHONY: teste-harness-avaliacao teste-treino teste-arvore teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-coding-php teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run
+.PHONY: teste-modelo-proprio teste-modelo-proprio-backend teste-harness-avaliacao teste-treino teste-arvore teste-web-resposta teste-sintese-web teste-arquivos teste-intencao-arquivos teste-arquivos-projeto teste-praticas teste-processo teste-validacao-git teste-coding-unit teste-coding teste-coding-php teste-agente teste-roteador all teste bench clean gui teste-gui gui-run gui-smoke sessiond teste-sessiond integration teste-modelo teste-ollama teste-llama-cpp teste-web chat teste-chat chat-run

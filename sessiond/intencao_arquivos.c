@@ -22,6 +22,43 @@ static char *normalizar(const char *s)
     return g_string_free(o, FALSE);
 }
 
+/* O verbo de operação de arquivo (apague/remova/mova/copie...) só é verbo DE ARQUIVO quando o objeto vem logo depois:
+ * um caminho citado ou "arquivo/pasta/diretório" nas 3 palavras seguintes. "remover levanta X" (nome de método num critério)
+ * ou "remova o ramal em core.py" (conteúdo) não são "apague core.py" (smoke test 2026-11-26: o baseline apagou um módulo). */
+static gboolean verbo_com_objeto_de_arquivo(const char *t, const char *const *verbos, char **cam, int ncam)
+{
+    static const char *const OBJ[] = { "arquivo", "arquivos", "pasta", "pastas", "diretorio", "diretorios", "file", "folder", "dir", NULL };
+    for (int v = 0; verbos[v]; v++) {
+        for (const char *q = t; (q = strstr(q, verbos[v])); q++) {
+            const char *p = q + strlen(verbos[v]);
+            for (int k = 0; k < 3 && *p; k++) {
+                while (*p == ' ') p++;
+                const char *e = p;
+                while (*e && *e != ' ') e++;
+                char *tok = g_strndup(p, (gsize)(e - p));
+                gsize n = strlen(tok);
+                while (n && strchr(".,;:!?)]}\"'", tok[n - 1])) tok[--n] = '\0';
+                const char *sem = tok;
+                while (*sem && strchr("([{\"'", *sem)) sem++;
+                while (sem[0] == '.' && sem[1] == '/') sem += 2;
+                gboolean ok = FALSE;
+                /* com caminho citado, só o CAMINHO é o objeto: "apague o arquivo temporário" dentro de um critério de código
+                 * (a função deve remover o arquivo temporário) não apaga o arquivo do pedido */
+                for (int i = 0; OBJ[i] && !ok && ncam == 0; i++) ok = !strcmp(tok, OBJ[i]);
+                for (int i = 0; i < ncam && !ok; i++) {
+                    const char *c = cam[i];
+                    while (c[0] == '.' && c[1] == '/') c += 2;
+                    ok = !g_ascii_strcasecmp(sem, c);
+                }
+                g_free(tok);
+                if (ok) return TRUE;
+                p = e;
+            }
+        }
+    }
+    return FALSE;
+}
+
 static gboolean tem(const char *t, const char *const *v)
 {
     for (int i = 0; v[i]; i++) if (strstr(t, v[i])) return TRUE;
@@ -468,8 +505,10 @@ sem_git:
     }
 
     /* ---- mover/renomear e copiar: dois caminhos ---- */
-    gboolean mover = tem(t, L(" renomeie ", " renomear ", " mova ", " mover ", " mv "));
-    gboolean copiar = tem(t, L(" copie ", " copiar ", " duplique ", " duplicar ", " cp "));
+    gboolean mover = tem(t, L(" renomeie ", " renomear ", " mova ", " mover ", " mv ")) &&
+                     verbo_com_objeto_de_arquivo(t, L(" renomeie ", " renomear ", " mova ", " mover ", " mv "), cam, ncam);
+    gboolean copiar = tem(t, L(" copie ", " copiar ", " duplique ", " duplicar ", " cp ")) &&
+                      verbo_com_objeto_de_arquivo(t, L(" copie ", " copiar ", " duplique ", " duplicar ", " cp "), cam, ncam);
     if (mover || copiar) {
         if (ncam >= 2) {
             char *obj = g_strdup_printf("%s %s para %s", mover ? "mover/renomear" : "copiar", cam[0], cam[1]);
@@ -484,7 +523,8 @@ sem_git:
     }
 
     /* ---- apagar ---- */
-    if (tem(t, L(" apague ", " apagar ", " delete ", " deletar ", " remova ", " remover ", " exclua ", " excluir ", " rm "))) {
+    if (tem(t, L(" apague ", " apagar ", " delete ", " deletar ", " remova ", " remover ", " exclua ", " excluir ", " rm ")) &&
+        verbo_com_objeto_de_arquivo(t, L(" apague ", " apagar ", " delete ", " deletar ", " remova ", " remover ", " exclua ", " excluir ", " rm "), cam, ncam)) {
         if (ncam >= 1) {
             char *obj = g_strdup_printf("apagar %s (fica uma cópia para desfazer)", cam[0]);
             p = plano_um_passo(obj, "arquivo_alterar", "arquivo.apagar", json_params("caminho", cam[0], NULL, NULL, NULL, NULL), "arquivo_alterado");

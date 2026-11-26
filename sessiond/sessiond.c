@@ -2507,6 +2507,10 @@ static char *modelo_descricao(void)
         const char *m = g_getenv("LIA_LLAMACPP_MODELO_NOME"), *f = g_getenv("LIA_LLAMACPP_FORMATO");
         return g_strdup_printf("llama.cpp · %s · formato %s", m && *m ? m : "modelo carregado no llama-server", f && *f ? f : "cru");
     }
+    if (!strcmp(nb, "lia_proprio")) {
+        char *id = modelo_lia_proprio_identidade();
+        return id ? id : g_strdup("Lia própria (experimental) · SEM checkpoint válido");
+    }
     return g_strdup(nb);
 }
 
@@ -4119,6 +4123,11 @@ static void escolher_modelo(void)
     } else if (modo && strcmp(modo, "llama_cpp") == 0) {
         g_modelo = modelo_llama_cpp_obter();
         g_print("lia-sessiond: modelo = llama_cpp (LIA_SESSIOND_MODELO=llama_cpp)\n");
+    } else if (modo && strcmp(modo, "lia_proprio") == 0) {
+        g_modelo = modelo_lia_proprio_obter();
+        char *id = modelo_lia_proprio_identidade();
+        g_print("lia-sessiond: modelo = lia_proprio EXPERIMENTAL (LIA_SESSIOND_MODELO=lia_proprio) — %s\n", id ? id : "SEM checkpoint válido: as perguntas falharão com modelo_indisponivel");
+        g_free(id);
     } else {
         g_modelo = modelo_mock_obter();
         g_print("lia-sessiond: modelo = mock (padrão — defina LIA_SESSIOND_MODELO=ollama ou =llama_cpp para o modelo real)\n");

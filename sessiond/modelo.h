@@ -120,6 +120,10 @@ struct ModeloBackend {
 const ModeloBackend *modelo_mock_obter(void);
 const ModeloBackend *modelo_ollama_obter(void);
 const ModeloBackend *modelo_llama_cpp_obter(void);
+/* EXPERIMENTAL e opt-in (LIA_SESSIOND_MODELO=lia_proprio): modelo neural treinado do zero pela Lia (modelo-proprio/).
+ * Só propõe edições; ver sessiond/modelo_lia_proprio.c. A identidade ("arquivo · sha256 …") sai em toda resposta que o usa. */
+const ModeloBackend *modelo_lia_proprio_obter(void);
+char *modelo_lia_proprio_identidade(void);
 /* LIA_LLAMACPP_FORMATO: "cru" (padrão), "chatml" ou "llama3" — embrulha o prompt no modelo de conversa */
 char *llama_cpp_formatar_prompt(const char *formato, const char *prompt);
 

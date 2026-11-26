@@ -17,7 +17,8 @@ import os, signal, time
 
 # o que o daemon pode enviar ao cliente (gui/protocolo.h); qualquer outro tipo é inesperado
 TIPOS_DO_DAEMON = {"plano", "progresso", "saida", "resultado", "auditoria", "erro", "proposta", "resposta"}
-TERMINOS_DE_HARNESS = ("sem_progresso", "desconectado", "erro_protocolo", "evento_inesperado", "handshake_repetido")
+TERMINOS_DE_HARNESS = ("sem_progresso", "desconectado", "erro_protocolo", "evento_inesperado", "handshake_repetido",
+                       "plano_sem_solicitacao", "plano_divergente", "pergunta_divergente", "mensagem_malformada")
 
 
 def conduzir(c, prompt, decidir_plano, limite_s, sem_progresso_s, agora=time.time):
@@ -29,7 +30,9 @@ def conduzir(c, prompt, decidir_plano, limite_s, sem_progresso_s, agora=time.tim
     out = {"termino": None, "resposta": None, "eventos": [], "aprovacoes": [], "solicitacoes": [], "diagnostico": ""}
     t0 = agora()
     ultimo = t0
-    solicitados = set()
+    solicitados = {}          # plano_id -> hash que ESTE cliente solicitou (nada além disso é aprovável)
+    coding_ativo = [False]    # o daemon abriu um ciclo de coding (proposta com 'codigo'): ele pede aprovações sem 'solicitar'
+    pergunta = [None]         # pergunta_id da primeira proposta: tudo o que vier depois precisa ser da mesma pergunta
     c.enviar("perguntar", {"mensagem": prompt})
     while out["termino"] is None:
         if agora() - t0 >= limite_s:
@@ -41,13 +44,21 @@ def conduzir(c, prompt, decidir_plano, limite_s, sem_progresso_s, agora=time.tim
             out["termino"] = "sem_progresso"
             out["diagnostico"] = "nenhum evento do daemon em %d s; último evento: %s" % (sem_progresso_s, ult)
             break
-        msgs, _ = c.ate("__nada__", min(2.0, max(0.1, sem_progresso_s)))
+        try:
+            msgs, _ = c.ate("__nada__", min(2.0, max(0.1, sem_progresso_s)))
+        except (TypeError, KeyError, ValueError, AttributeError) as e:   # linha que não é um envelope lia.v1 válido
+            out["termino"], out["diagnostico"] = "mensagem_malformada", "linha do daemon ilegível como envelope lia.v1: %s: %s" % (type(e).__name__, e)
+            break
         if getattr(c, "fechado", False) and not msgs:
             out["termino"] = "desconectado"
             out["diagnostico"] = "o daemon fechou a conexão antes da resposta final"
             break
         for m in msgs:
             ultimo = agora()
+            if not isinstance(m, dict) or not isinstance(m.get("dados") if m.get("dados") is not None else {}, dict):
+                out["eventos"].append({"t": round(agora() - t0, 1), "tipo": None})
+                out["termino"], out["diagnostico"] = "mensagem_malformada", "mensagem que não é objeto ou com 'dados' que não é objeto: %.120r" % (m,)
+                break
             tipo = m.get("tipo")
             dd = m.get("dados") or {}
             ev = {"t": round(agora() - t0, 1), "tipo": tipo}
@@ -55,6 +66,18 @@ def conduzir(c, prompt, decidir_plano, limite_s, sem_progresso_s, agora=time.tim
             if tipo not in TIPOS_DO_DAEMON:
                 out["termino"], out["diagnostico"] = "evento_inesperado", "tipo de evento desconhecido: %r" % (tipo,)
                 break
+            pid = dd.get("pergunta_id")
+            if tipo in ("proposta", "resposta") and not (isinstance(pid, str) and pid):
+                out["termino"] = "pergunta_divergente"
+                out["diagnostico"] = "'%s' sem pergunta_id válido (%r): não dá para vinculá-la à pergunta enviada" % (tipo, pid)
+                break
+            if pid and tipo in ("proposta", "resposta", "progresso"):
+                if pergunta[0] is None and tipo == "proposta":
+                    pergunta[0] = pid
+                elif pergunta[0] is not None and pid != pergunta[0]:
+                    out["termino"] = "pergunta_divergente"
+                    out["diagnostico"] = "'%s' é da pergunta %s, mas a conversa é da pergunta %s" % (tipo, pid, pergunta[0])
+                    break
             if tipo == "progresso":
                 ev["mensagem"] = dd.get("mensagem")
                 if "codigo" in dd:
@@ -66,6 +89,27 @@ def conduzir(c, prompt, decidir_plano, limite_s, sem_progresso_s, agora=time.tim
                 break
             elif tipo == "plano":
                 ev["intencao"] = dd.get("intencao")
+                pid_, hash_ = dd.get("plano_id"), dd.get("hash")
+                if not (isinstance(pid_, str) and pid_ and isinstance(hash_, str) and hash_):
+                    out["termino"] = "mensagem_malformada"
+                    out["diagnostico"] = "plano sem plano_id/hash válidos (%r, %r): nada é aprovado" % (pid_, hash_)
+                    break
+                if pid_ in solicitados and hash_ != solicitados[pid_]:
+                    problema = ("plano_divergente", "o plano %s veio com hash %s, mas o solicitado tinha %s" % (pid_, hash_, solicitados[pid_]))
+                elif pid_ not in solicitados and solicitados:
+                    problema = ("plano_divergente", "plano %s não é o solicitado (%s)" % (pid_, ", ".join(solicitados)))
+                elif pid_ not in solicitados and not coding_ativo[0]:
+                    problema = ("plano_sem_solicitacao", "plano %s chegou sem 'solicitar' correspondente e sem ciclo de coding ativo" % pid_)
+                else:
+                    problema = None
+                if problema:
+                    # nada inesperado é aprovado: rejeita (vinculado ao hash recebido) e encerra como erro de harness
+                    out["aprovacoes"].append({"t": ev["t"], "intencao": dd.get("intencao"), "decisao": "rejeitar", "motivo": problema[1], "passos": [],
+                                              "plano_id": pid_, "hash": hash_})
+                    if pid_ and hash_:
+                        c.enviar("aprovar", {"plano_id": pid_, "hash": hash_, "decisao": "rejeitar", "escopo": "uma_vez"})
+                    out["termino"], out["diagnostico"] = problema
+                    break
                 decisao, motivo, passos = decidir_plano(dd)
                 out["aprovacoes"].append({"t": ev["t"], "intencao": dd.get("intencao"), "decisao": decisao, "motivo": motivo, "passos": passos,
                                           "plano_id": dd.get("plano_id"), "hash": dd.get("hash")})
@@ -75,17 +119,24 @@ def conduzir(c, prompt, decidir_plano, limite_s, sem_progresso_s, agora=time.tim
                 break
             elif tipo == "proposta":
                 pl = dd.get("plano_proposto")
+                if pl and not (isinstance(pl, dict) and isinstance(pl.get("plano_id"), str) and pl.get("plano_id")
+                               and isinstance(pl.get("hash"), str) and pl.get("hash")):
+                    out["termino"] = "mensagem_malformada"
+                    out["diagnostico"] = "plano_proposto sem plano_id/hash válidos: %.120r" % (pl,)
+                    break
                 if pl:
                     # o plano validado só executa com 'solicitar' presos ao id e ao hash que o daemon enviou
                     ev["plano_proposto"] = {"plano_id": pl.get("plano_id"), "hash": pl.get("hash"), "intencao": pl.get("intencao")}
                     if pl.get("plano_id") in solicitados:
                         out["termino"], out["diagnostico"] = "handshake_repetido", "o daemon propôs de novo o plano %s já solicitado" % pl.get("plano_id")
                         break
-                    solicitados.add(pl.get("plano_id"))
+                    solicitados[pl.get("plano_id")] = pl.get("hash")
                     sol = {"plano_id": pl["plano_id"], "hash": pl["hash"], "origem_modelo": True, "pergunta_id": dd.get("pergunta_id")}
                     out["solicitacoes"].append({"t": ev["t"], **sol})
                     c.enviar("solicitar", sol)
-                elif not dd.get("codigo"):
+                elif dd.get("codigo") or dd.get("tipo_resposta") == "codigo":
+                    coding_ativo[0] = True   # ciclo de coding em andamento: NÃO é a resposta final
+                else:
                     out["termino"] = "resposta"
                     out["resposta"] = dd.get("resposta_texto") or "(proposta sem tarefa de código)"
                     break
