@@ -381,6 +381,7 @@ teste-modelo-proprio-backend: $(B)/teste-modelo-lia-proprio
 teste-modelo-proprio:
 	@test -x modelo-proprio/.venv/bin/python || { echo "teste-modelo-proprio: falta o venv modelo-proprio/.venv (ver docs/MODELO-PROPRIO.md); NÃO foi executado"; exit 2; }
 	modelo-proprio/.venv/bin/python testes/modelo_proprio/teste_modelo.py
+	modelo-proprio/.venv/bin/python testes/modelo_proprio/teste_reparo.py
 
 # Testes unitários do Agent Runtime v2 (plano, validação, verificador,
 # replanejador, relatório): código puro, sem daemon nem modelo.

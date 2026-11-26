@@ -57,3 +57,17 @@ make teste-modelo-proprio-backend    # backend C com um CLI de mentira
 | `lia_neural/sandbox.py`, `runtime.py` | execução isolada (bwrap, sem rede) do código proposto; só o runtime conclui |
 | `lia_neural/baseline.py`, `avaliacao.py` | baselines determinísticos e comparação no holdout |
 | `lia_neural/inferencia.py`, `e2e_lia.py` | adaptador para o prompt de coding da Lia; integração ponta a ponta com o daemon real |
+
+## V2 — localizador neural de defeitos (`reparo-*`)
+
+A rede (Transformer de bytes, do zero) pontua trocas atômicas do arquivo; o patch é reconstruído de forma determinística. Ver `docs/MODELO-PROPRIO.md` (pré-registro e resultados).
+
+```sh
+R=~/.lia/modelo-proprio
+modelo-proprio/lia-neural reparo-dados   --saida $R/rep-s3 --n-treino 10000          # determinístico; manifesto com hashes
+modelo-proprio/lia-neural reparo-treinar --dados $R/rep-s3 --saida $R/rep-run3 --passos 2500 --d 128 --camadas 5 --cabecas 4 --paciencia 6
+modelo-proprio/lia-neural reparo-avaliar --dados $R/rep-s3 --checkpoint $R/rep-run3/melhor.pt --particao dev   --saida dev.json   # escolher por dev
+modelo-proprio/lia-neural reparo-avaliar --dados $R/rep-s3 --checkpoint $R/rep-run3/melhor.pt --particao teste --saida teste.json # só no fim
+LIA_SESSIOND_MODELO=lia_proprio LIA_PROPRIO_CHECKPOINT=$R/rep-run3/melhor.pt lia-sessiond   # backend experimental (despacha V1/V2 pelo formato)
+make teste-modelo-proprio                                                                    # testes V1 e V2
+```

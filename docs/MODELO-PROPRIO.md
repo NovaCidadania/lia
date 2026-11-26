@@ -71,4 +71,134 @@ em casos de esclarecer/recusar; tempo, memória máxima e tamanho do checkpoint.
 
 ## Resultados
 
-(preenchidos depois da execução)
+Medido em 2026-11-26, depois de fixados tarefa e critério. Nenhum ajuste usou o teste; houve **uma única** execução de treino (semente 1,
+4000 passos, hiperparâmetros padrão do CLI) e **uma única** avaliação de teste.
+
+### Veredito pré-registrado: **o protótipo AINDA NÃO sabe executar a tarefa de forma confiável.**
+
+Capacidade na tarefa estreita **não declarável**: treinado (0,0 % de ocultos) não é maior que o aleatório (0,0 %) nem que o baseline B0 (14,5 %).
+Falsos "concluído" do treinado = 0 (critério parcial atendido, mas só porque o modelo quase nunca propõe uma edição que aplique).
+
+### Teste (300 exemplos, 6 famílias nunca vistas; hash da partição `f990f3d4…`, conjunto `3fda174a…`)
+
+| Condição | ocultos aprovados | edição aplica | formato válido | falsos "concluído" |
+|---|---|---|---|---|
+| Aleatório (sem treino) | 0,0 % | 0,0 % | 0,0 % | 0 |
+| **Treinado do zero** | **0,0 %** | 11,3 % | 94,7 % | **0** |
+| Baseline B0 (1ª inversão de operador) | 14,5 % | 97,7 % | 100 % | 2 |
+| B1 — referência suplementar (usa a suíte visível), **fora do critério** | 31,2 % | 33,9 % | 100 % | 6 |
+
+B1 foi adicionada depois do pré-registro como referência de teto para uma busca sem aprendizado; não entra no veredito.
+
+### Evidência de treino (perda por token da resposta)
+
+Perda de treino caiu de ~5,5 para 0,0006 (real, medida; `~/.lia/modelo-proprio/run1/treino.jsonl`). A perda de **desenvolvimento** foi mínima
+no passo 250 (2,55) e **subiu** até 3,87 no passo 4000: o modelo decorou as 24 famílias de treino e não generaliza para famílias novas.
+Com 24 famílias de treino, o sinal é pouco para aprender "ache o defeito" em vez de "lembre a família".
+
+### Checkpoint
+
+`~/.lia/modelo-proprio/run1/ultimo.pt` — sha256 `e5d1e39d162e15325d7b73bb8e6da893e08551798c117e6e5680dad4c51437d2`, 20 135 191 bytes,
+1 671 520 parâmetros, passo 4000, semente 1, `hash_dataset` `3fda174a…`, código `lia-neural/1`. Treino ≈ 5 467 s em CPU, RSS ≈ 1,3 GB;
+avaliação de teste 241 s, pico 460 MB.
+
+### Integração com a Lia real
+
+`e2e-lia --n 12` contra o `lia-sessiond` real (`LIA_SESSIOND_MODELO=lia_proprio`): 12 × `nao_concluido`, 0 falsos "concluído",
+nenhuma escrita sem aprovação. O backend, a identidade do checkpoint e o fluxo de aprovação funcionam; o modelo é que não acerta as edições.
+
+### Limitações
+
+Dados 100 % sintéticos e de 36 famílias; tarefa de uma linha; o conjunto de teste, uma vez visto neste relatório, não é mais cego para
+iterações futuras (a próxima rodada precisa de nova semente/famílias); uma só semente de treino; sem varredura de hiperparâmetros.
+Próximos passos plausíveis (não executados): mais famílias e mutações por família, regularização/early stopping pela perda de dev,
+aumento de dados por renomeação de identificadores — escolhidos só olhando dev.
+
+---
+
+# V2 — localizador neural de defeitos (pré-registro, 2026-11-26, ANTES de qualquer resultado)
+
+## Avaliação do trabalho anterior (esboço "repair_*" iniciado por outro agente, nunca executado de ponta a ponta)
+
+Descartado e substituído, por três motivos verificados na leitura do código:
+1. **Vazamento de evidência**: o modelo recebia como entrada `passam_visiveis` (quantos testes visíveis cada candidato satisfaz) e um "portão"
+   que só aceitava candidatos que passam nos testes visíveis. Com isso a "acurácia" é a de uma busca por teste (o B1 do V1), não da rede.
+   Os testes visíveis eram ainda escolhidos para eliminar todos os outros candidatos, então B1 = 100 % por construção.
+2. **Bug de treino**: `label_smoothing` com logits mascarados em -1e9 dava perda ≈ 3,4·10⁶ (visto no log).
+3. **Generalização inflada**: 120 "famílias" eram só 6 esqueletos com nome/comentário diferentes; o split "por família" repartia os mesmos esqueletos.
+
+## Hipótese e arquitetura
+
+O V1 falhou ao *reescrever* uma linha byte a byte (11 % das edições aplicavam) e memorizou 24 famílias. O V2 troca a geração livre por
+**localização**: a rede (Transformer codificador de bytes, treinada do zero) lê `pedido + arquivo` e **pontua** cada troca atômica possível
+(operador, comparador, and/or, constante ±1, min/max, True/False) pelo seu token no arquivo. O patch é reconstruído de forma determinística
+(linha exata, única no arquivo). A rede **não vê o resultado de nenhum teste**; só pedido (que traz um caso que falha) e código.
+Ela nunca escreve texto livre, nunca declara "concluído", nunca grava. Fora do escopo (função inexistente, nenhum arquivo, mais de um arquivo)
+continua sendo decidido por **regra determinística** do adaptador, e isso está rotulado como regra, não como capacidade do modelo.
+
+## Dados
+
+36 famílias do V1 + 35 novas (`familias2.py`); o defeito é injetado por troca atômica gerada (sem lista manual). Partição por família:
+**teste = 18 famílias novas** (nunca usadas em treino/dev e nunca olhadas), dev = 8 novas, treino = 36 do V1 + 9 novas.
+Mesmos testes visíveis (3) / ocultos (12) do V1; o defeito precisa mudar o comportamento. Semente de teste distinta da de treino/dev.
+
+## Condições (mesmo holdout de teste)
+
+Principal, **sem feedback de teste** (top-1 da condição, aplicado pelo runtime): (a) pesos aleatórios, (b) **treinado**, (c) B0 = primeira troca
+candidata em ordem de fonte dentro da função citada.
+Suplementar, **com laço do runtime** (até K=5 candidatas na ordem da condição; conclui na primeira que passa a suíte visível): (d) treinado,
+(e) aleatório, (f) ordem de fonte (≈ B1). Mostra o quanto a rede reduz tentativas sobre a busca cega; o laço usa teste, então não é prova de saber.
+
+## Métricas
+
+top-1 exato e recall@3 do alvo, edição aplica, **testes ocultos aprovados** (principal), concluído (suíte visível passa), **falso "concluído"**
+(visível passa e oculto reprova), tempo, memória, tamanho do checkpoint, perda treino/dev.
+
+## Critério (fixado agora)
+
+Capacidade declarável **só nesta tarefa estreita** se, no teste: ocultos(b) ≥ ocultos(a) + 10 pontos **e** ≥ ocultos(c) + 10 pontos **e** falsos
+"concluído" de (b) = 0. Caso contrário: "ainda não sabe". Hiperparâmetros escolhidos apenas por perda/acurácia de **dev**; o teste roda uma vez no fim.
+Em nenhum caso isso é "proficiente em programação": é uma tarefa de uma linha, em funções sintéticas curtas.
+
+## Resultados V2 (medidos uma única vez no teste, depois de fixar o critério)
+
+Dados: `rep-s3` (gerador `lia-repair-dados/2`, semente 1, hash do conjunto `ad2f49dd…`; duas gerações independentes deram arquivos idênticos).
+Treino: 10 000 exemplos de 245 famílias (36 do V1 + 9 novas + 200 composicionais agregação×filtro×transformação, adicionadas depois de ver que o
+dev não melhorava só com 45 famílias — escolha feita olhando dev). Modelo d=128, 5 camadas, 1 253 889 parâmetros, aleatório no início.
+Teste: 900 exemplos de famílias nunca vistas (só 14 das 18 famílias aparecem na amostra de 900; não investiguei por quê).
+
+**Checkpoint avaliado** = o melhor em **perda de dev**, que foi o do passo 250 (o treino foi interrompido por mim no passo ~1000, quando já era
+claro que a perda de dev só subia): `~/.lia/modelo-proprio/rep-run3/melhor.pt`, sha256 `3f364b07f343ce73cb37f38c364876482f2838888bcdb1257da0b0984609da0e`,
+5 037 888 bytes. Avaliação: 68 s, pico 492 MB.
+
+| Condição (teste, n=900) | top-1 exato | recall@3 | ocultos aprovados (top-1) | falsos "concluído" (top-1) | ocultos com laço K=5 | falsos (laço) |
+|---|---|---|---|---|---|---|
+| Aleatório | 7,2 % | 27,2 % | 8,9 % | 32 | 44,7 % | 71 |
+| **Treinado do zero** | **35,3 %** | **60,3 %** | **36,7 %** | **18** | 74,3 % | 29 |
+| B0 (ordem de fonte) | 4,1 % | 48,7 % | 6,3 % | 14 | 69,9 % | 32 |
+
+Treinado − aleatório = +27,8 pp (IC95 [24,3; 31,3]); treinado − B0 = +30,3 pp (IC95 [26,9; 33,8]).
+
+### Veredito pré-registrado: `capacidade_declaravel_na_tarefa_estreita = false`
+
+A margem de ≥ 10 pp sobre o aleatório e sobre o B0 foi atendida com folga, **mas o critério exigia falsos "concluído" = 0 e o treinado teve 18**
+(a suíte visível de 3 casos deixa passar edições erradas). Pelo critério fixado, **o protótipo não é declarável como capaz nem na tarefa estreita**.
+O que os números sustentam: a rede treinada do zero localiza o defeito muito melhor que o acaso e que a heurística de ordem de fonte, mas
+**acerta só ~37 % dos casos, e de forma muito desigual por família** (de 79 % em `soma_quadrados`, 71 % em `tamanho_maior` e 66 % em `conta_letra_a` a
+0–7 % em `diferenca_abs`, `esta_ordenada`, `media_ponderada`, `desconto_acima_100`, `conta_subidas`). Não generaliza de forma confiável.
+Esse número vem de um checkpoint de 250 passos: a perda de dev piora com mais treino (2,14 → 2,38 → 2,95 no run1; 2,55 → 2,99 → 2,89 → 2,76 no run3),
+ou seja, mais treino com estes dados memoriza famílias em vez de generalizar.
+
+O laço do runtime (até 5 candidatas, conclui na primeira que passa a suíte visível) sobe os ocultos para 74 %, mas B0 chega a 70 % com o mesmo
+laço: **o ganho do laço vem da busca por teste, não da rede**; a contribuição da rede ali é só reduzir tentativas (2,76 vs 3,36 vs 3,91 em média).
+
+### Integração com a Lia real (lia-sessiond, backend `lia_proprio`, 20 primeiros do teste)
+
+9 sucessos, 8 não concluídos, 3 `concluido_falso`; aprovações exigidas em todas as escritas (nenhuma escrita sem aprovação). O backend identifica o
+checkpoint (sha256). Isso reforça: ~45 % de sucesso, 15 % de falsos "concluído". **Não usar como coder.**
+
+### Limitações / o que não foi feito
+Funções sintéticas curtas, defeito de uma troca de token; escopo (função existe, um arquivo) é regra determinística, não modelo. Uma semente de
+treino e um único checkpoint avaliado. O teste agora foi visto, então rodadas futuras exigem novas famílias. Caminhos plausíveis (não executados):
+muito mais diversidade de esqueletos (a composicional ajudou pouco no dev), regularização/aumento de dados, mais capacidade, testes visíveis mais
+fortes no runtime para reduzir falsos "concluído". Nada disso foi ajustado no teste.
