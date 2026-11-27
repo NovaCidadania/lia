@@ -5,13 +5,18 @@ import hashlib, json, os, tempfile
 import torch
 
 from . import repair_modelo as M
+from .bpe import BPE
 from .checkpoint import CheckpointInvalido, sha256_arquivo
 
 
 def salvar(caminho, modelo, *, semente, hash_dataset, passo, historico, otimizador=None, extras=None):
-    d = {"formato": M.FORMATO, "versao_codigo": M.VERSAO, "tokenizer": M.identidade(), "semente": semente, "hash_dataset": hash_dataset,
+    bpe = getattr(modelo, "bpe", None)
+    extras = dict(extras or {})
+    if bpe is not None:
+        extras["bpe"] = [list(m) for m in bpe.merges]
+    d = {"formato": M.FORMATO, "versao_codigo": M.VERSAO, "tokenizer": bpe.identidade() if bpe else M.identidade(), "semente": semente, "hash_dataset": hash_dataset,
          "config": modelo.config, "passo": passo, "historico": historico, "pesos": {k: v.detach().cpu() for k, v in modelo.state_dict().items()},
-         "otimizador": otimizador, "extras": extras or {}}
+         "otimizador": otimizador, "extras": extras}
     dest = os.path.dirname(os.path.abspath(caminho)); os.makedirs(dest, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=dest, suffix=".tmp"); os.close(fd)
     try:
@@ -48,9 +53,11 @@ def carregar(caminho):
             raise CheckpointInvalido("checkpoint sem o campo %r" % k)
     if d["formato"] != M.FORMATO or d["versao_codigo"] != M.VERSAO:
         raise CheckpointInvalido("formato/versão de checkpoint desconhecidos: %r %r" % (d["formato"], d["versao_codigo"]))
-    if d["tokenizer"] != M.identidade():
+    bpe = BPE(d["extras"]["bpe"]) if d.get("extras", {}).get("bpe") else None
+    if d["tokenizer"] != (bpe.identidade() if bpe else M.identidade()):
         raise CheckpointInvalido("checkpoint de outro tokenizer")
     m = M.Localizador(d["config"])
+    m.bpe = bpe
     try:
         m.load_state_dict(d["pesos"], strict=True)
     except Exception as e:  # noqa: BLE001

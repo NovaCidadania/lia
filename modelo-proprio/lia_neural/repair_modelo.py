@@ -17,8 +17,25 @@ def identidade():
     return hashlib.sha256(("lia-repair-tokenizer/1;bytes+CLS,SEP,PAD;vocab=259;trocas=%s" % ",".join(RD.TOKS)).encode()).hexdigest()
 
 
-def codificar(pedido, codigo, cands, contexto=640):
-    """-> (ids, [(pos_ini, pos_fim)], [(tok_antigo, tok_novo)]) ou None se não cabe no contexto (nunca trunca em silêncio)."""
+def codificar(pedido, codigo, cands, contexto=640, bpe=None):
+    """-> (ids, [(pos_ini, pos_fim)], [(tok_antigo, tok_novo)]) ou None se não cabe no contexto (nunca trunca em silêncio).
+    Com `bpe`, a entrada é tokenizada em unidades de código/português (byte fallback) e os candidatos apontam para o 1º/último token do pré-token."""
+    if bpe is not None:
+        nv = bpe.n_vocab
+        pi, _ = bpe.codificar(pedido); ci, off = bpe.codificar(codigo)
+        cab = [nv] + pi + [nv + 1]
+        if len(cab) + len(ci) > contexto:
+            return None
+        faixa = {}
+        for i, o in enumerate(off):
+            a, _ = faixa.get(o, (i, i)); faixa[o] = (a, i)
+        pos = []
+        for c in cands:
+            f = faixa.get((c["c0"], c["c1"]))
+            if f is None:
+                return None
+            pos.append((len(cab) + f[0], len(cab) + f[1]))
+        return cab + ci, pos, [(RD.tokid(c["antigo"]), RD.tokid(c["novo"])) for c in cands]
     cab = [CLS] + list(pedido.encode()) + [SEP]
     ids = cab + list(codigo.encode())
     if len(ids) > contexto:
@@ -34,7 +51,7 @@ class Localizador(nn.Module):
         c = dict(CONFIG_PADRAO); c.update(config or {})
         self.config = c
         d = c["d"]
-        self.tok, self.pos = nn.Embedding(c["vocab"], d, padding_idx=PAD), nn.Embedding(c["contexto"], d)
+        self.tok, self.pos = nn.Embedding(c["vocab"], d, padding_idx=c.get("pad", PAD)), nn.Embedding(c["contexto"], d)
         cam = nn.TransformerEncoderLayer(d, c["cabecas"], c["ff"] * d, c["dropout"], activation="gelu", batch_first=True, norm_first=True)
         self.enc = nn.TransformerEncoder(cam, c["camadas"], enable_nested_tensor=False)
         self.norm = nn.LayerNorm(d)

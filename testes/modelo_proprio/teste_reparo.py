@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(RAIZ, "modelo-proprio"))
 import torch  # noqa: E402
 from lia_neural import repair_dados as RD, repair_modelo as M, repair_checkpoint as C, repair_treino as T, repair_avaliacao as A, repair_inferencia as I  # noqa: E402
 from lia_neural.checkpoint import CheckpointInvalido  # noqa: E402
+from lia_neural.bpe import BPE, pretokens  # noqa: E402
 
 falhas = total = 0
 
@@ -166,6 +167,38 @@ def teste_avaliacao():
     checar(j["oculto_ok"] and j["concluido"] and not j["falso_concluido"], "julgar: a troca inversa passa visível e oculto, sem falso concluído")
 
 
+def teste_bpe():
+    d, man = ds()
+    corpus = [e["pedido"] + "\n" + e["codigo"] for e in d["treino"]]
+    b = BPE.treinar(corpus, 300)
+    checar(0 < len(b.merges) <= 300 and b.n_vocab == 256 + len(b.merges), "BPE treina só no corpus dado e tem vocabulário = 256 bytes + merges")
+    txt = "def f(a, b):\n    return a >= b  # ação ✓ \u00e9\n"
+    ids, offs = b.codificar(txt)
+    def expandir(t):
+        return bytes([t]) if t < 256 else expandir(b.merges[t - 256][0]) + expandir(b.merges[t - 256][1])
+    checar(b"".join(expandir(t) for t in ids) == txt.encode() and len(ids) == len(offs), "round-trip exato (inclui acentos e símbolos: byte fallback)")
+    checar(len(b.codificar("zzqqxxyy ✓ 🙂")[0]) >= len("zzqqxxyy ✓ 🙂".encode()) // 4 and b.codificar("🙂")[0] == list("🙂".encode()), "texto nunca visto cai em bytes (sem token desconhecido)")
+    checar(b.identidade() == BPE(b.merges).identidade() and b.identidade() != BPE(b.merges[:-1]).identidade(), "identidade do tokenizador depende dos merges")
+    checar([w for w, _ in pretokens("a>=b+=1//2")] == ["a", ">=", "b", "+=", "1", "//", "2"], "operadores compostos e números são pré-tokens inteiros")
+    e = d["dev"][0]
+    c = M.codificar(e["pedido"], e["codigo"], e["candidatos"], 320, b)
+    ids2, pos, toks = c
+    ok = True
+    for (i, j), cand in zip(pos, e["candidatos"]):
+        ok = ok and 0 <= i <= j < len(ids2) and b"".join(expandir(t) for t in ids2[i:j + 1]) == e["codigo"][cand["c0"]:cand["c1"]].encode()
+    checar(ok, "cada candidata aponta exatamente para os tokens do trecho que a troca altera")
+    checar(M.codificar(e["pedido"], e["codigo"], e["candidatos"], 10, b) is None, "não cabe no contexto: devolve None (nunca trunca em silêncio)")
+    with tempfile.TemporaryDirectory() as t:
+        r = T.treinar(d, man, os.path.join(t, "o"), config=dict(d=32, camadas=2, cabecas=2), passos=6, lote_tam=4, avaliar_cada=3, paciencia=99, tokenizador="bpe", n_merges=200, log=lambda *_: None)
+        m, dd = C.carregar(r["checkpoint"])
+        checar(m.bpe is not None and m.bpe.merges and dd["tokenizer"] == m.bpe.identidade() and os.path.exists(r["checkpoint_melhor"]), "checkpoint BPE carrega com o tokenizador embutido; melhor.pt separado de ultimo.pt")
+        p1 = A.pontuar(m, e)
+        m2, _ = C.carregar(r["checkpoint"])
+        checar(p1 == A.pontuar(m2, e) and len(p1) == len(e["candidatos"]), "salvar → recarregar → mesmas pontuações (BPE)")
+        ult = torch.load(r["checkpoint"], map_location="cpu", weights_only=True)
+        checar(ult["passo"] == 6 and ult["otimizador"] is not None, "ultimo.pt guarda o estado real do fim do treino (retomável), não o melhor")
+
+
 def teste_cli():
     cli = os.path.join(RAIZ, "modelo-proprio", "lia-neural")
     with tempfile.TemporaryDirectory() as t:
@@ -193,7 +226,7 @@ def teste_cli():
 
 
 if __name__ == "__main__":
-    for f in (teste_candidatos, teste_dados, teste_modelo_e_checkpoint, teste_treino_e_retomada, teste_inferencia_e_adaptador, teste_avaliacao, teste_cli):
+    for f in (teste_candidatos, teste_dados, teste_modelo_e_checkpoint, teste_treino_e_retomada, teste_inferencia_e_adaptador, teste_avaliacao, teste_bpe, teste_cli):
         print("== " + f.__name__)
         f()
     print("\n%d testes, %d falhas" % (total, falhas))

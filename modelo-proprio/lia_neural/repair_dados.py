@@ -6,9 +6,11 @@ from . import dados as D
 from .familias import FAMILIAS, NOMES
 from .familias2 import FAMILIAS2
 from .familias3 import familias_composicionais
+from .familias4 import familias_expressao
 
 N_COMP = 200
-COMP = familias_composicionais(N_COMP)
+N_EXPR = 600
+COMP = familias_composicionais(N_COMP) + familias_expressao(N_EXPR)
 
 VERSAO = "lia-repair-dados/2"
 GRUPOS = [("+", "-", "*"), ("<", "<=", ">", ">="), ("+=", "-=", "*="), ("//", "%"), ("==", "!="), ("and", "or"), ("min", "max"), ("True", "False")]

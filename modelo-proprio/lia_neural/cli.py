@@ -70,7 +70,8 @@ def main(argv=None):
     rt.add_argument("--lr", type=float, default=1e-3); rt.add_argument("--max-segundos", type=float); rt.add_argument("--max-memoria-mb", type=int)
     rt.add_argument("--max-exemplos", type=int); rt.add_argument("--retomar"); rt.add_argument("--threads", type=int)
     rt.add_argument("--d", type=int); rt.add_argument("--camadas", type=int); rt.add_argument("--cabecas", type=int); rt.add_argument("--dropout", type=float)
-    rt.add_argument("--avaliar-cada", type=int, default=250); rt.add_argument("--paciencia", type=int, default=8)
+    rt.add_argument("--tokenizador", default="bytes", choices=["bytes", "bpe"]); rt.add_argument("--merges", type=int, default=1500)
+    rt.add_argument("--contexto", type=int); rt.add_argument("--avaliar-cada", type=int, default=250); rt.add_argument("--paciencia", type=int, default=8)
     ra = sub.add_parser("reparo-avaliar"); ra.add_argument("--dados", required=True); ra.add_argument("--checkpoint", required=True)
     ra.add_argument("--particao", default="dev", choices=["dev", "teste"]); ra.add_argument("--n", type=int); ra.add_argument("--saida", required=True)
     ra.add_argument("--threads", type=int)
@@ -111,10 +112,10 @@ def main(argv=None):
         if r.cmd == "reparo-treinar":
             from .repair_treino import treinar
             ds, man = carregar_dados_reparo(r.dados)
-            cfg = {k: v for k, v in (("d", r.d), ("camadas", r.camadas), ("cabecas", r.cabecas), ("dropout", r.dropout)) if v is not None}
+            cfg = {k: v for k, v in (("d", r.d), ("camadas", r.camadas), ("cabecas", r.cabecas), ("dropout", r.dropout), ("contexto", r.contexto)) if v is not None}
             res = treinar(ds, man, r.saida, config=cfg, semente=r.semente, passos=r.passos, lote_tam=r.lote, lr=r.lr, max_segundos=r.max_segundos,
                           max_memoria_mb=r.max_memoria_mb, max_exemplos=r.max_exemplos, retomar=r.retomar, threads=r.threads,
-                          avaliar_cada=r.avaliar_cada, paciencia=r.paciencia)
+                          avaliar_cada=r.avaliar_cada, paciencia=r.paciencia, tokenizador=r.tokenizador, n_merges=r.merges)
             print(json.dumps(res, ensure_ascii=False, default=str, indent=1))
             return 0
         if r.cmd == "reparo-avaliar":

@@ -11,10 +11,10 @@ K_LACO = 5
 
 @torch.no_grad()
 def pontuar(modelo, ex):
-    c = M.codificar(ex["pedido"], ex["codigo"], ex["candidatos"], modelo.config["contexto"])
+    c = M.codificar(ex["pedido"], ex["codigo"], ex["candidatos"], modelo.config["contexto"], getattr(modelo, "bpe", None))
     if c is None:
         return None
-    ids, lens, pos, toks, mask, _ = T.lote([(c, 0)])
+    ids, lens, pos, toks, mask, _ = T.lote([(c, 0)], modelo.config.get("pad", M.PAD))
     modelo.eval()
     return modelo(ids, lens, pos, toks, mask)[0].tolist()
 
@@ -47,6 +47,7 @@ def julgar(ex, i, esperado):
 def avaliar_condicoes(exemplos, modelo_treinado, semente_aleatorio=12345, log=print):
     torch.manual_seed(semente_aleatorio)
     aleatorio = M.Localizador(modelo_treinado.config)
+    aleatorio.bpe = getattr(modelo_treinado, "bpe", None)
     ordens = {"aleatorio": lambda e: ordem_modelo(aleatorio, e), "treinado": lambda e: ordem_modelo(modelo_treinado, e), "fonte_b0": ordem_fonte}
     rel = {}
     prep = []

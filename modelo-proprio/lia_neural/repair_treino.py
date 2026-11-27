@@ -6,16 +6,17 @@ import torch
 import torch.nn.functional as F
 
 from . import repair_checkpoint as C, repair_modelo as M
+from .bpe import BPE
 
 
 def rss_mb():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
-def preparar(exemplos, contexto):
+def preparar(exemplos, contexto, bpe=None):
     out = []
     for e in exemplos:
-        c = M.codificar(e["pedido"], e["codigo"], e["candidatos"], contexto)
+        c = M.codificar(e["pedido"], e["codigo"], e["candidatos"], contexto, bpe)
         if c:
             out.append((c, e["alvo"]))
     if not out:
@@ -23,9 +24,9 @@ def preparar(exemplos, contexto):
     return out
 
 
-def lote(itens):
+def lote(itens, pad=M.PAD):
     b = len(itens); nc = max(len(c[1]) for c, _ in itens); nt = max(len(c[0]) for c, _ in itens)
-    ids = torch.full((b, nt), M.PAD, dtype=torch.long); lens = torch.zeros(b, dtype=torch.long)
+    ids = torch.full((b, nt), pad, dtype=torch.long); lens = torch.zeros(b, dtype=torch.long)
     pos = torch.zeros((b, nc, 2), dtype=torch.long); toks = torch.zeros((b, nc, 2), dtype=torch.long)
     mask = torch.zeros((b, nc), dtype=torch.bool); alvo = torch.zeros(b, dtype=torch.long)
     for i, ((x, p, t), a) in enumerate(itens):
@@ -38,7 +39,7 @@ def lote(itens):
 def metricas(modelo, itens, tam=32):
     modelo.eval(); n = perda = top1 = top3 = 0
     for p in range(0, len(itens), tam):
-        ids, lens, pos, toks, mask, alvo = lote(itens[p:p + tam])
+        ids, lens, pos, toks, mask, alvo = lote(itens[p:p + tam], modelo.config.get("pad", M.PAD))
         s = modelo(ids, lens, pos, toks, mask)
         perda += float(F.cross_entropy(s, alvo, reduction="sum")); n += len(alvo)
         rk = s.argsort(dim=1, descending=True)
@@ -48,7 +49,7 @@ def metricas(modelo, itens, tam=32):
 
 
 def treinar(ds, man, saida, *, config=None, semente=1, passos=4000, lote_tam=16, lr=1e-3, warmup=150, avaliar_cada=250, paciencia=8,
-            max_segundos=None, max_memoria_mb=None, max_exemplos=None, retomar=None, threads=None, log=print):
+            max_segundos=None, max_memoria_mb=None, max_exemplos=None, retomar=None, threads=None, tokenizador="bytes", n_merges=1500, log=print):
     if threads:
         torch.set_num_threads(threads)
     torch.manual_seed(semente); os.makedirs(saida, exist_ok=True)
@@ -59,20 +60,26 @@ def treinar(ds, man, saida, *, config=None, semente=1, passos=4000, lote_tam=16,
             raise RuntimeError("checkpoint treinado com outro dataset")
         inicio, hist, semente, est = ant["passo"], ant["historico"], ant["semente"], ant.get("otimizador")
     else:
+        config = dict(config or {})
+        bpe = None
+        if tokenizador == "bpe":
+            bpe = BPE.treinar([e["pedido"] + "\n" + e["codigo"] for e in ds["treino"]], n_merges)      # só o corpus de TREINO
+            config.update(vocab=bpe.n_vocab + 3, pad=bpe.n_vocab + 2, contexto=config.get("contexto", 320))
         modelo, inicio, hist, est = M.Localizador(config), 0, [], None
+        modelo.bpe = bpe
     ctx = modelo.config["contexto"]
-    treino = preparar(ds["treino"][:max_exemplos] if max_exemplos else ds["treino"], ctx)
-    dev = preparar(ds["dev"], ctx)
+    treino = preparar(ds["treino"][:max_exemplos] if max_exemplos else ds["treino"], ctx, modelo.bpe)
+    dev = preparar(ds["dev"], ctx, modelo.bpe)
     opt = torch.optim.AdamW(modelo.parameters(), lr=lr, betas=(0.9, 0.98), weight_decay=0.05)
     if est:
         opt.load_state_dict(est)
     taxa = lambda p: lr * (p + 1) / warmup if p < warmup else lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * (p - warmup) / max(1, passos - warmup))))  # noqa: E731
-    melhor, ruim, motivo, passo_f, janela, t0 = float("inf"), 0, "passos", inicio, [], time.time()
+    melhor, ruim, motivo, passo_f, janela, t0 = (-1.0, float("inf")), 0, "passos", inicio, [], time.time()
     modelo.train()
     with open(os.path.join(saida, "treino.jsonl"), "a") as arq:
         for p in range(inicio, passos):
             rng = random.Random("%s|%s" % (semente, p))
-            ids, lens, pos, toks, mask, alvo = lote([treino[rng.randrange(len(treino))] for _ in range(lote_tam)])
+            ids, lens, pos, toks, mask, alvo = lote([treino[rng.randrange(len(treino))] for _ in range(lote_tam)], modelo.config.get("pad", M.PAD))
             for g in opt.param_groups:
                 g["lr"] = taxa(p)
             opt.zero_grad(set_to_none=True)
@@ -86,9 +93,11 @@ def treinar(ds, man, saida, *, config=None, semente=1, passos=4000, lote_tam=16,
                 reg = {"passo": passo_f, "perda_treino": round(sum(janela) / len(janela), 4), "perda_dev": round(m["perda"], 4),
                        "top1_dev": round(m["top1"], 4), "recall3_dev": round(m["recall3"], 4), "t": round(time.time() - t0, 1), "rss_mb": round(rss_mb())}
                 janela = []; hist.append(reg); arq.write(json.dumps(reg) + "\n"); arq.flush(); log(json.dumps(reg))
-                if m["perda"] < melhor - 1e-4:
-                    melhor, ruim = m["perda"], 0
-                    C.salvar(melhor_p, modelo, semente=semente, hash_dataset=man["hash_conjunto"], passo=passo_f, historico=hist, extras={"perda_dev": melhor})
+                # seleção por ACURÁCIA de dev (top-1; desempate: menor perda). A perda de dev engana: a rede fica confiante nos erros.
+                if m["top1"] > melhor[0]:
+                    melhor, ruim = (m["top1"], m["perda"]), 0
+                    C.salvar(melhor_p, modelo, semente=semente, hash_dataset=man["hash_conjunto"], passo=passo_f, historico=hist,
+                             extras={"top1_dev": m["top1"], "perda_dev": m["perda"]})
                 else:
                     ruim += 1
                     if ruim >= paciencia:
@@ -99,9 +108,8 @@ def treinar(ds, man, saida, *, config=None, semente=1, passos=4000, lote_tam=16,
                 motivo = "memoria"; break
             if max_segundos and time.time() - t0 >= max_segundos:
                 motivo = "tempo"; break
-    if os.path.exists(melhor_p):                      # promove o melhor em DEV
-        modelo, mm = C.carregar(melhor_p); passo_f = mm["passo"]
-    meta = C.salvar(ultimo, modelo, semente=semente, hash_dataset=man["hash_conjunto"], passo=passo_f, historico=hist,
-                    extras={"motivo_parada": motivo, "melhor_perda_dev": melhor})
-    return {"checkpoint": ultimo, "passo_final": passo_f, "motivo_parada": motivo, "parametros": modelo.n_parametros(), "dev": metricas(modelo, dev),
+    # ultimo.pt = estado REAL do fim do treino (retomável); melhor.pt = melhor acurácia de dev (o que se avalia/usa). Nada é sobrescrito.
+    meta = C.salvar(ultimo, modelo, semente=semente, hash_dataset=man["hash_conjunto"], passo=passo_f, historico=hist, otimizador=opt.state_dict(),
+                    extras={"motivo_parada": motivo, "melhor_top1_dev": melhor[0]})
+    return {"checkpoint": ultimo, "checkpoint_melhor": melhor_p, "passo_final": passo_f, "motivo_parada": motivo, "parametros": modelo.n_parametros(), "dev": metricas(modelo, dev),
             "segundos": round(time.time() - t0, 1), "memoria_max_mb": round(rss_mb()), "meta": meta}
